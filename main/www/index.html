@@ -1,0 +1,881 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1419">
+<title>Free Harvest</title>
+<style>
+  :root{
+    --bg:#0e1216; --surface:#171d24; --surface2:#212a33; --line:#2c3742;
+    --fg:#e8eef4; --muted:#93a1b0; --accent:#4ea1ff; --accent-ink:#04121f;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --r:14px; --tap:52px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  body{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
+
+  header{position:sticky; top:0; z-index:20; background:rgba(14,18,22,.92);
+    backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
+    padding:14px 16px calc(12px); display:flex; align-items:center; gap:12px}
+  header h1{font-size:17px; margin:0; font-weight:650; letter-spacing:.2px}
+  header .logo{width:26px; height:26px; flex:none; display:block}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--bad);flex:none}
+  .dot.on{background:var(--ok); box-shadow:0 0 0 4px rgba(63,185,80,.15)}
+  header .sub{margin-left:auto; font-size:12px; color:var(--muted); text-align:right}
+
+  main{padding:16px; max-width:720px; margin:0 auto}
+  .view{display:none} .view.active{display:block}
+
+  .card{background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--r); padding:16px; margin-bottom:14px}
+  .card h2{margin:0 0 12px; font-size:13px; text-transform:uppercase;
+    letter-spacing:.6px; color:var(--muted); font-weight:650}
+
+  /* hero state */
+  .hero{text-align:center; padding:22px 16px}
+  .hero .stage{font-size:26px; font-weight:700; margin:2px 0 4px}
+  .hero .sub{color:var(--muted); font-size:14px}
+  .ring{--p:0; width:150px;height:150px;margin:8px auto 14px; border-radius:50%;
+    background:conic-gradient(var(--accent) calc(var(--p)*1%), var(--surface2) 0);
+    display:grid; place-items:center}
+  .ring>div{width:120px;height:120px;border-radius:50%;background:var(--surface);
+    display:grid;place-items:center}
+  .ring b{font-size:24px} .ring small{color:var(--muted);font-size:12px}
+
+  /* metric grid */
+  .metrics{display:grid; grid-template-columns:repeat(2,1fr); gap:10px}
+  .metric{background:var(--surface2); border-radius:12px; padding:14px}
+  .metric .k{font-size:12px; color:var(--muted); margin-bottom:4px}
+  .metric .v{font-size:22px; font-weight:650; font-variant-numeric:tabular-nums}
+  .metric .u{font-size:13px; color:var(--muted); font-weight:400}
+
+  /* buttons */
+  button,.btn{min-height:var(--tap); border-radius:12px; border:1px solid var(--line);
+    background:var(--surface2); color:var(--fg); font-size:15px; font-weight:600;
+    padding:0 16px; cursor:pointer; width:100%; display:inline-flex;
+    align-items:center; justify-content:center; gap:8px}
+  button:active{transform:scale(.985)}
+  button.primary{background:var(--accent); color:var(--accent-ink); border-color:transparent}
+  button.ghost{background:transparent}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  .row{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+  .row.one{grid-template-columns:1fr}
+
+  /* form fields - label ABOVE input, full width (fixes prior alignment issue) */
+  .field{margin-bottom:14px}
+  .field label{display:block; font-size:13px; color:var(--muted); margin-bottom:6px}
+  .field input,.field select{width:100%; min-height:var(--tap); padding:0 14px;
+    background:var(--bg); color:var(--fg); border:1px solid var(--line);
+    border-radius:12px; font-size:16px}
+  .field input:focus,.field select:focus{outline:2px solid var(--accent); outline-offset:0}
+  .hint{font-size:12.5px; color:var(--muted); margin-top:8px; line-height:1.5}
+
+  /* status pills / notices */
+  .pill{display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px;
+    font-weight:650; background:var(--surface2); color:var(--muted)}
+  .pill.ok{background:rgba(63,185,80,.16); color:var(--ok)}
+  .pill.bad{background:rgba(248,81,73,.16); color:var(--bad)}
+  .pill.warn{background:rgba(210,153,34,.16); color:var(--warn)}
+  .notice{border-radius:12px; padding:12px 14px; font-size:14px; margin-top:12px; line-height:1.5}
+  .notice.ok{background:rgba(63,185,80,.12); color:var(--ok)}
+  .notice.bad{background:rgba(248,81,73,.12); color:var(--bad)}
+  .notice.info{background:var(--surface2); color:var(--muted)}
+  .notice:empty{display:none}
+
+  /* settings list */
+  .list{display:flex; flex-direction:column; gap:2px}
+  .item{display:flex; align-items:center; gap:12px; min-height:var(--tap);
+    padding:10px 4px; border-bottom:1px solid var(--line); cursor:pointer}
+  .item:last-child{border-bottom:0}
+  .item .t{flex:1} .item .t b{display:block; font-weight:600; font-size:15px}
+  .item .t span{font-size:12.5px; color:var(--muted)}
+  .item .chev{color:var(--muted)}
+
+  /* tables / logs */
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px}
+  .scroll{max-height:52vh; overflow:auto; -webkit-overflow-scrolling:touch}
+  table{width:100%; border-collapse:collapse}
+  th,td{text-align:left; padding:7px 8px; border-bottom:1px solid var(--line);
+    vertical-align:top}
+  th{font-size:11px; text-transform:uppercase; color:var(--muted); font-weight:600}
+  pre.log{margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px;
+    color:var(--muted); line-height:1.55}
+
+  /* bottom nav */
+  nav{position:fixed; left:0; right:0; bottom:0; z-index:30; display:flex;
+    background:rgba(23,29,36,.97); backdrop-filter:blur(8px);
+    border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom)}
+  nav button{flex:1; min-height:64px; border:0; border-radius:0; background:none;
+    color:var(--muted); font-size:11.5px; font-weight:600; flex-direction:column; gap:3px}
+  nav button.active{color:var(--accent)}
+  nav button .ic{font-size:20px; line-height:1}
+
+  .back{display:inline-flex; align-items:center; gap:6px; color:var(--accent);
+    font-weight:600; font-size:14px; background:none; border:0; width:auto;
+    min-height:40px; padding:0; margin-bottom:8px; justify-content:flex-start}
+  h3.sec{font-size:19px; margin:2px 0 14px; font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <!-- Free Harvest leaf mark -->
+  <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+    <path d="M27 4C13 4 6 10 6 20c0 3 1 5 1 5s3-9 12-13c0 0-7 5-9 14 3 2 6 2 9 1
+             9-3 8-16 8-23z" fill="#e5484d"/>
+    <path d="M7 28c0-6 3-11 8-14" stroke="#e5484d" stroke-width="2"
+          stroke-linecap="round" fill="none" opacity=".75"/>
+  </svg>
+  <h1 id="hdr">Free Harvest</h1>
+  <span id="dot" class="dot"></span>
+  <div class="sub"><span id="hdrsub">connecting…</span></div>
+</header>
+
+<main>
+
+  <!-- ============== ONBOARDING (only when not set up) ============== -->
+  <section id="v-setup" class="view">
+    <div class="card">
+      <h2>Setup</h2>
+      <h3 class="sec" style="margin-top:0">Let's get connected</h3>
+      <div id="stepwifi" class="item" style="cursor:default">
+        <span id="s1ic">1️⃣</span>
+        <div class="t"><b>Join your Wi-Fi network</b>
+          <span id="s1sub">Not connected yet</span></div>
+      </div>
+      <div id="stepdryer" class="item" style="cursor:default">
+        <span id="s2ic">2️⃣</span>
+        <div class="t"><b>Plug into the freeze dryer</b>
+          <span id="s2sub">Waiting for the dryer's USB port</span></div>
+      </div>
+      <div class="hint">Use the <b>USB</b> port on the adapter (not the UART one).
+        Once both steps are green this screen is replaced by your dashboard.</div>
+    </div>
+
+    <div class="card" id="setupwifi">
+      <h2>Wi-Fi</h2>
+      <div class="field">
+        <label for="ssidsel">Network</label>
+        <select id="ssidsel"><option value="">scanning…</option></select>
+      </div>
+      <div class="field">
+        <label for="ssid">Network name (SSID)</label>
+        <input id="ssid" placeholder="MyNetwork" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="pw">Password</label>
+        <input id="pw" type="password" placeholder="••••••••" autocomplete="off">
+      </div>
+      <div class="row">
+        <button id="rescan" class="ghost">Rescan</button>
+        <button id="save" class="primary">Connect</button>
+      </div>
+      <div id="wifistatus" class="notice"></div>
+    </div>
+  </section>
+
+  <!-- ============== DASHBOARD (phase-gated) ============== -->
+  <section id="v-dash" class="view">
+    <div class="card hero">
+      <div class="ring" id="ring"><div>
+        <div style="text-align:center">
+          <b id="ringval">–</b><br><small id="ringlab">idle</small>
+        </div></div></div>
+      <div class="stage" id="stage">Connecting…</div>
+      <div class="sub" id="stagesub">Waiting for the freeze dryer</div>
+    </div>
+
+    <!-- phase-specific instructions + valid options -->
+    <div class="card" id="phasecard">
+      <h2 id="phasehead">Next step</h2>
+      <div id="phasebody"></div>
+      <div id="phaseopts" class="list" style="margin-top:8px"></div>
+      <div class="hint" id="phasenote"></div>
+    </div>
+
+    <div class="card">
+      <h2>Live readings</h2>
+      <div class="metrics">
+        <div class="metric"><div class="k">Temperature</div>
+          <div class="v"><span id="m-temp">–</span><span class="u"> °F</span></div></div>
+        <div class="metric"><div class="k">Pressure (raw)</div>
+          <div class="v"><span id="m-press">–</span></div></div>
+        <div class="metric"><div class="k">Batch elapsed</div>
+          <div class="v"><span id="m-elapsed">–</span></div></div>
+        <div class="metric"><div class="k">Mode</div>
+          <div class="v" style="font-size:18px"><span id="m-mode">–</span></div></div>
+      </div>
+      <div class="hint" id="lastseen">Waiting for data from the dryer…</div>
+    </div>
+
+    <div class="card">
+      <h2>Actions</h2>
+      <div class="row">
+        <button data-cmd="REQSTAT">🔄 Refresh now</button>
+        <button data-cmd="BEEP">🔔 Beep</button>
+      </div>
+      <div id="cmdstatus" class="notice"></div>
+    </div>
+  </section>
+
+  <!-- ============== SETTINGS (menu) ============== -->
+  <section id="v-set" class="view">
+    <div class="card">
+      <h2>Settings</h2>
+      <div class="list">
+        <div class="item" data-go="s-batch"><span>🏷️</span>
+          <div class="t"><b>Batch</b><span>Name the current batch</span></div>
+          <span class="chev">›</span></div>
+        <div class="item" data-go="s-wifi"><span>📶</span>
+          <div class="t"><b>Wi-Fi</b><span id="set-wifi-sub">–</span></div>
+          <span class="chev">›</span></div>
+        <div class="item" data-go="s-mqtt"><span>🏠</span>
+          <div class="t"><b>Home Assistant / MQTT</b><span id="set-mqtt-sub">–</span></div>
+          <span class="chev">›</span></div>
+        <div class="item" data-go="s-frames"><span>📡</span>
+          <div class="t"><b>Live data feed</b><span>Frames &amp; verbs from the dryer</span></div>
+          <span class="chev">›</span></div>
+        <div class="item" data-go="s-fw"><span>⬆️</span>
+          <div class="t"><b>Firmware update</b><span>Install a new .bin over Wi-Fi</span></div>
+          <span class="chev">›</span></div>
+        <div class="item" data-go="s-debug"><span>🛠️</span>
+          <div class="t"><b>Debug &amp; advanced</b><span>Logs, clock, raw commands</span></div>
+          <span class="chev">›</span></div>
+        <div class="item" data-go="s-about"><span>ℹ️</span>
+          <div class="t"><b>About</b><span id="set-ver-sub">Free Harvest</span></div>
+          <span class="chev">›</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: about ---------- -->
+  <section id="v-s-about" class="view">
+    <button class="back" data-back>‹ Settings</button>
+    <div class="card" style="text-align:center">
+      <svg viewBox="0 0 32 32" style="width:64px;height:64px;margin:6px auto 4px;display:block">
+        <path d="M27 4C13 4 6 10 6 20c0 3 1 5 1 5s3-9 12-13c0 0-7 5-9 14 3 2 6 2 9 1
+                 9-3 8-16 8-23z" fill="#e5484d"/>
+        <path d="M7 28c0-6 3-11 8-14" stroke="#e5484d" stroke-width="2"
+              stroke-linecap="round" fill="none" opacity=".75"/>
+      </svg>
+      <div style="font-size:22px;font-weight:700">Free Harvest</div>
+      <div class="pill" style="margin-top:8px">version <span id="ver">0.1</span></div>
+      <div class="hint" style="text-align:left;margin-top:16px">
+        Open-source monitoring and configuration for Harvest Right freeze dryers,
+        running entirely on an ESP32-S3. Works standalone (this web app) or as an
+        MQTT device for Home Assistant.<br><br>
+        <b>Quote this version number</b> when reporting an issue.<br><br>
+        <span class="mono" id="abouthw">–</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: batch ---------- -->
+  <section id="v-s-batch" class="view">
+    <button class="back" data-back>‹ Settings</button>
+    <div class="card">
+      <h2>Batch</h2>
+      <div class="field">
+        <label for="bname">Batch name</label>
+        <input id="bname" placeholder="e.g. Strawberries">
+      </div>
+      <button class="primary" id="bnamesave">Save batch name</button>
+      <div id="bnamestatus" class="notice"></div>
+      <div class="hint">Sent to the dryer as <span class="mono">SETBNAME</span>.
+        Naming a batch does not start it.</div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: wifi ---------- -->
+  <section id="v-s-wifi" class="view">
+    <button class="back" data-back>‹ Settings</button>
+    <div class="card">
+      <h2>Wi-Fi</h2>
+      <div id="wifiinfo" class="notice info"></div>
+      <div class="field">
+        <label for="ssidsel2">Network</label>
+        <select id="ssidsel2"><option value="">tap Rescan</option></select>
+      </div>
+      <div class="field">
+        <label for="ssid2">Network name (SSID)</label>
+        <input id="ssid2" placeholder="MyNetwork" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="pw2">Password</label>
+        <input id="pw2" type="password" placeholder="••••••••" autocomplete="off">
+      </div>
+      <div class="row">
+        <button id="rescan2" class="ghost">Rescan</button>
+        <button id="save2" class="primary">Save &amp; connect</button>
+      </div>
+      <div id="wifistatus2" class="notice"></div>
+      <button id="forget" class="ghost" style="margin-top:10px">Forget network</button>
+      <div class="hint">The setup hotspot only stays open for 5 minutes after a
+        failed connection, then shuts off until the adapter is rebooted.</div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: mqtt ---------- -->
+  <section id="v-s-mqtt" class="view">
+    <button class="back" data-back>‹ Settings</button>
+    <div class="card">
+      <h2>Home Assistant / MQTT</h2>
+      <div id="mqttinfo" class="notice info"></div>
+      <div class="field">
+        <label for="mqtthost">Broker host</label>
+        <input id="mqtthost" placeholder="192.168.1.10" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="mqttport">Port</label>
+        <input id="mqttport" value="1883" inputmode="numeric">
+      </div>
+      <div class="field">
+        <label for="mqttuser">Username <span style="opacity:.6">(optional)</span></label>
+        <input id="mqttuser" placeholder="mqtt-user" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="mqttpass">Password <span style="opacity:.6">(optional)</span></label>
+        <input id="mqttpass" type="password" placeholder="••••••••" autocomplete="off">
+      </div>
+      <button id="mqttsave" class="primary">Save &amp; connect</button>
+      <div id="mqttstatus" class="notice"></div>
+      <div class="hint">Point this at your Mosquitto broker (often the Home
+        Assistant machine's IP). The dryer then appears in HA automatically via
+        MQTT discovery. If it won't connect, open
+        <b>Debug &amp; advanced → Device log</b> — the exact error is logged there.</div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: frames ---------- -->
+  <section id="v-s-frames" class="view">
+    <button class="back" data-back>‹ Settings</button>
+    <div class="card">
+      <h2>Verbs seen</h2>
+      <div class="scroll"><table><tbody id="verbbody"></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>Live frames</h2>
+      <div class="row">
+        <button id="pause" class="ghost">Pause</button>
+        <button id="dl" class="ghost">Download log</button>
+      </div>
+      <div class="scroll" style="margin-top:10px"><table>
+        <thead><tr><th style="width:52px">#</th><th style="width:72px">verb</th><th>fields</th></tr></thead>
+        <tbody id="logbody" class="mono"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: firmware ---------- -->
+  <section id="v-s-fw" class="view">
+    <button class="back" data-back>‹ Settings</button>
+    <div class="card">
+      <h2>Firmware update</h2>
+      <div class="field">
+        <label for="otafile">Firmware file (.bin)</label>
+        <input id="otafile" type="file" accept=".bin">
+      </div>
+      <button id="otago" class="primary">Upload &amp; install</button>
+      <div id="otabar" style="height:8px;background:var(--bg);border-radius:4px;
+           margin-top:12px;overflow:hidden;display:none">
+        <div id="otafill" style="height:100%;width:0;background:var(--accent);transition:width .2s"></div>
+      </div>
+      <div id="otastatus" class="notice"></div>
+      <div class="hint">Writes to the spare slot and verifies before switching.
+        A bad file is rejected and the current firmware keeps running.</div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: debug ---------- -->
+  <section id="v-s-debug" class="view">
+    <button class="back" data-back>‹ Settings</button>
+
+    <div class="card">
+      <h2>Device log</h2>
+      <div class="row"><button id="logrefresh" class="ghost">Refresh</button>
+        <button id="logauto" class="ghost">Auto: off</button></div>
+      <div class="scroll" style="margin-top:10px"><pre class="log" id="logbox">(tap Refresh)</pre></div>
+      <div class="hint">Live log from the adapter — the first place to look when
+        Wi-Fi or MQTT won't connect.</div>
+    </div>
+
+    <div class="card">
+      <h2>Clock</h2>
+      <button id="setdate" class="primary">Set dryer clock to this device's time</button>
+      <div id="datestatus" class="notice"></div>
+      <div class="hint">Sends <span class="mono">SETDATE</span> with your browser's
+        current date/time.</div>
+    </div>
+
+    <div class="card">
+      <h2>Raw command</h2>
+      <div class="field">
+        <label for="rawverb">Command</label>
+        <select id="rawverb">
+          <optgroup label="Read-only">
+            <option>REQSTAT</option><option>REQSYSINF</option><option>REQCFG</option>
+            <option>REQPREF</option><option>REQBATSUM</option><option>REQTSUM</option>
+            <option>REQTHST</option><option>STATUS</option><option>STATE</option>
+            <option>WIFIINFO</option><option>SERIAL</option>
+          </optgroup>
+          <optgroup label="Benign">
+            <option>BEEP</option><option>CLICK</option>
+          </optgroup>
+        </select>
+      </div>
+      <div class="field">
+        <label for="rawargs">Arguments <span style="opacity:.6">(optional, comma-separated)</span></label>
+        <input id="rawargs" placeholder="" class="mono">
+      </div>
+      <button id="rawsend">Send command</button>
+      <div id="rawstatus" class="notice"></div>
+      <div class="hint">Only commands that read data or beep are offered.
+        Hardware-control verbs (duty cycle, heater/pump, reboot) are blocked in
+        firmware and cannot be sent from this app.</div>
+    </div>
+
+    <div class="card">
+      <h2>Adapter</h2>
+      <div class="metrics">
+        <div class="metric"><div class="k">Frames in</div><div class="v" id="d-in">0</div></div>
+        <div class="metric"><div class="k">Frames out</div><div class="v" id="d-out">0</div></div>
+        <div class="metric"><div class="k">Unknown verbs</div><div class="v" id="d-unk">0</div></div>
+        <div class="metric"><div class="k">Bad frames</div><div class="v" id="d-bad">0</div></div>
+      </div>
+      <div class="hint" id="d-ids"></div>
+    </div>
+  </section>
+
+</main>
+
+<nav>
+  <button id="nav-dash" class="active" data-view="v-dash"><span class="ic">📊</span>Dashboard</button>
+  <button id="nav-set" data-view="v-set"><span class="ic">⚙️</span>Settings</button>
+</nav>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let lastSeq=0, paused=false, setupDone=false, logAuto=false, lastState=null;
+
+/* ---------- view routing ---------- */
+function show(id){
+  $$(".view").forEach(v=>v.classList.remove("active"));
+  const el=document.getElementById("v-"+id) || document.getElementById(id);
+  if(el) el.classList.add("active");
+  window.scrollTo(0,0);
+}
+$$("nav button").forEach(b=>b.addEventListener("click",()=>{
+  $$("nav button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); show(b.dataset.view);
+}));
+$$(".item[data-go]").forEach(it=>it.addEventListener("click",()=>show("v-"+it.dataset.go)));
+$$("[data-back]").forEach(b=>b.addEventListener("click",()=>show("v-set")));
+
+/* ---------- helpers ---------- */
+const esc=s=>String(s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+function hhmmss(sec){
+  sec=Math.max(0,parseInt(sec||0,10));
+  const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60), s=sec%60;
+  return h? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+          : `${m}:${String(s).padStart(2,"0")}`;
+}
+function note(el,msg,kind){ el.className="notice "+(kind||"info"); el.innerHTML=msg; }
+
+/*
+ * Phase definitions, mirroring the Harvest Right owner's manual screens.
+ * `opts` are the choices the manual offers at that point. Every one is a
+ * PANEL action - the dryer's firmware exposes no remote flow-control command,
+ * so we tell the user exactly which button to press on the machine instead of
+ * showing a button here that would do nothing.
+ *   danger:true  -> shown in red (ends/alters the run)
+ */
+const PHASE = {
+  0:{ /* UNKNOWN */
+    head:"Waiting for data",
+    body:"Connected to the adapter, but the dryer hasn't reported a status "+
+         "frame yet. This resolves on its own within about 15 seconds.",
+    opts:[], note:"" },
+  1:{ /* IDLE */
+    head:"Ready to start a batch",
+    body:"The dryer is idle. Choose a mode and press <b>START</b> on the "+
+         "machine's touchscreen to begin.",
+    opts:[
+      {k:"START",   d:"Automatic mode — best for most foods"},
+      {k:"CUSTOM",  d:"Set your own freeze/dry temperatures"},
+      {k:"CANDY",   d:"Candy mode with pre-warming"}],
+    note:"You can name the batch from Settings → Batch before starting." },
+  2:{ /* PREPARING */
+    head:"Preparing the freeze dryer",
+    body:"The chamber is pre-cooling. <b>Now is the time to load your trays</b> — "+
+         "fill them level, not above the tray tops. If using pre-frozen food, "+
+         "freeze it for 48 hours first.",
+    opts:[
+      {k:"CANCEL", d:"Abort before the batch begins", danger:true}],
+    note:"When the countdown ends the dryer will prompt you to load food and "+
+         "close the drain valve." },
+  3:{ /* TRANSITION */
+    head:"Starting the batch",
+    body:"Load the trays, <b>close the door and latch it firmly</b>, and "+
+         "<b>close the drain valve</b> (bottom right of the dryer). Then press "+
+         "<b>CONTINUE</b> on the machine.",
+    opts:[
+      {k:"CONTINUE",  d:"Begin freezing (press on the dryer)"},
+      {k:"END BATCH", d:"Terminate and start over", danger:true}],
+    note:"Check the door is sealed against the gasket before continuing." },
+  4:{ /* RUNNING */
+    head:"Batch in progress",
+    body:"Freezing and drying run automatically — no action needed. The dryer "+
+         "advances through freezing, drying, and extra dry time on its own.",
+    opts:[
+      {k:"END BATCH", d:"Terminate the batch early", danger:true}],
+    note:"When drying finishes the dryer shows PROCESS COMPLETE and asks you "+
+         "to open the drain valve to vent." },
+  5:{ /* DIAGNOSTICS */
+    head:"Diagnostics screen",
+    body:"The dryer is showing its diagnostics/test screen.",
+    opts:[], note:"Readings here are raw sensor values." },
+  6:{ /* RECIPE */
+    head:"Recipe settings",
+    body:"The dryer is displaying custom recipe parameters "+
+         "(temperatures and times).",
+    opts:[], note:"Change these on the machine's CUSTOM screen." },
+};
+
+/*
+ * Reference-only: the manual's PROCESS COMPLETE options. We cannot yet detect
+ * that phase from the wire (never captured), so it is shown as guidance rather
+ * than claimed as live state.
+ */
+const COMPLETE_HELP =
+  "<b>When the batch completes</b>, the dryer will show “Open Drain Valve to "+
+  "Vent”. Check the drain hose isn't sitting in water first. Then it offers: "+
+  "<b>MORE DRY TIME</b> (if food is still moist), <b>WARM TRAYS</b> / "+
+  "<b>STOP WARMING</b>, and <b>DEFROST</b> or <b>NO DEFROST</b>. Use DEFROST "+
+  "if you plan to run another batch right away.";
+
+/* ---------- dashboard (phase-gated) ---------- */
+function paintDash(st){
+  const linked = st.link === "up";
+  const have   = st.have_tel;
+  const phase  = linked && have ? st.phase : (linked ? 0 : -1);
+  /* Trust the device's phase, not raw elapsed: the dryer keeps the previous
+     batch's elapsed value when idle, so elapsed>0 does NOT mean running. */
+  const prep   = phase === 2;                 /* HR_PHASE_PREPARING */
+  const running= phase === 4;                 /* HR_PHASE_RUNNING   */
+
+  /* hero */
+  $("#stage").textContent = !linked ? "Dryer not connected"
+                                    : (st.phase_label || "Waiting…");
+  $("#stagesub").textContent = !linked
+    ? "Plug the adapter into the freeze dryer's USB port"
+    : prep    ? "Pre-cooling — load your trays now"
+    : running ? "Running for " + hhmmss(st.elapsed_s)
+    : have    ? "Press START on the dryer when you're ready"
+              : "Waiting for the first status frame";
+
+  const ring=$("#ring");
+  if(prep){
+    ring.style.setProperty("--p", Math.min(100,Math.max(0,(900-st.prep_s)/900*100)).toFixed(0));
+    $("#ringval").textContent = hhmmss(st.prep_s);
+    $("#ringlab").textContent = "until load";
+  } else if(running){
+    ring.style.setProperty("--p", 100);
+    $("#ringval").textContent = hhmmss(st.elapsed_s);
+    $("#ringlab").textContent = "elapsed";
+  } else {
+    ring.style.setProperty("--p", 0);
+    $("#ringval").textContent = linked ? (have? "Ready":"…") : "—";
+    $("#ringlab").textContent = linked ? "idle" : "no dryer";
+  }
+
+  /* metrics. Only show batch elapsed while a batch is actually running - the
+     dryer retains the last batch's value when idle, which would otherwise
+     look like a run in progress. */
+  if(have){
+    $("#m-temp").textContent    = st.temp_f;
+    $("#m-press").textContent   = st.pressure;
+    $("#m-elapsed").textContent = running ? hhmmss(st.elapsed_s)
+                                : (st.elapsed_s>0 ? "— (last: "+hhmmss(st.elapsed_s)+")" : "—");
+    $("#m-mode").textContent    = st.mode || "—";
+    $("#lastseen").textContent  = "Frame type " + st.stat_type +
+      " · phase " + (st.phase_label||"?");
+  }
+
+  /* phase card */
+  const card=$("#phasecard");
+  if(!linked){
+    card.style.display="";
+    $("#phasehead").textContent="Connect the dryer";
+    $("#phasebody").innerHTML="Plug the adapter's <b>USB</b> port into the "+
+      "freeze dryer. Status appears here automatically once it's talking.";
+    $("#phaseopts").innerHTML=""; $("#phasenote").textContent="";
+    return;
+  }
+  const def = PHASE[phase] || PHASE[0];
+  card.style.display="";
+  $("#phasehead").textContent = def.head;
+  $("#phasebody").innerHTML = def.body;
+  $("#phaseopts").innerHTML = (def.opts||[]).map(o=>
+    `<div class="item" style="cursor:default">
+       <span>${o.danger?"⛔":"▶️"}</span>
+       <div class="t"><b style="${o.danger?'color:var(--bad)':''}">${o.k}</b>
+         <span>${o.d}</span></div>
+       <span class="pill">on dryer</span>
+     </div>`).join("");
+  /* Show the completion guidance while a batch is running, since we cannot
+     detect the PROCESS COMPLETE phase from the wire yet. */
+  $("#phasenote").innerHTML = (phase===4)
+    ? (def.note + "<br><br>" + COMPLETE_HELP) : (def.note||"");
+}
+
+/* ---------- state polling ---------- */
+async function refreshState(){
+  try{
+    const st=await (await fetch("/api/state",{cache:"no-store"})).json();
+    lastState=st;
+    const linked = st.link==="up";
+    $("#dot").className = "dot" + (linked? " on":"");
+    $("#hdrsub").textContent = st.wifi==="connected"
+      ? (linked? "dryer connected" : "waiting for dryer") : st.wifi;
+    $("#hdr").textContent = "Freeze Dryer";
+
+    $("#d-in").textContent=st.frames_in; $("#d-out").textContent=st.frames_out;
+    $("#d-unk").textContent=st.unknown_verbs; $("#d-bad").textContent=st.frames_bad;
+    $("#d-ids").textContent = "Serial "+(st.serial||"—")+" · UID "+(st.uid||"—")+
+      " · IP "+(st.ip||"—");
+    if(st.version){
+      $("#ver").textContent = st.version;
+      $("#set-ver-sub").textContent = "Free Harvest v"+st.version;
+      $("#abouthw").textContent = "Dryer serial "+(st.serial||"—")+
+        " · adapter IP "+(st.ip||"—");
+    }
+    $("#set-wifi-sub").textContent = st.wifi==="connected"
+      ? (st.ssid||"connected")+" · "+st.ip : st.wifi;
+    $("#wifiinfo").innerHTML = st.wifi==="connected"
+      ? "Connected to <b>"+esc(st.ssid||"")+"</b> at <b>"+esc(st.ip||"")+"</b>"
+      : "Status: "+esc(st.wifi);
+
+    /* onboarding gating */
+    const wifiOK = st.wifi==="connected";
+    $("#s1ic").textContent = wifiOK? "✅":"1️⃣";
+    $("#s1sub").textContent = wifiOK? ("Connected to "+(st.ssid||"")) : "Not connected yet";
+    $("#s2ic").textContent = linked? "✅":"2️⃣";
+    $("#s2sub").textContent = linked? "Dryer is talking to the adapter"
+                                    : "Waiting for the dryer's USB port";
+    $("#setupwifi").style.display = wifiOK ? "none" : "";
+
+    /*
+     * Onboarding gating: show setup only while Wi-Fi is unconfigured, and only
+     * force the switch when that condition CHANGES - otherwise the poll would
+     * fight the user's own navigation every 2s.
+     */
+    const done = wifiOK;           /* dryer link optional to leave setup */
+    if(done !== setupDone){
+      setupDone = done;
+      show(done ? "v-dash" : "v-setup");
+      $$("nav button").forEach(x=>x.classList.toggle("active", x.dataset.view==="v-dash"));
+    }
+    document.querySelector("nav").style.display = done ? "" : "none";
+    paintDash(st);
+  }catch(e){}
+}
+
+/* ---------- frames ---------- */
+function fieldsHtml(body){
+  const p=body.split(","); p.shift();
+  return p.length? p.map((f,i)=>`<span style="opacity:.75">${i}:</span>${esc(f)}`).join("  ")
+                 : '<span style="opacity:.6">(none)</span>';
+}
+function addRow(fr){
+  if(paused) return;
+  lastSeq=Math.max(lastSeq,fr.seq);
+  /* Telemetry now comes from /api/state (decoded on-device), so the frame
+     log is purely a raw view - no duplicate parsing here. */
+  const tb=$("#logbody"); if(!tb) return;
+  const tr=document.createElement("tr");
+  tr.innerHTML=`<td>${fr.seq}</td><td style="color:var(--accent)">${esc(fr.verb)}</td>`+
+               `<td>${fieldsHtml(fr.body)}</td>`;
+  tb.prepend(tr);
+  while(tb.children.length>250) tb.removeChild(tb.lastChild);
+}
+let polling=false;
+async function pollFrames(){
+  if(polling) return; polling=true;
+  try{ (await (await fetch("/api/history?since="+lastSeq,{cache:"no-store"})).json()).forEach(addRow); }
+  catch(e){} finally{ polling=false; }
+}
+async function refreshVerbs(){
+  try{
+    const vs=await (await fetch("/api/verbs",{cache:"no-store"})).json();
+    vs.sort((a,b)=>b.last_seq-a.last_seq);
+    $("#verbbody").innerHTML = vs.map(v=>
+      `<tr><td style="color:var(--accent);width:88px">${esc(v.verb)}</td>`+
+      `<td class="mono">${fieldsHtml(v.last)}<div style="color:var(--muted);font-size:11px">×${v.count}</div></td></tr>`
+    ).join("");
+  }catch(e){}
+}
+
+/* ---------- commands ---------- */
+async function sendCmd(verb,args,statusEl){
+  const el=statusEl||$("#cmdstatus");
+  note(el,"Sending "+esc(verb)+"…","info");
+  try{
+    const body="verb="+encodeURIComponent(args? verb+","+args : verb);
+    const r=await fetch("/api/cmd",{method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
+    const j=await r.json();
+    note(el, j.ok? esc(verb)+" sent ✓" : "Refused: "+esc(j.reason||"not allowed"),
+         j.ok?"ok":"bad");
+  }catch(e){ note(el,"Request failed","bad"); }
+}
+$$("button[data-cmd]").forEach(b=>b.addEventListener("click",()=>sendCmd(b.dataset.cmd)));
+$("#rawsend").addEventListener("click",()=>
+  sendCmd($("#rawverb").value, $("#rawargs").value.trim(), $("#rawstatus")));
+$("#bnamesave").addEventListener("click",async()=>{
+  const v=$("#bname").value.trim();
+  if(!v){ note($("#bnamestatus"),"Enter a name first","bad"); return; }
+  sendCmd("SETBNAME", v, $("#bnamestatus"));
+});
+$("#setdate").addEventListener("click",()=>{
+  const d=new Date(), p=n=>String(n).padStart(2,"0");
+  const s=`${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  sendCmd("SETDATE", s, $("#datestatus"));
+});
+
+/* ---------- wifi ---------- */
+async function loadScan(selId,btn){
+  const sel=document.getElementById(selId); if(!sel) return;
+  const prev=btn? btn.textContent:""; if(btn){btn.textContent="Scanning…";btn.disabled=true;}
+  sel.innerHTML='<option value="">scanning…</option>';
+  try{
+    const nets=await (await fetch("/api/scan")).json();
+    sel.innerHTML = nets.length
+      ? '<option value="">— select —</option>'+nets.sort((a,b)=>b.rssi-a.rssi)
+          .map(n=>`<option value="${esc(n.ssid)}">${esc(n.ssid)} (${n.rssi}dBm${n.secure?" 🔒":""})</option>`).join("")
+      : '<option value="">none found — Rescan</option>';
+  }catch(e){ sel.innerHTML='<option value="">scan error</option>'; }
+  if(btn){btn.textContent=prev;btn.disabled=false;}
+}
+async function saveWifi(ssid,pw,statusEl){
+  if(!ssid){ note(statusEl,"Enter a network name","bad"); return; }
+  note(statusEl,"Saving & connecting to <b>"+esc(ssid)+"</b>…","info");
+  try{
+    const body="ssid="+encodeURIComponent(ssid)+"&password="+encodeURIComponent(pw);
+    const j=await (await fetch("/api/wifi",{method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},body})).json();
+    if(!j.ok){ note(statusEl,"Rejected — check the name/password","bad"); return; }
+  }catch(e){ note(statusEl,"Request failed","bad"); return; }
+  note(statusEl,"Connecting… this page may drop briefly (that's normal)","info");
+  let n=0; const t=setInterval(async()=>{
+    n++;
+    try{
+      const s=await (await fetch("/api/state",{cache:"no-store"})).json();
+      if(s.wifi==="connected" && s.ip && s.ip!=="0.0.0.0"){
+        clearInterval(t);
+        note(statusEl,"✅ Connected to <b>"+esc(s.ssid)+"</b>.<br>Open "+
+          "<a style='color:var(--accent)' href='http://"+s.ip+"/'>http://"+s.ip+"/</a>"+
+          " on your home network.","ok");
+      }
+    }catch(e){}
+    if(n>30){ clearInterval(t); note(statusEl,
+      "Couldn't confirm. Rejoin the setup hotspot and check, or re-enter the password.","bad"); }
+  },1500);
+}
+$("#ssidsel").addEventListener("change",e=>{ if(e.target.value) $("#ssid").value=e.target.value; });
+$("#ssidsel2").addEventListener("change",e=>{ if(e.target.value) $("#ssid2").value=e.target.value; });
+$("#rescan").addEventListener("click",()=>loadScan("ssidsel",$("#rescan")));
+$("#rescan2").addEventListener("click",()=>loadScan("ssidsel2",$("#rescan2")));
+$("#save").addEventListener("click",()=>saveWifi($("#ssid").value.trim(),$("#pw").value,$("#wifistatus")));
+$("#save2").addEventListener("click",()=>saveWifi($("#ssid2").value.trim(),$("#pw2").value,$("#wifistatus2")));
+$("#forget").addEventListener("click",async()=>{
+  if(!confirm("Forget the saved network and return to setup mode?")) return;
+  await fetch("/api/forget",{method:"POST"}); setTimeout(refreshState,1200);
+});
+
+/* ---------- mqtt ---------- */
+async function refreshMqtt(){
+  try{
+    const m=await (await fetch("/api/mqtt",{cache:"no-store"})).json();
+    $("#set-mqtt-sub").textContent = m.connected? ("Connected · "+m.host)
+      : m.configured? ("Not connected · "+m.host) : "Not set up";
+    $("#mqttinfo").innerHTML = m.connected
+      ? "Connected to <b>"+esc(m.host)+":"+m.port+"</b> — the dryer should appear in Home Assistant."
+      : m.configured
+        ? "Configured for <b>"+esc(m.host)+":"+m.port+"</b> but <b>not connected</b>. "+
+          "Check Debug → Device log for the reason."
+        : "Not configured yet.";
+    if(m.host && !$("#mqtthost").value) $("#mqtthost").value=m.host;
+    if(m.port && $("#mqttport").value==="1883") $("#mqttport").value=m.port;
+  }catch(e){}
+}
+$("#mqttsave").addEventListener("click",async()=>{
+  const host=$("#mqtthost").value.trim(), el=$("#mqttstatus");
+  if(!host){ note(el,"Enter the broker host","bad"); return; }
+  note(el,"Saving & connecting…","info");
+  const body="host="+encodeURIComponent(host)+
+    "&port="+encodeURIComponent($("#mqttport").value.trim()||"1883")+
+    "&user="+encodeURIComponent($("#mqttuser").value)+
+    "&password="+encodeURIComponent($("#mqttpass").value);
+  try{
+    const j=await (await fetch("/api/mqtt",{method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},body})).json();
+    note(el, j.ok? "Saved. Connecting… check Debug → Device log if it doesn't turn green."
+                 : "Rejected — check host/port","bad");
+    if(j.ok) note(el,"Saved. Connecting…","ok");
+  }catch(e){ note(el,"Request failed","bad"); }
+  setTimeout(refreshMqtt,1500);
+});
+
+/* ---------- debug log ---------- */
+async function refreshLog(){
+  try{
+    const lines=await (await fetch("/api/log",{cache:"no-store"})).json();
+    $("#logbox").textContent = lines.length? lines.join("\n") : "(empty)";
+    const b=$("#logbox").parentElement; b.scrollTop=b.scrollHeight;
+  }catch(e){ $("#logbox").textContent="(log unavailable)"; }
+}
+$("#logrefresh").addEventListener("click",refreshLog);
+$("#logauto").addEventListener("click",()=>{
+  logAuto=!logAuto; $("#logauto").textContent="Auto: "+(logAuto?"on":"off");
+  if(logAuto) refreshLog();
+});
+
+/* ---------- frames controls ---------- */
+$("#pause").addEventListener("click",()=>{ paused=!paused;
+  $("#pause").textContent=paused?"Resume":"Pause"; });
+$("#dl").addEventListener("click",()=>location.href="/api/capture");
+
+/* ---------- OTA ---------- */
+$("#otago").addEventListener("click",()=>{
+  const f=$("#otafile").files[0], st=$("#otastatus");
+  if(!f){ note(st,"Choose a .bin file first","bad"); return; }
+  const bar=$("#otabar"), fill=$("#otafill");
+  bar.style.display="block"; fill.style.width="0";
+  note(st,"Uploading "+esc(f.name)+" ("+Math.round(f.size/1024)+" KB)…","info");
+  const x=new XMLHttpRequest();
+  x.open("POST","/api/ota");
+  x.setRequestHeader("Content-Type","application/octet-stream");
+  x.upload.onprogress=e=>{ if(e.lengthComputable) fill.style.width=Math.round(100*e.loaded/e.total)+"%"; };
+  x.onload=()=>{ let ok=false,reason="rejected";
+    try{ const j=JSON.parse(x.responseText); ok=j.ok; reason=j.reason||reason; }catch(e){}
+    if(ok){ note(st,"✅ Installed — rebooting. This page reloads shortly.","ok");
+            setTimeout(()=>location.reload(),9000); }
+    else note(st,"Update failed: "+esc(reason)+". Current firmware still running.","bad"); };
+  x.onerror=()=>note(st,"Upload failed. Current firmware still running.","bad");
+  x.send(f);
+});
+
+/* ---------- boot ---------- */
+show("v-dash");
+refreshState(); refreshVerbs(); refreshMqtt(); pollFrames();
+setInterval(pollFrames,1000);
+setInterval(refreshState,2000);
+setInterval(refreshVerbs,4000);
+setInterval(refreshMqtt,4000);
+setInterval(()=>{ if(logAuto) refreshLog(); },2000);
+</script>
+</body>
+</html>

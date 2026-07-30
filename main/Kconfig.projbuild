@@ -1,0 +1,29 @@
+menu "Free Harvest Adapter"
+
+config HR_AP_SSID
+    string "Setup access-point SSID"
+    default "HR-Adapter-Setup"
+    help
+        SSID broadcast when no WiFi credentials are stored (or the stored
+        network can't be joined). Connect to it to reach the setup page.
+
+config HR_AP_PASSWORD
+    string "Setup access-point password (blank = open)"
+    default ""
+    help
+        Password for the setup AP. Leave blank for an open network. If set,
+        must be at least 8 characters (WPA2 requirement).
+
+config HR_ACK_PAYLOAD
+    string "GOTIT ack payload (UNVERIFIED)"
+    default "ESP32ADAPTER"
+    help
+        Value sent in the GOTIT acknowledgement. The genuine adapter's
+        payload is not yet known - capture it with a USB sniffer and set it
+        here (or leave for later; the decoding UI works regardless).
+
+config HR_HTTP_LOG_TO_UART
+    bool "Also echo received frames to the UART console"
+    default y
+
+endmenu

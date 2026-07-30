@@ -1,0 +1,23 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- USB: act as a CDC-ACM *device* so the dryer (USB host) can enumerate us.
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_TINYUSB_CDC_RX_BUFSIZE=1024
+CONFIG_TINYUSB_CDC_TX_BUFSIZE=1024
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_FREERTOS_HZ=1000
+
+# Keep logs on UART0 so they do not collide with the USB CDC data path.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- Flash: this module has 8MB; use it so two OTA slots fit.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# --- OTA: custom two-slot partition table (partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Larger HTTP request buffers so the OTA upload handler is comfortable.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

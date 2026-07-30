@@ -1,0 +1,17 @@
+# ESP-IDF build output
+/build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# host test binaries
+*.exe
+*.o
+*.obj
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
