@@ -22,16 +22,33 @@
 extern "C" {
 #endif
 
+/*
+ * Pressure placeholder. While the vacuum pump is off (idle, prep, early
+ * freeze) the dryer reports exactly this value instead of a reading. Once the
+ * pump runs, field [5] carries a REAL vacuum measurement in microns (mTorr) -
+ * observed falling 1209 -> 440 during a pulldown.
+ */
+#define HR_PRESSURE_PLACEHOLDER 10000
+
 typedef struct {
     bool valid;          /* false if the frame was not a usable STAT */
-    int type;            /* STAT type discriminator (1,2,4,15,17,31,...) */
+    int type;            /* STAT type discriminator (1,2,4,5,15,17,31,...) */
     long temperature_f;  /* field 5, degrees F */
-    long pressure_raw;   /* field 6, raw sensor counts */
+    long pressure_raw;   /* field 6, as reported */
+    bool pressure_valid; /* false when the reading is the 10000 placeholder */
+    long pressure_microns; /* vacuum in microns/mTorr; 0 when not valid */
     long batch_elapsed_s;/* field 7, seconds since batch start (0 = idle) */
+    long phase_elapsed_s;/* field 8, seconds since THIS phase began */
     bool prep_active;    /* true for type-17 prep countdown frames */
     long prep_remaining_s; /* seconds remaining in 15-min prep (type 17) */
     bool freeze_active;  /* true for type-4 freezing frames */
-    long freeze_pct;     /* freeze progress % toward target (type 4) */
+    /*
+     * Progress percentage within the current phase (field [11]). During
+     * freezing it tracks cooling; during the vacuum pull it tracks pressure.
+     * Resets when the phase changes.
+     */
+    long phase_pct;
+    long freeze_pct;     /* alias of phase_pct while freezing (compat) */
     char mode[16];       /* mode string when present (e.g. "Auto","QUALITY") */
     char version[24];    /* firmware version string when present */
 } hr_telemetry_t;
@@ -77,6 +94,12 @@ typedef enum {
      * progress percentage that rises as the temperature falls.
      */
     HR_PHASE_FREEZING,
+    /*
+     * type 5 - drying. Vacuum has been pulled and holds (~435 microns
+     * observed) while shelf heat is applied, so the temperature RISES
+     * (-18F -> -13F observed). Announced by an NTFY,5 frame.
+     */
+    HR_PHASE_DRYING,
 } hr_phase_t;
 
 /* Short human label, e.g. "Preparing dryer". Never NULL. */

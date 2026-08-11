@@ -160,3 +160,62 @@ typically slows near the target.
 | 31 | Recipe | custom profile parameters |
 
 Still unobserved: drying, extra-dry, process-complete, defrost.
+
+---
+
+# Drying + real vacuum (2026-08-11 capture, part 2)
+
+## Pressure field [5] is REAL microns once the pump runs
+Previously only ever seen as the flat `10000`. This capture shows it falling
+`1209 → 440` during a genuine pulldown, then holding ~433-440 while drying.
+
+- `10000` exactly = **placeholder**, pump off (idle / prep / early freeze)
+- values **> 10000** (~120k-155k) = uncalibrated sensor at atmosphere, **not a
+  vacuum reading**
+- values **< 10000** = real vacuum in **microns (mTorr)**
+
+No scale factor needed — the units are microns directly.
+
+## STAT type 5 = DRYING
+Transition observed at batch-elapsed 10965 s, announced by `NTFY,5`.
+
+`STAT,5,0,0,0,TEMP,VAC,ELAPSED,PHASE_S,46,MODE,1,PCT,0,0,7,0,,`
+
+Distinguishing signature vs. freezing:
+
+| | type 4 (freezing) | type 5 (drying) |
+|---|---|---|
+| temperature | **falling** (5 → −18 °F) | **rising** (−18 → −13 °F, shelf heat) |
+| vacuum | placeholder, then pulling down | holding ~433-440 µm |
+| field [8] | 60 | 46 |
+| field [11] | 83→99 (progress) | reset to 1 |
+
+## Field [7] = phase-elapsed seconds
+A **second** elapsed counter that **resets at each phase change**. Confirmed:
+at the type-4→5 transition it went to 1 while batch-elapsed `[6]` continued
+from 10965. Thereafter both advance in lockstep (+9, +4, +3, +8, +5, +5).
+
+So: `[6]` = seconds since batch start, `[7]` = seconds since this phase started.
+
+## Field [11] is phase progress, not temperature progress
+Earlier reading ("tracks cooling") was too narrow. It is a general
+**progress-within-phase** percentage:
+- during freezing it tracked temperature (83→85 as temp fell 5→3 °F)
+- during the vacuum pull it tracked pressure (94→99 as vacuum went 1209→441 µm)
+- it **reset to 1** when drying began
+
+Renamed to `phase_pct` in the firmware (`freeze_pct` kept as an alias).
+
+## Updated cycle map
+
+| STAT type | phase | signature |
+|---|---|---|
+| 17 | Preparing | 15-min countdown at `[16]` |
+| 2 | Transition | load trays / press CONTINUE |
+| 4 | Freezing | temp falling, then vacuum pulling down |
+| **5** | **Drying** | **vacuum holding, temp rising** |
+| 1 | Idle *or* Running | running only while `[6]` increases |
+| 15 | Diagnostics | version + `zc:/bl:/ht:` codes |
+| 31 | Recipe | custom profile parameters |
+
+Still unobserved: extra-dry time, process-complete, defrost.

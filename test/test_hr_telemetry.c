@@ -79,7 +79,8 @@ static void test_json_output(void)
     CHECK_STR(buf,
               "{\"type\":1,\"temp_f\":69,\"pressure\":151882,"
               "\"elapsed_s\":0,\"mode\":\"QUALITY\",\"prep_s\":0,"
-              "\"freeze_pct\":0}");
+              "\"freeze_pct\":0,\"phase_pct\":0,\"phase_s\":0,"
+              "\"vacuum_um\":0,\"vacuum_ok\":false}");
 }
 
 /* ---- phase detection (grounded in real captures) ---- */
@@ -339,8 +340,102 @@ static void test_freeze_eta_absent_when_not_freezing(void)
     CHECK_INT(hr_freeze_eta_s(&tr, &t), -1);
 }
 
+/* ---- drying phase, real pressure, phase-elapsed (2026-08-11 capture) ---- */
+static void test_type5_is_drying(void)
+{
+    TEST_CASE("type5 is drying");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,5,0,0,0,-18,440,10965,1,46,Auto,1,1,0,0,7,0,,\r", &t));
+    CHECK(t.valid);
+    CHECK_INT(t.type, 5);
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_DRYING);
+    CHECK_INT(t.temperature_f, -18);
+    CHECK_STR(t.mode, "Auto");
+}
+
+static void test_real_pressure_is_microns(void)
+{
+    /* Once the pump runs, [5] is a real vacuum reading, not the placeholder. */
+    TEST_CASE("real pressure is microns");
+    hr_telemetry_t a, b;
+    CHECK(parse("STAT,4,0,0,0,-10,1209,10524,0,60,Auto,1,94,0,0,7,1,0,,\r", &a));
+    CHECK(a.pressure_valid);
+    CHECK_INT(a.pressure_microns, 1209);
+
+    CHECK(parse("STAT,5,0,0,0,-18,440,10965,1,46,Auto,1,1,0,0,7,0,,\r", &b));
+    CHECK(b.pressure_valid);
+    CHECK_INT(b.pressure_microns, 440);
+    CHECK(b.pressure_microns < a.pressure_microns); /* pulling down */
+}
+
+static void test_placeholder_pressure_is_flagged_invalid(void)
+{
+    /* 10000 means "pump off / no reading", not a 10000-micron vacuum. */
+    TEST_CASE("placeholder pressure flagged invalid");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,4,0,0,0,5,10000,6158,0,45,Auto,1,83,0,0,5,0,0,,\r", &t));
+    CHECK(!t.pressure_valid);
+    CHECK_INT(t.pressure_microns, 0);
+    CHECK_INT(t.pressure_raw, 10000); /* raw value still available */
+}
+
+static void test_idle_atmospheric_reading_is_not_a_vacuum(void)
+{
+    /*
+     * At rest the sensor reads ~120k-155k. That is not a 151882-micron
+     * vacuum - it must not be presented as one.
+     */
+    TEST_CASE("idle atmospheric reading is not a vacuum");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,1,0,0,0,69,151882,0,0,38,0,1,QUALITY,v6.4,,\r", &t));
+    CHECK(!t.pressure_valid);
+    CHECK_INT(t.pressure_microns, 0);
+}
+
+static void test_phase_elapsed_counter(void)
+{
+    /*
+     * Field [8] counts seconds since the CURRENT phase began - it reset to 1
+     * at the type-4 -> type-5 transition while batch elapsed kept climbing.
+     */
+    TEST_CASE("phase elapsed counter");
+    hr_telemetry_t a, b;
+    CHECK(parse("STAT,5,0,0,0,-18,440,10965,1,46,Auto,1,1,0,0,7,0,,\r", &a));
+    CHECK_INT(a.batch_elapsed_s, 10965);
+    CHECK_INT(a.phase_elapsed_s, 1);      /* just entered drying */
+
+    CHECK(parse("STAT,5,0,0,0,-13,433,10999,35,46,Auto,1,1,0,0,7,0,,\r", &b));
+    CHECK_INT(b.batch_elapsed_s, 10999);  /* +34 batch seconds */
+    CHECK_INT(b.phase_elapsed_s, 35);     /* +34 phase seconds, in step */
+}
+
+static void test_phase_pct_tracks_vacuum_during_pulldown(void)
+{
+    /* [11] climbed 94 -> 99 as pressure fell 1209 -> 441 microns. */
+    TEST_CASE("phase pct tracks vacuum pulldown");
+    hr_telemetry_t a, b;
+    CHECK(parse("STAT,4,0,0,0,-10,1209,10524,0,60,Auto,1,94,0,0,7,1,0,,\r", &a));
+    CHECK(parse("STAT,4,0,0,0,-18,441,10961,0,60,Auto,1,99,0,0,7,1,0,,\r", &b));
+    CHECK_INT(a.phase_pct, 94);
+    CHECK_INT(b.phase_pct, 99);
+    CHECK(b.pressure_microns < a.pressure_microns);
+}
+
+static void test_drying_label(void)
+{
+    TEST_CASE("drying label");
+    CHECK_STR(hr_phase_label(HR_PHASE_DRYING), "Drying");
+}
+
 int main(void)
 {
+    test_type5_is_drying();
+    test_real_pressure_is_microns();
+    test_placeholder_pressure_is_flagged_invalid();
+    test_idle_atmospheric_reading_is_not_a_vacuum();
+    test_phase_elapsed_counter();
+    test_phase_pct_tracks_vacuum_during_pulldown();
+    test_drying_label();
     test_freeze_eta_needs_two_points();
     test_freeze_eta_from_real_rate();
     test_freeze_eta_zero_at_100();

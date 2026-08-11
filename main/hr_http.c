@@ -130,6 +130,8 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"temp_f\":%ld,\"pressure\":%ld,\"elapsed_s\":%ld,"
                      "\"prep_s\":%ld,\"mode\":\"%s\",\"stat_type\":%d,"
                      "\"freeze_pct\":%ld,\"freeze_eta_s\":%ld,"
+                     "\"phase_pct\":%ld,\"phase_s\":%ld,"
+                     "\"vacuum_um\":%ld,\"vacuum_ok\":%s,"
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
@@ -142,7 +144,11 @@ static esp_err_t h_state(httpd_req_t *req)
                      s_tel_valid ? s_tel.freeze_pct : 0,
                      (s_tel_valid && s_tracker_ready)
                          ? hr_freeze_eta_s(&s_tracker, &s_tel)
-                         : -1);
+                         : -1,
+                     s_tel_valid ? s_tel.phase_pct : 0,
+                     s_tel_valid ? s_tel.phase_elapsed_s : 0,
+                     s_tel_valid ? s_tel.pressure_microns : 0,
+                     (s_tel_valid && s_tel.pressure_valid) ? "true" : "false");
     return send_json(req, body, n);
 }
 

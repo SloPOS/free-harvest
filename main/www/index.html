@@ -213,7 +213,7 @@
       <div class="metrics">
         <div class="metric"><div class="k">Temperature</div>
           <div class="v"><span id="m-temp">–</span><span class="u"> °F</span></div></div>
-        <div class="metric"><div class="k">Pressure (raw)</div>
+        <div class="metric"><div class="k">Vacuum</div>
           <div class="v"><span id="m-press">–</span></div></div>
         <div class="metric"><div class="k">Batch elapsed</div>
           <div class="v"><span id="m-elapsed">–</span></div></div>
@@ -565,11 +565,20 @@ const PHASE = {
   7:{ /* FREEZING */
     head:"Freezing the product",
     body:"The trays are loaded and the chamber is freezing down to its target "+
-         "temperature. Vacuum hasn't been pulled yet — drying begins once the "+
-         "product is fully frozen. <b>Nothing to do right now.</b>",
+         "temperature. Once frozen, the pump pulls a vacuum and drying begins. "+
+         "<b>Nothing to do right now.</b>",
     opts:[
       {k:"END BATCH", d:"Terminate the batch early", danger:true}],
     note:"Pre-frozen food shortens this stage considerably." },
+  8:{ /* DRYING */
+    head:"Drying under vacuum",
+    body:"Vacuum is holding and the shelves are warming, so ice sublimates "+
+         "straight out of the product. This is the longest stage — it runs "+
+         "automatically for many hours. <b>Nothing to do right now.</b>",
+    opts:[
+      {k:"END BATCH", d:"Terminate the batch early", danger:true}],
+    note:"When drying nears completion the dryer adds extra dry time, then "+
+         "shows PROCESS COMPLETE and asks you to open the drain valve." },
 };
 
 /*
@@ -594,7 +603,9 @@ function paintDash(st){
   const prep   = phase === 2;                 /* HR_PHASE_PREPARING */
   const running= phase === 4;                 /* HR_PHASE_RUNNING   */
   const frz    = phase === 7;                 /* HR_PHASE_FREEZING  */
+  const dry    = phase === 8;                 /* HR_PHASE_DRYING    */
   const eta    = (st.freeze_eta_s === undefined) ? -1 : st.freeze_eta_s;
+  const pct    = (st.phase_pct === undefined) ? st.freeze_pct : st.phase_pct;
 
   /* hero */
   $("#stage").textContent = !linked ? "Dryer not connected"
@@ -602,7 +613,9 @@ function paintDash(st){
   $("#stagesub").textContent = !linked
     ? "Plug the adapter into the freeze dryer's USB port"
     : prep    ? "Pre-cooling — load your trays now"
-    : frz     ? (st.temp_f + "°F and falling · " + st.freeze_pct + "% frozen")
+    : frz     ? (st.temp_f + "°F and falling · " + pct + "% frozen")
+    : dry     ? (st.vacuum_ok ? (st.vacuum_um + " microns · " + st.temp_f + "°F")
+                              : ("drying · " + st.temp_f + "°F"))
     : running ? "Running for " + hhmmss(st.elapsed_s)
     : have    ? "Press START on the dryer when you're ready"
               : "Waiting for the first status frame";
@@ -613,10 +626,15 @@ function paintDash(st){
     $("#ringval").textContent = hhmmss(st.prep_s);
     $("#ringlab").textContent = "until load";
   } else if(frz){
-    /* Freeze progress is already a percentage - show it directly. */
-    ring.style.setProperty("--p", Math.min(100,Math.max(0,st.freeze_pct)));
-    $("#ringval").textContent = st.freeze_pct + "%";
+    /* Phase progress is already a percentage - show it directly. */
+    ring.style.setProperty("--p", Math.min(100,Math.max(0,pct)));
+    $("#ringval").textContent = pct + "%";
     $("#ringlab").textContent = "frozen";
+  } else if(dry){
+    /* Drying: show time in this phase; there's no reliable % for it yet. */
+    ring.style.setProperty("--p", 100);
+    $("#ringval").textContent = hhmmss(st.phase_s || 0);
+    $("#ringlab").textContent = "drying";
   } else if(running){
     ring.style.setProperty("--p", 100);
     $("#ringval").textContent = hhmmss(st.elapsed_s);
@@ -631,8 +649,8 @@ function paintDash(st){
   const fb = $("#freezebar");
   if(frz){
     fb.style.display = "";
-    $("#fzfill").style.width = Math.min(100,Math.max(0,st.freeze_pct)) + "%";
-    $("#fzpct").textContent = st.freeze_pct + "% frozen";
+    $("#fzfill").style.width = Math.min(100,Math.max(0,pct)) + "%";
+    $("#fzpct").textContent = pct + "% frozen";
     $("#fzeta").textContent = eta > 0
       ? "about " + etaText(eta) + " to 100%"
       : (eta === 0 ? "target reached" : "estimating…");
@@ -645,10 +663,14 @@ function paintDash(st){
      look like a run in progress. */
   if(have){
     $("#m-temp").textContent    = st.temp_f;
-    $("#m-press").textContent   = st.pressure;
+    /* Show a real vacuum reading when the pump is running; the idle/placeholder
+       sensor value is not a vacuum and would be misleading shown as one. */
+    $("#m-press").innerHTML = st.vacuum_ok
+      ? st.vacuum_um + '<span class="u"> µm</span>'
+      : '<span style="color:var(--muted);font-size:16px">no vacuum</span>';
     /* A batch is under way during freezing too, so show the live timer for
        any in-batch phase; only a genuinely idle dryer shows the stale value. */
-    const inBatch = running || frz || prep || phase === 3;
+    const inBatch = running || frz || dry || prep || phase === 3;
     $("#m-elapsed").textContent = inBatch ? hhmmss(st.elapsed_s)
                                 : (st.elapsed_s>0 ? "— (last: "+hhmmss(st.elapsed_s)+")" : "—");
     $("#m-mode").textContent    = st.mode || "—";

@@ -37,7 +37,7 @@ No cloud account. No vendor lock-in. Runs standalone or on your own network.
 
 | | |
 |---|---|
-| 📊 **Live dashboard** | Cycle phase, temperature, pressure, batch timer, prep countdown |
+| 📊 **Live dashboard** | Cycle phase, temperature, vacuum (microns), batch + phase timers, countdowns |
 | 🧭 **Phase-aware guidance** | Shows only the options valid right now, using the owner's-manual wording |
 | 🏠 **Home Assistant** | MQTT auto-discovery — sensors appear automatically, no YAML |
 | 📡 **Raw data feed** | Every frame the dryer sends, with changed-field highlighting |
@@ -160,10 +160,10 @@ green and readings appear.
 Browse to the adapter's address from any device on your network. The dashboard shows
 whatever the dryer is doing right now.
 
-| Idle | Preparing | Freezing | Running |
+| Idle | Preparing | Freezing | Drying |
 |---|---|---|---|
-| ![Idle](docs/img/dashboard-idle.png) | ![Preparing](docs/img/dashboard-preparing.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Running](docs/img/dashboard-running.png) |
-| Press **START** on the machine | 15-min pre-cool, load your trays | % frozen + estimated time to 100% | Elapsed timer, runs automatically |
+| ![Idle](docs/img/dashboard-idle.png) | ![Preparing](docs/img/dashboard-preparing.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Drying](docs/img/dashboard-drying.png) |
+| Press **START** on the machine | 15-min pre-cool, load your trays | % frozen + estimated time to 100% | Live vacuum in microns, phase timer |
 
 The **phase card** below the dial always tells you what's happening and what comes
 next, quoting the owner's manual — including the drain-valve steps that are easy to
@@ -334,12 +334,10 @@ every known verb, and which fields are confirmed vs. inferred.
 
 ### Known gaps
 
-- **Some sub-phases aren't distinguished yet.** Freezing *is* detected (STAT type 4,
-  with live % frozen and an estimated time to 100%). Drying, extra-dry,
-  process-complete and defrost still read as "Batch running" — those frames haven't
-  been captured yet.
-- **Pressure is raw sensor counts**, not mTorr. The scale factor needs a capture
-  during a real vacuum pulldown.
+- **Freezing and drying are detected** (STAT types 4 and 5), with live % frozen,
+  an estimated time to 100%, real vacuum readings and a per-phase timer. Extra-dry
+  time, process-complete and defrost haven't been captured yet and still read as
+  "Batch running".
 - **Field meanings marked "inferred"** in the protocol notes need confirmation.
 
 Captures are very welcome — see below.

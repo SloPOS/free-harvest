@@ -48,21 +48,48 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
     out->temperature_f = hr_frame_field_int(f, F_TEMP, 0);
     out->pressure_raw = hr_frame_field_int(f, F_PRESSURE, 0);
     out->batch_elapsed_s = hr_frame_field_int(f, F_ELAPSED, 0);
+    /* [8] counts seconds since the CURRENT phase started (resets each phase). */
+    out->phase_elapsed_s = hr_frame_field_int(f, 7, 0);
+
+    /*
+     * Pressure: 10000 is a "pump off / no reading" placeholder. Any other
+     * value is a real vacuum measurement in microns (mTorr) - confirmed by a
+     * capture showing it fall 1209 -> 440 during a pulldown.
+     */
+    if (out->pressure_raw == HR_PRESSURE_PLACEHOLDER ||
+        out->pressure_raw > HR_PRESSURE_PLACEHOLDER) {
+        /*
+         * 10000 exactly = "pump off" placeholder. Anything ABOVE it is the
+         * uncalibrated idle sensor reading (~120k-155k at atmosphere), not a
+         * vacuum measurement - a real pulldown reads well under 10000.
+         */
+        out->pressure_valid = false;
+        out->pressure_microns = 0;
+    } else {
+        out->pressure_valid = true;
+        out->pressure_microns = out->pressure_raw;
+    }
 
     if (out->type == 17) {
         /* Prep countdown frame: mode at [9], seconds-remaining at [16]. */
         out->prep_active = true;
         out->prep_remaining_s = hr_frame_field_int(f, 16, 0);
         copy_field(out->mode, sizeof(out->mode), f, 9);
-    } else if (out->type == 4) {
+    } else if (out->type == 4 || out->type == 5) {
         /*
-         * Freezing frame (after the trays are loaded and CONTINUE pressed).
-         * Same field layout as prep: mode at [9]. Field [11] is a progress
-         * percentage toward the freeze target - confirmed in capture, where it
-         * climbed 83->84->85 as the temperature fell 5F->4F->3F.
+         * In-cycle frames (freezing = 4, drying = 5). Same field layout as the
+         * prep frame: mode at [9], phase-progress percent at [11].
+         *
+         * [11] is progress WITHIN the phase, not specifically temperature:
+         * during freezing it tracked cooling (83->85 as temp fell 5F->3F);
+         * during the vacuum pull it tracked pressure (94->99 as the vacuum
+         * went 1209->441 microns). It resets when the phase changes.
          */
-        out->freeze_active = true;
-        out->freeze_pct = hr_frame_field_int(f, 11, 0);
+        out->phase_pct = hr_frame_field_int(f, 11, 0);
+        if (out->type == 4) {
+            out->freeze_active = true;
+            out->freeze_pct = out->phase_pct; /* compat alias */
+        }
         copy_field(out->mode, sizeof(out->mode), f, 9);
     } else {
         /* Normal (type 1 and friends): mode at [11], version at [12]. */
@@ -220,6 +247,8 @@ hr_phase_t hr_phase_of(const hr_telemetry_t *t)
         return HR_PHASE_PREPARING;
     case 4:
         return HR_PHASE_FREEZING;
+    case 5:
+        return HR_PHASE_DRYING;
     case 2:
         return HR_PHASE_TRANSITION;
     case 15:
@@ -247,6 +276,7 @@ const char *hr_phase_label(hr_phase_t p)
     case HR_PHASE_DIAGNOSTICS: return "Diagnostics";
     case HR_PHASE_RECIPE:      return "Recipe settings";
     case HR_PHASE_FREEZING:    return "Freezing";
+    case HR_PHASE_DRYING:      return "Drying";
     default:                   return "Unknown";
     }
 }
@@ -259,10 +289,12 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap)
     int n = snprintf(buf, cap,
                      "{\"type\":%d,\"temp_f\":%ld,\"pressure\":%ld,"
                      "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld,"
-                     "\"freeze_pct\":%ld}",
+                     "\"freeze_pct\":%ld,\"phase_pct\":%ld,"
+                     "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s}",
                      t->type, t->temperature_f, t->pressure_raw,
                      t->batch_elapsed_s, t->mode, t->prep_remaining_s,
-                     t->freeze_pct);
+                     t->freeze_pct, t->phase_pct, t->phase_elapsed_s,
+                     t->pressure_microns, t->pressure_valid ? "true" : "false");
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }
