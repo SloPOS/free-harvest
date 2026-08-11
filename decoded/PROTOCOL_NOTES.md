@@ -111,3 +111,52 @@ Dryer's **diagnostic mode drops the adapter link** (user observed) — so
 individual relay/heater/pump toggles can't be captured that way. The per-output
 codes (J17-J20 thermocouples, DC on/off, DutyCycle) are visible as firmware
 strings but not yet correlated to live values.
+
+---
+
+# Freezing phase discovered (2026-08-11 capture)
+
+## STAT type 4 = FREEZING
+Occurs after the user loads trays and presses CONTINUE, before vacuum is pulled.
+Confirmed over ~13 minutes of capture at batch-elapsed 6158-6910s (~1.7-1.9 h in).
+
+`STAT,4,0,0,0,TEMP,10000,ELAPSED,0,45,MODE,1,PCT,0,0,5,0,0,,`
+
+- `[4]` **temperature °F** — observed falling 5 → 4 → 3 °F (deep freeze)
+- `[5]` pressure pinned at the `10000` placeholder — **vacuum not yet pulled**,
+  consistent with freeze-before-vacuum
+- `[6]` batch elapsed seconds (advancing normally)
+- `[9]` mode string ("Auto") — same slot as the type-17 prep layout
+- `[11]` **freeze progress %** toward the target
+
+## Field [11] is a PERCENTAGE, not a mode
+Initially misread as "mode 85". It moves inversely with temperature:
+
+| temp °F | [11] |
+|---|---|
+| 5 | 83 |
+| 4 | 84 |
+| 3 | 85 |
+
+They happen to sum to 88 in this capture, but that is coincidence — in type 1/17
+frames `[4]` is plainly the temperature (69 °F at room temp) and `[11]` is a mode
+string or other value. `[11]` rising as the chamber cools is a progress figure.
+
+## Rate / ETA
+83% → 85% took 482 s of batch time ≈ **241 s per percent**. Free Harvest
+extrapolates linearly to estimate time-to-100%, measured against the dryer's own
+elapsed counter so it survives adapter reboots. Treat as an estimate: freezing
+typically slows near the target.
+
+## Updated cycle map
+
+| STAT type | phase | notes |
+|---|---|---|
+| 17 | Preparing | 15-min pre-cool, countdown at `[16]` |
+| 2 | Transition | load trays / press CONTINUE |
+| **4** | **Freezing** | **temp falls, `[11]` = % frozen, no vacuum yet** |
+| 1 | Idle *or* Running | running only while `[6]` is increasing |
+| 15 | Diagnostics | carries version + `zc:/bl:/ht:` codes |
+| 31 | Recipe | custom profile parameters |
+
+Still unobserved: drying, extra-dry, process-complete, defrost.

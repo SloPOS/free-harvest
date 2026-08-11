@@ -54,6 +54,16 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
         out->prep_active = true;
         out->prep_remaining_s = hr_frame_field_int(f, 16, 0);
         copy_field(out->mode, sizeof(out->mode), f, 9);
+    } else if (out->type == 4) {
+        /*
+         * Freezing frame (after the trays are loaded and CONTINUE pressed).
+         * Same field layout as prep: mode at [9]. Field [11] is a progress
+         * percentage toward the freeze target - confirmed in capture, where it
+         * climbed 83->84->85 as the temperature fell 5F->4F->3F.
+         */
+        out->freeze_active = true;
+        out->freeze_pct = hr_frame_field_int(f, 11, 0);
+        copy_field(out->mode, sizeof(out->mode), f, 9);
     } else {
         /* Normal (type 1 and friends): mode at [11], version at [12]. */
         copy_field(out->mode, sizeof(out->mode), f, 11);
@@ -69,7 +79,62 @@ void hr_phase_tracker_init(hr_phase_tracker_t *tr)
     if (tr != NULL) {
         memset(tr, 0, sizeof(*tr));
         tr->last_elapsed = -1;
+        tr->freeze_first_pct = -1;
+        tr->freeze_last_pct = -1;
     }
+}
+
+/*
+ * Record freeze progress against the dryer's own batch clock. Using the
+ * dryer's elapsed counter (not our uptime) keeps the rate correct across
+ * adapter reboots and Wi-Fi outages.
+ */
+static void track_freeze(hr_phase_tracker_t *tr, const hr_telemetry_t *t)
+{
+    if (!t->freeze_active) {
+        return;
+    }
+    long pct = t->freeze_pct;
+    long el = t->batch_elapsed_s;
+
+    if (tr->freeze_first_pct < 0 || pct < tr->freeze_last_pct) {
+        /* first sighting, or progress went backwards (new freeze) - restart */
+        tr->freeze_first_pct = pct;
+        tr->freeze_first_elapsed = el;
+        tr->freeze_last_pct = pct;
+        tr->freeze_last_elapsed = el;
+        return;
+    }
+    if (pct > tr->freeze_last_pct) {
+        tr->freeze_last_pct = pct;
+        tr->freeze_last_elapsed = el;
+    }
+}
+
+long hr_freeze_eta_s(const hr_phase_tracker_t *tr, const hr_telemetry_t *t)
+{
+    if (tr == NULL || t == NULL || !t->valid || !t->freeze_active) {
+        return -1;
+    }
+    if (t->freeze_pct >= 100) {
+        return 0;
+    }
+    /* Need two distinct percent readings to have a rate at all. */
+    if (tr->freeze_first_pct < 0 ||
+        tr->freeze_last_pct <= tr->freeze_first_pct) {
+        return -1;
+    }
+    long dpct = tr->freeze_last_pct - tr->freeze_first_pct;
+    long dt = tr->freeze_last_elapsed - tr->freeze_first_elapsed;
+    if (dpct <= 0 || dt <= 0) {
+        return -1;
+    }
+    long remaining = 100 - tr->freeze_last_pct;
+    if (remaining <= 0) {
+        return 0;
+    }
+    /* seconds-per-percent * percent remaining */
+    return (dt * remaining) / dpct;
 }
 
 void hr_phase_tracker_update(hr_phase_tracker_t *tr, const hr_telemetry_t *t,
@@ -79,6 +144,9 @@ void hr_phase_tracker_update(hr_phase_tracker_t *tr, const hr_telemetry_t *t,
         return;
     }
     tr->last_seen_ms = now_ms;
+
+    /* Freeze-progress rate, for the ETA. Safe to call for any frame. */
+    track_freeze(tr, t);
 
     /*
      * Prep frames carry their own countdown and are handled by type; they do
@@ -150,6 +218,8 @@ hr_phase_t hr_phase_of(const hr_telemetry_t *t)
     switch (t->type) {
     case 17:
         return HR_PHASE_PREPARING;
+    case 4:
+        return HR_PHASE_FREEZING;
     case 2:
         return HR_PHASE_TRANSITION;
     case 15:
@@ -176,6 +246,7 @@ const char *hr_phase_label(hr_phase_t p)
     case HR_PHASE_RUNNING:     return "Batch running";
     case HR_PHASE_DIAGNOSTICS: return "Diagnostics";
     case HR_PHASE_RECIPE:      return "Recipe settings";
+    case HR_PHASE_FREEZING:    return "Freezing";
     default:                   return "Unknown";
     }
 }
@@ -187,9 +258,11 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap)
     }
     int n = snprintf(buf, cap,
                      "{\"type\":%d,\"temp_f\":%ld,\"pressure\":%ld,"
-                     "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld}",
+                     "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld,"
+                     "\"freeze_pct\":%ld}",
                      t->type, t->temperature_f, t->pressure_raw,
-                     t->batch_elapsed_s, t->mode, t->prep_remaining_s);
+                     t->batch_elapsed_s, t->mode, t->prep_remaining_s,
+                     t->freeze_pct);
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }

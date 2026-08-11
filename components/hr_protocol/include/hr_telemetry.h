@@ -24,12 +24,14 @@ extern "C" {
 
 typedef struct {
     bool valid;          /* false if the frame was not a usable STAT */
-    int type;            /* STAT type discriminator (1,2,15,17,31,...) */
+    int type;            /* STAT type discriminator (1,2,4,15,17,31,...) */
     long temperature_f;  /* field 5, degrees F */
     long pressure_raw;   /* field 6, raw sensor counts */
     long batch_elapsed_s;/* field 7, seconds since batch start (0 = idle) */
     bool prep_active;    /* true for type-17 prep countdown frames */
     long prep_remaining_s; /* seconds remaining in 15-min prep (type 17) */
+    bool freeze_active;  /* true for type-4 freezing frames */
+    long freeze_pct;     /* freeze progress % toward target (type 4) */
     char mode[16];       /* mode string when present (e.g. "Auto","QUALITY") */
     char version[24];    /* firmware version string when present */
 } hr_telemetry_t;
@@ -55,11 +57,10 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap);
  * Phase of the freeze-drying cycle, used to decide which screen and which
  * (panel) options to show - mirroring the owner's manual screens.
  *
- * CONFIDENCE: HR_PHASE_IDLE / PREPARING / RUNNING and the DIAGNOSTICS and
- * RECIPE views are confirmed against real captures. The finer sub-phases the
- * manual describes (Freezing vs Drying vs Extra Dry vs Complete vs Defrost)
- * have NOT been observed on the wire yet - a full cycle capture is needed
- * before they can be distinguished, so they are not guessed at here.
+ * CONFIDENCE: IDLE / PREPARING / FREEZING / RUNNING and the DIAGNOSTICS and
+ * RECIPE views are confirmed against real captures. The remaining sub-phases
+ * the manual describes (Drying vs Extra Dry vs Complete vs Defrost) have NOT
+ * been observed on the wire yet, so they are not guessed at here.
  */
 typedef enum {
     HR_PHASE_UNKNOWN = 0,
@@ -69,6 +70,13 @@ typedef enum {
     HR_PHASE_RUNNING,     /* type 1 with elapsed>0 - batch under way */
     HR_PHASE_DIAGNOSTICS, /* type 15 - diagnostics/test screen */
     HR_PHASE_RECIPE,      /* type 31 - recipe/profile parameters */
+    /*
+     * type 4 - deep freeze after the user loads trays and presses CONTINUE.
+     * The chamber cools toward the freeze target before vacuum is pulled
+     * (pressure stays at the 10000 placeholder throughout). Field [11] is a
+     * progress percentage that rises as the temperature falls.
+     */
+    HR_PHASE_FREEZING,
 } hr_phase_t;
 
 /* Short human label, e.g. "Preparing dryer". Never NULL. */
@@ -94,6 +102,17 @@ typedef struct {
     unsigned long last_seen_ms;   /* when we last had a frame */
     bool have;              /* seen at least one frame */
     bool running;           /* current running determination */
+
+    /*
+     * Freeze-progress rate tracking, for an ETA to 100%. We remember the
+     * batch-elapsed time at which each new percent was first observed, so the
+     * rate is measured against the dryer's own clock (immune to adapter
+     * reboots and Wi-Fi gaps).
+     */
+    long freeze_first_pct;       /* first percent value we saw */
+    long freeze_first_elapsed;   /* batch elapsed when we saw it */
+    long freeze_last_pct;        /* most recent percent */
+    long freeze_last_elapsed;    /* batch elapsed at that percent */
 } hr_phase_tracker_t;
 
 void hr_phase_tracker_init(hr_phase_tracker_t *tr);
@@ -117,6 +136,17 @@ hr_phase_t hr_phase_of_tracked(const hr_telemetry_t *t,
 
 /* Backwards-compatible stateless form (elapsed>0 heuristic). */
 hr_phase_t hr_phase_of(const hr_telemetry_t *t);
+
+/*
+ * Estimated seconds remaining until freeze progress reaches 100%, based on
+ * the observed rate so far. Returns -1 when there isn't enough data yet (we
+ * need at least two distinct percent values) or we aren't freezing.
+ *
+ * NOTE: this is a linear extrapolation of an approximately-linear-but-not-
+ * really process; freezing usually slows near the target. Present it as an
+ * estimate, not a countdown.
+ */
+long hr_freeze_eta_s(const hr_phase_tracker_t *tr, const hr_telemetry_t *t);
 
 #ifdef __cplusplus
 }

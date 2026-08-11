@@ -186,6 +186,18 @@
         </div></div></div>
       <div class="stage" id="stage">Connecting…</div>
       <div class="sub" id="stagesub">Waiting for the freeze dryer</div>
+
+      <!-- freeze progress toward 100%, with an extrapolated ETA -->
+      <div id="freezebar" style="display:none;margin-top:18px;text-align:left">
+        <div style="display:flex;justify-content:space-between;font-size:13px;
+                    color:var(--muted);margin-bottom:6px">
+          <span id="fzpct">0% frozen</span><span id="fzeta">estimating…</span>
+        </div>
+        <div style="height:10px;background:var(--surface2);border-radius:5px;overflow:hidden">
+          <div id="fzfill" style="height:100%;width:0;background:var(--accent);
+               transition:width .4s ease"></div>
+        </div>
+      </div>
     </div>
 
     <!-- phase-specific instructions + valid options -->
@@ -483,6 +495,14 @@ function hhmmss(sec){
           : `${m}:${String(s).padStart(2,"0")}`;
 }
 function note(el,msg,kind){ el.className="notice "+(kind||"info"); el.innerHTML=msg; }
+/* Coarse, honest wording for an extrapolated estimate - no false precision. */
+function etaText(sec){
+  sec=Math.max(0,parseInt(sec||0,10));
+  if(sec<90)   return "a minute";
+  if(sec<3600) return Math.round(sec/60)+" min";
+  const h=Math.floor(sec/3600), m=Math.round((sec%3600)/60);
+  return m ? h+"h "+m+"m" : h+"h";
+}
 
 /*
  * Phase definitions, mirroring the Harvest Right owner's manual screens.
@@ -542,6 +562,14 @@ const PHASE = {
     body:"The dryer is displaying custom recipe parameters "+
          "(temperatures and times).",
     opts:[], note:"Change these on the machine's CUSTOM screen." },
+  7:{ /* FREEZING */
+    head:"Freezing the product",
+    body:"The trays are loaded and the chamber is freezing down to its target "+
+         "temperature. Vacuum hasn't been pulled yet — drying begins once the "+
+         "product is fully frozen. <b>Nothing to do right now.</b>",
+    opts:[
+      {k:"END BATCH", d:"Terminate the batch early", danger:true}],
+    note:"Pre-frozen food shortens this stage considerably." },
 };
 
 /*
@@ -565,6 +593,8 @@ function paintDash(st){
      batch's elapsed value when idle, so elapsed>0 does NOT mean running. */
   const prep   = phase === 2;                 /* HR_PHASE_PREPARING */
   const running= phase === 4;                 /* HR_PHASE_RUNNING   */
+  const frz    = phase === 7;                 /* HR_PHASE_FREEZING  */
+  const eta    = (st.freeze_eta_s === undefined) ? -1 : st.freeze_eta_s;
 
   /* hero */
   $("#stage").textContent = !linked ? "Dryer not connected"
@@ -572,6 +602,7 @@ function paintDash(st){
   $("#stagesub").textContent = !linked
     ? "Plug the adapter into the freeze dryer's USB port"
     : prep    ? "Pre-cooling — load your trays now"
+    : frz     ? (st.temp_f + "°F and falling · " + st.freeze_pct + "% frozen")
     : running ? "Running for " + hhmmss(st.elapsed_s)
     : have    ? "Press START on the dryer when you're ready"
               : "Waiting for the first status frame";
@@ -581,6 +612,11 @@ function paintDash(st){
     ring.style.setProperty("--p", Math.min(100,Math.max(0,(900-st.prep_s)/900*100)).toFixed(0));
     $("#ringval").textContent = hhmmss(st.prep_s);
     $("#ringlab").textContent = "until load";
+  } else if(frz){
+    /* Freeze progress is already a percentage - show it directly. */
+    ring.style.setProperty("--p", Math.min(100,Math.max(0,st.freeze_pct)));
+    $("#ringval").textContent = st.freeze_pct + "%";
+    $("#ringlab").textContent = "frozen";
   } else if(running){
     ring.style.setProperty("--p", 100);
     $("#ringval").textContent = hhmmss(st.elapsed_s);
@@ -591,13 +627,29 @@ function paintDash(st){
     $("#ringlab").textContent = linked ? "idle" : "no dryer";
   }
 
+  /* Freeze progress bar + ETA, shown only while freezing. */
+  const fb = $("#freezebar");
+  if(frz){
+    fb.style.display = "";
+    $("#fzfill").style.width = Math.min(100,Math.max(0,st.freeze_pct)) + "%";
+    $("#fzpct").textContent = st.freeze_pct + "% frozen";
+    $("#fzeta").textContent = eta > 0
+      ? "about " + etaText(eta) + " to 100%"
+      : (eta === 0 ? "target reached" : "estimating…");
+  } else {
+    fb.style.display = "none";
+  }
+
   /* metrics. Only show batch elapsed while a batch is actually running - the
      dryer retains the last batch's value when idle, which would otherwise
      look like a run in progress. */
   if(have){
     $("#m-temp").textContent    = st.temp_f;
     $("#m-press").textContent   = st.pressure;
-    $("#m-elapsed").textContent = running ? hhmmss(st.elapsed_s)
+    /* A batch is under way during freezing too, so show the live timer for
+       any in-batch phase; only a genuinely idle dryer shows the stale value. */
+    const inBatch = running || frz || prep || phase === 3;
+    $("#m-elapsed").textContent = inBatch ? hhmmss(st.elapsed_s)
                                 : (st.elapsed_s>0 ? "— (last: "+hhmmss(st.elapsed_s)+")" : "—");
     $("#m-mode").textContent    = st.mode || "—";
     $("#lastseen").textContent  = "Frame type " + st.stat_type +

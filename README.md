@@ -160,10 +160,10 @@ green and readings appear.
 Browse to the adapter's address from any device on your network. The dashboard shows
 whatever the dryer is doing right now.
 
-| Idle | Preparing | Running |
-|---|---|---|
-| ![Idle](docs/img/dashboard-idle.png) | ![Preparing](docs/img/dashboard-preparing.png) | ![Running](docs/img/dashboard-running.png) |
-| Press **START** on the machine | 15-minute pre-cool, load your trays | Elapsed timer, runs automatically |
+| Idle | Preparing | Freezing | Running |
+|---|---|---|---|
+| ![Idle](docs/img/dashboard-idle.png) | ![Preparing](docs/img/dashboard-preparing.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Running](docs/img/dashboard-running.png) |
+| Press **START** on the machine | 15-min pre-cool, load your trays | % frozen + estimated time to 100% | Elapsed timer, runs automatically |
 
 The **phase card** below the dial always tells you what's happening and what comes
 next, quoting the owner's manual — including the drain-valve steps that are easy to
@@ -334,9 +334,10 @@ every known verb, and which fields are confirmed vs. inferred.
 
 ### Known gaps
 
-- **Sub-phases aren't distinguished yet.** Freezing / drying / extra-dry / complete /
-  defrost all read as "Batch running" — no full-cycle capture exists to tell them
-  apart. A capture through a complete batch would fix this.
+- **Some sub-phases aren't distinguished yet.** Freezing *is* detected (STAT type 4,
+  with live % frozen and an estimated time to 100%). Drying, extra-dry,
+  process-complete and defrost still read as "Batch running" — those frames haven't
+  been captured yet.
 - **Pressure is raw sensor counts**, not mTorr. The scale factor needs a capture
   during a real vacuum pulldown.
 - **Field meanings marked "inferred"** in the protocol notes need confirmation.
