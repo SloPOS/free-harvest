@@ -427,8 +427,86 @@ static void test_drying_label(void)
     CHECK_STR(hr_phase_label(HR_PHASE_DRYING), "Drying");
 }
 
+/* ---- vacuum unit conversions + comparisons ---- */
+static void test_micron_conversions(void)
+{
+    /*
+     * The dryer reports MICRONS (mTorr) - its own firmware says "HighmTorr".
+     * 440 microns = 0.44 Torr = ~0.000587 bar.
+     */
+    TEST_CASE("micron conversions");
+    CHECK(hr_microns_to_torr(440) > 0.439 && hr_microns_to_torr(440) < 0.441);
+    CHECK(hr_microns_to_bar(440) > 0.00058 && hr_microns_to_bar(440) < 0.00060);
+    CHECK(hr_microns_to_pascal(440) > 58.0 && hr_microns_to_pascal(440) < 59.5);
+    /* sea level sanity: 760000 microns ~= 1 atm */
+    CHECK(hr_microns_to_atm(760000) > 0.99 && hr_microns_to_atm(760000) < 1.01);
+}
+
+static void test_vacuum_comparison_tiers(void)
+{
+    TEST_CASE("vacuum comparison tiers");
+    const char *d = NULL;
+    /* a real freeze-drying vacuum is below Mars' surface pressure */
+    const char *deep = hr_vacuum_comparison(440, &d);
+    CHECK(deep != NULL && deep[0] != '\0');
+    CHECK(d != NULL && d[0] != '\0');
+
+    /* different levels should give different phrases */
+    const char *atmos = hr_vacuum_comparison(700000, NULL);
+    const char *mid   = hr_vacuum_comparison(5000, NULL);
+    CHECK(strcmp(atmos, deep) != 0);
+    CHECK(strcmp(atmos, mid) != 0);
+    CHECK(strcmp(mid, deep) != 0);
+}
+
+static void test_vacuum_comparison_never_null(void)
+{
+    TEST_CASE("vacuum comparison never null");
+    CHECK(hr_vacuum_comparison(0, NULL) != NULL);
+    CHECK(hr_vacuum_comparison(-5, NULL) != NULL);
+    CHECK(hr_vacuum_comparison(999999999, NULL) != NULL);
+}
+
+/* ---- final dry + complete (from the 25.6h full-cycle MQTT capture) ---- */
+static void test_type6_is_final_dry(void)
+{
+    /* 12.9h stage: temp holds high (~124F) while vacuum goes deepest (204um) */
+    TEST_CASE("type6 is final dry");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,6,0,0,0,124,204,60000,100,46,Auto,1,50,0,0,7,0,,\r", &t));
+    CHECK_INT(t.type, 6);
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_FINAL_DRY);
+    CHECK_INT(t.temperature_f, 124);
+    CHECK(t.pressure_valid);
+    CHECK_INT(t.pressure_microns, 204);
+}
+
+static void test_type7_is_complete_and_vents(void)
+{
+    /* Venting: pressure jumps back to atmosphere (206 -> 148066 observed). */
+    TEST_CASE("type7 is complete and vents");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,7,0,0,0,92,148066,70000,200,46,Auto,1,1,0,0,7,0,,\r", &t));
+    CHECK_INT(t.type, 7);
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_COMPLETE);
+    CHECK(!t.pressure_valid);
+}
+
+static void test_new_phase_labels(void)
+{
+    TEST_CASE("new phase labels");
+    CHECK_STR(hr_phase_label(HR_PHASE_FINAL_DRY), "Final dry");
+    CHECK_STR(hr_phase_label(HR_PHASE_COMPLETE), "Batch complete");
+}
+
 int main(void)
 {
+    test_type6_is_final_dry();
+    test_type7_is_complete_and_vents();
+    test_new_phase_labels();
+    test_micron_conversions();
+    test_vacuum_comparison_tiers();
+    test_vacuum_comparison_never_null();
     test_type5_is_drying();
     test_real_pressure_is_microns();
     test_placeholder_pressure_is_flagged_invalid();

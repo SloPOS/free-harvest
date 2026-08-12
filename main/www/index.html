@@ -369,6 +369,17 @@
       <div class="scroll"><table><tbody id="verbbody"></tbody></table></div>
     </div>
     <div class="card">
+      <h2>Full-cycle capture</h2>
+      <div id="capinfo" class="notice info">checking…</div>
+      <div class="row">
+        <button id="dl2" class="primary">Download full log</button>
+        <button id="capclear" class="ghost">Clear log</button>
+      </div>
+      <div class="hint">Every frame is written to flash, so a complete cycle
+        survives reboots. Download it before clearing.</div>
+    </div>
+
+    <div class="card">
       <h2>Live frames</h2>
       <div class="row">
         <button id="pause" class="ghost">Pause</button>
@@ -918,6 +929,25 @@ $("#logauto").addEventListener("click",()=>{
 });
 
 /* ---------- frames controls ---------- */
+async function refreshCapture(){
+  try{
+    const c=await (await fetch("/api/capture/info",{cache:"no-store"})).json();
+    const el=$("#capinfo");
+    if(!c.ready){ note(el,"Flash capture unavailable on this build.","bad"); return; }
+    const kb=Math.round(c.bytes/1024), capkb=Math.round(c.capacity/1024);
+    const pct=c.capacity? Math.round(100*c.bytes/c.capacity):0;
+    const hrs=(c.bytes/60/4)/60; /* ~60B per frame, ~4 frames/min */
+    note(el,"<b>"+kb.toLocaleString()+" KB</b> recorded ("+pct+"% of "+
+      capkb.toLocaleString()+" KB) — roughly "+hrs.toFixed(1)+
+      " hours of frames.", pct>90?"bad":"info");
+  }catch(e){}
+}
+$("#dl2").addEventListener("click",()=>location.href="/api/capture");
+$("#capclear").addEventListener("click",async()=>{
+  if(!confirm("Erase the stored capture log? Download it first if you need it.")) return;
+  await fetch("/api/capture/clear",{method:"POST"});
+  setTimeout(refreshCapture,500);
+});
 $("#pause").addEventListener("click",()=>{ paused=!paused;
   $("#pause").textContent=paused?"Resume":"Pause"; });
 $("#dl").addEventListener("click",()=>location.href="/api/capture");
@@ -944,11 +974,12 @@ $("#otago").addEventListener("click",()=>{
 
 /* ---------- boot ---------- */
 show("v-dash");
-refreshState(); refreshVerbs(); refreshMqtt(); pollFrames();
+refreshState(); refreshVerbs(); refreshMqtt(); refreshCapture(); pollFrames();
 setInterval(pollFrames,1000);
 setInterval(refreshState,2000);
 setInterval(refreshVerbs,4000);
 setInterval(refreshMqtt,4000);
+setInterval(refreshCapture,5000);
 setInterval(()=>{ if(logAuto) refreshLog(); },2000);
 </script>
 </body>

@@ -75,7 +75,8 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
         out->prep_active = true;
         out->prep_remaining_s = hr_frame_field_int(f, 16, 0);
         copy_field(out->mode, sizeof(out->mode), f, 9);
-    } else if (out->type == 4 || out->type == 5) {
+    } else if (out->type == 4 || out->type == 5 ||
+               out->type == 6 || out->type == 7) {
         /*
          * In-cycle frames (freezing = 4, drying = 5). Same field layout as the
          * prep frame: mode at [9], phase-progress percent at [11].
@@ -237,6 +238,83 @@ hr_phase_t hr_phase_of_tracked(const hr_telemetry_t *t,
     return tr->running ? HR_PHASE_RUNNING : HR_PHASE_IDLE;
 }
 
+/* ---- vacuum unit conversions ------------------------------------------- */
+/* 1 micron = 1 mTorr = 0.001 Torr. 1 Torr = 133.322 Pa = 0.00133322 bar. */
+double hr_microns_to_torr(long microns)
+{
+    return (double)microns / HR_MICRONS_PER_TORR;
+}
+
+double hr_microns_to_bar(long microns)
+{
+    return hr_microns_to_torr(microns) * 0.00133322;
+}
+
+double hr_microns_to_atm(long microns)
+{
+    return hr_microns_to_torr(microns) / 760.0;
+}
+
+double hr_microns_to_pascal(long microns)
+{
+    return hr_microns_to_torr(microns) * 133.322;
+}
+
+const char *hr_vacuum_comparison(long microns, const char **detail)
+{
+    static const char *d;
+    if (microns <= 0) {
+        d = "No vacuum reading - the pump isn't running.";
+        if (detail) *detail = d;
+        return "no vacuum";
+    }
+    /*
+     * Reference points (in microns):
+     *   sea level      760,000      Everest summit  253,000
+     *   Mars surface     ~4,500     freeze-dry target ~500
+     * A working freeze dryer pulls BELOW the Martian surface pressure.
+     */
+    if (microns >= 500000) {
+        d = "Close to normal room pressure - the chamber has barely started "
+            "pumping down.";
+        if (detail) *detail = d;
+        return "about sea-level pressure";
+    }
+    if (microns >= 250000) {
+        d = "Thinner than the air on most mountain tops.";
+        if (detail) *detail = d;
+        return "like a high mountain";
+    }
+    if (microns >= 50000) {
+        d = "Thinner than the air at the summit of Everest, where climbers "
+            "need bottled oxygen.";
+        if (detail) *detail = d;
+        return "thinner than Everest's summit";
+    }
+    if (microns >= 4500) {
+        d = "Approaching the pressure at the surface of Mars - about 0.6% of "
+            "Earth's atmosphere.";
+        if (detail) *detail = d;
+        return "nearing Martian pressure";
+    }
+    if (microns >= 1000) {
+        d = "Below the surface pressure of Mars. Water can't stay liquid here - "
+            "ice turns straight to vapour.";
+        if (detail) *detail = d;
+        return "below the surface of Mars";
+    }
+    if (microns >= 200) {
+        d = "A proper freeze-drying vacuum - many times lower than the Martian "
+            "surface. This is where sublimation runs well.";
+        if (detail) *detail = d;
+        return "deep freeze-drying vacuum";
+    }
+    d = "An exceptionally hard vacuum for a home machine - approaching the "
+        "thin upper edge of Earth's atmosphere.";
+    if (detail) *detail = d;
+    return "near-space vacuum";
+}
+
 hr_phase_t hr_phase_of(const hr_telemetry_t *t)
 {
     if (t == NULL || !t->valid) {
@@ -249,6 +327,10 @@ hr_phase_t hr_phase_of(const hr_telemetry_t *t)
         return HR_PHASE_FREEZING;
     case 5:
         return HR_PHASE_DRYING;
+    case 6:
+        return HR_PHASE_FINAL_DRY;
+    case 7:
+        return HR_PHASE_COMPLETE;
     case 2:
         return HR_PHASE_TRANSITION;
     case 15:
@@ -256,10 +338,9 @@ hr_phase_t hr_phase_of(const hr_telemetry_t *t)
     case 31:
         return HR_PHASE_RECIPE;
     case 1:
-        /* A batch is under way once the elapsed counter starts moving. The
-         * manual's finer sub-phases (freeze/dry/extra-dry/complete/defrost)
-         * are not distinguishable from any field we have observed yet, so we
-         * report RUNNING rather than guessing. */
+        /* A batch is under way once the elapsed counter starts moving. Note
+         * the dryer also sits in type 1 AFTER a batch finishes, so "running"
+         * is decided by whether the counter is still advancing. */
         return (t->batch_elapsed_s > 0) ? HR_PHASE_RUNNING : HR_PHASE_IDLE;
     default:
         return HR_PHASE_UNKNOWN;
@@ -277,6 +358,8 @@ const char *hr_phase_label(hr_phase_t p)
     case HR_PHASE_RECIPE:      return "Recipe settings";
     case HR_PHASE_FREEZING:    return "Freezing";
     case HR_PHASE_DRYING:      return "Drying";
+    case HR_PHASE_FINAL_DRY:   return "Final dry";
+    case HR_PHASE_COMPLETE:    return "Batch complete";
     default:                   return "Unknown";
     }
 }

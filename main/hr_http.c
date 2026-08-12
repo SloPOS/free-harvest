@@ -1,3 +1,4 @@
+#include "hr_capture.h"
 #include "hr_http.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
@@ -235,6 +236,27 @@ static esp_err_t h_capture(httpd_req_t *req)
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Content-Disposition",
                        "attachment; filename=hr_capture.txt");
+
+    /*
+     * Prefer the persistent flash log - it holds a whole cycle. Fall back to
+     * the small RAM ring only if the capture partition is unavailable.
+     */
+    if (hr_capture_ready() && hr_capture_size() > 0) {
+        void *h = hr_capture_open();
+        if (h != NULL) {
+            static char buf[1024];
+            int n;
+            while ((n = hr_capture_read(h, buf, sizeof(buf))) > 0) {
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+                    hr_capture_close(h);
+                    return ESP_FAIL;
+                }
+            }
+            hr_capture_close(h);
+            return httpd_resp_sendstr_chunk(req, NULL);
+        }
+    }
+
     static hr_hist_entry_t out[HR_HIST_CAP];
     int n;
     LOCK();
@@ -248,6 +270,26 @@ static esp_err_t h_capture(httpd_req_t *req)
         httpd_resp_send_chunk(req, line, len);
     }
     return httpd_resp_sendstr_chunk(req, NULL);
+}
+
+/* GET /api/capture/info -> {"ready":..,"bytes":..,"capacity":..} */
+static esp_err_t h_capture_info(httpd_req_t *req)
+{
+    char body[160];
+    int n = snprintf(body, sizeof(body),
+                     "{\"ready\":%s,\"bytes\":%u,\"capacity\":%u}",
+                     hr_capture_ready() ? "true" : "false",
+                     (unsigned)hr_capture_size(),
+                     (unsigned)hr_capture_capacity());
+    return send_json(req, body, n);
+}
+
+/* POST /api/capture/clear -> erase the persistent log */
+static esp_err_t h_capture_clear(httpd_req_t *req)
+{
+    bool ok = hr_capture_clear();
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
 }
 
 /* -------------------------------------------------------------------- */
@@ -548,6 +590,8 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/history", HTTP_GET, h_history);
     reg("/api/verbs", HTTP_GET, h_verbs);
     reg("/api/capture", HTTP_GET, h_capture);
+    reg("/api/capture/info", HTTP_GET, h_capture_info);
+    reg("/api/capture/clear", HTTP_POST, h_capture_clear);
     reg("/api/scan", HTTP_GET, h_scan);
     reg("/api/wifi", HTTP_POST, h_wifi_post);
     reg("/api/forget", HTTP_POST, h_forget);

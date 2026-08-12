@@ -100,6 +100,19 @@ typedef enum {
      * (-18F -> -13F observed). Announced by an NTFY,5 frame.
      */
     HR_PHASE_DRYING,
+    /*
+     * type 6 - final / secondary dry. The longest stage by far (12.9h in a
+     * 25.6h capture): shelf temperature holds high (~124F) while the vacuum
+     * is pulled to its DEEPEST point (~204 microns).
+     */
+    HR_PHASE_FINAL_DRY,
+    /*
+     * type 7 - venting / batch complete. Unmistakable: the vacuum is released
+     * and pressure jumps from a few hundred microns back to atmosphere
+     * (206 -> 148,066 observed) as the drain valve opens. This is the
+     * end-of-cycle marker.
+     */
+    HR_PHASE_COMPLETE,
 } hr_phase_t;
 
 /* Short human label, e.g. "Preparing dryer". Never NULL. */
@@ -159,6 +172,30 @@ hr_phase_t hr_phase_of_tracked(const hr_telemetry_t *t,
 
 /* Backwards-compatible stateless form (elapsed>0 heuristic). */
 hr_phase_t hr_phase_of(const hr_telemetry_t *t);
+
+/* ------------------------------------------------------------------ */
+/* Vacuum units + comparisons                                          */
+/* ------------------------------------------------------------------ */
+/*
+ * The dryer reports vacuum in MICRONS (millitorr) - confirmed by the string
+ * "HighmTorr" in its own firmware's vacuum alarm. 1 micron = 1 mTorr =
+ * 0.001 Torr. Sea level is ~760,000 microns.
+ */
+#define HR_MICRONS_PER_TORR 1000.0
+#define HR_SEA_LEVEL_MICRONS 760000.0
+
+/* Convert microns to other units. */
+double hr_microns_to_torr(long microns);
+double hr_microns_to_bar(long microns);
+double hr_microns_to_atm(long microns);
+double hr_microns_to_pascal(long microns);
+
+/*
+ * A human comparison for the current vacuum level, e.g.
+ * "lower than the surface of Mars". Returns a short phrase, never NULL.
+ * `detail` (optional, may be NULL) receives a longer explanatory sentence.
+ */
+const char *hr_vacuum_comparison(long microns, const char **detail);
 
 /*
  * Estimated seconds remaining until freeze progress reaches 100%, based on

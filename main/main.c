@@ -9,6 +9,7 @@
  * test/). The exact contents the dryer expects inside a GOTIT ack are NOT yet
  * confirmed - see README and decoded/PROTOCOL_NOTES.md.
  */
+#include "hr_capture.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
@@ -54,6 +55,15 @@ static void on_inbound(const hr_frame_t *f, void *user)
 
     hr_http_notify(seq);
 
+    /* Persist every frame so a full cycle can be recovered later - the RAM
+     * ring only holds a few minutes. */
+    {
+        char line[HR_MAX_FRAME];
+        if (hr_frame_tostring(f, line, sizeof(line)) > 0) {
+            hr_capture_append((uint32_t)now_ms(), line);
+        }
+    }
+
     /* Decode STAT frames once, then share with both the web UI and MQTT. */
     hr_telemetry_t tel;
     if (hr_telemetry_from_stat(f, &tel)) {
@@ -84,6 +94,7 @@ void app_main(void)
     /* Capture logs into the in-app ring buffer (viewable at /api/log) as early
      * as possible so boot and MQTT connection errors are visible in the UI. */
     hr_log_init();
+    hr_capture_init();
 
     s_hist_lock = xSemaphoreCreateMutex();
     hr_history_init(&s_history);
