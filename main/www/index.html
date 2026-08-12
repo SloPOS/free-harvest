@@ -15,7 +15,8 @@
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
   html,body{margin:0; background:var(--bg); color:var(--fg);
     font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  body{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
+  /* room for the tab bar (64px) plus the docked facts strip (~38px) */
+  body{padding-bottom:calc(110px + env(safe-area-inset-bottom))}
 
   header{position:sticky; top:0; z-index:20; background:rgba(14,18,22,.92);
     backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
@@ -66,9 +67,11 @@
     font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums}
   .vac .units b{color:var(--fg); font-weight:600}
 
-  .facts{overflow:hidden; border-top:1px solid var(--line);
-    border-bottom:1px solid var(--line); background:var(--surface);
-    margin:0 -16px; padding:10px 0}
+  /* docked full-width strip sitting directly on top of the tab bar */
+  .facts{position:fixed; left:0; right:0; z-index:29; overflow:hidden;
+    bottom:calc(64px + env(safe-area-inset-bottom));
+    border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+    background:rgba(23,29,36,.97); backdrop-filter:blur(8px); padding:9px 0}
   .facts .track{display:flex; gap:40px; white-space:nowrap; width:max-content;
     animation:marq 48s linear infinite}
   .facts .track:hover{animation-play-state:paused}
@@ -269,9 +272,6 @@
         </div>
       </div>
     </div>
-
-    <!-- scrolling pressure facts -->
-    <div class="facts"><div class="track" id="facts"></div></div>
 
     <div class="card">
       <h2>Actions</h2>
@@ -522,6 +522,9 @@
   </section>
 
 </main>
+
+<!-- scrolling pressure facts, docked directly above the tab bar -->
+<div class="facts"><div class="track" id="facts"></div></div>
 
 <nav>
   <button id="nav-dash" class="active" data-view="v-dash"><span class="ic">📊</span>Dashboard</button>
@@ -925,7 +928,11 @@ async function refreshState(){
       show(done ? "v-dash" : "v-setup");
       $$("nav button").forEach(x=>x.classList.toggle("active", x.dataset.view==="v-dash"));
     }
+    /* Hide the tab bar and the docked facts strip during onboarding, and
+       drop the reserved bottom padding so the setup page isn't gapped. */
     document.querySelector("nav").style.display = done ? "" : "none";
+    document.querySelector(".facts").style.display = done ? "" : "none";
+    document.body.style.paddingBottom = done ? "" : "16px";
     paintDash(st);
   }catch(e){}
 }

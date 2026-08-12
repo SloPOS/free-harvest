@@ -256,8 +256,54 @@ static void test_send_config_refuses_hardware(void)
     CHECK_INT(log.len, 0);
 }
 
+static void test_link_survives_normal_idle_frame_gap(void)
+{
+    /*
+     * Regression: the dryer sends idle STAT frames every ~15,021 ms - just
+     * OVER a 15,000 ms timeout - so the link expired a few ms before each
+     * frame arrived and the UI flapped disconnected/ready every 15 seconds.
+     * The timeout must comfortably exceed the real frame cadence.
+     */
+    TEST_CASE("link survives normal idle frame gap");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+
+    unsigned long t = 100000;
+    feed(&s, "STAT,1,0,0,0,69,151882,0,0,38,0,1,QUALITY,v6.4,,\r", t);
+    CHECK_INT(s.link, HR_LINK_UP);
+
+    /* real idle gaps measured from a capture, ticking in between as main() does */
+    const unsigned long gaps[] = {15021, 15020, 15021, 15041, 15021};
+    for (int i = 0; i < 5; i++) {
+        for (unsigned long k = 250; k < gaps[i]; k += 250) {
+            hr_session_tick(&s, t + k);
+        }
+        t += gaps[i];
+        hr_session_tick(&s, t);
+        CHECK_INT(s.link, HR_LINK_UP); /* must NOT drop between frames */
+        feed(&s, "STAT,1,0,0,0,69,151882,0,0,38,0,1,QUALITY,v6.4,,\r", t);
+    }
+    CHECK_INT(s.link, HR_LINK_UP);
+}
+
+static void test_link_still_drops_when_dryer_really_gone(void)
+{
+    /* The timeout must still detect a genuinely unplugged dryer. */
+    TEST_CASE("link drops when dryer really gone");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    feed(&s, "STAT,1,0,0,0,69,151882,0,0,38,0,1,QUALITY,v6.4,,\r", 100000);
+    CHECK_INT(s.link, HR_LINK_UP);
+    hr_session_tick(&s, 100000 + HR_LINK_TIMEOUT_MS + 1000);
+    CHECK_INT(s.link, HR_LINK_DOWN);
+}
+
 int main(void)
 {
+    test_link_survives_normal_idle_frame_gap();
+    test_link_still_drops_when_dryer_really_gone();
     test_classify_config_verbs();
     test_hardware_verbs_stay_unknown();
     test_send_config_transmits_with_args();

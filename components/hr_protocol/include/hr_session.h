@@ -19,8 +19,17 @@
 extern "C" {
 #endif
 
-/* Link is considered down after this long without an inbound frame. */
-#define HR_LINK_TIMEOUT_MS 15000UL
+/*
+ * Link is considered down after this long without an inbound frame.
+ *
+ * MUST comfortably exceed the dryer's real frame cadence. It sends idle STAT
+ * frames every ~15,021 ms - fractionally MORE than 15 s - so a 15,000 ms
+ * timeout expired a few milliseconds before each frame arrived and the UI
+ * flapped "disconnected"/"ready" every 15 seconds. Gaps are longer still
+ * mid-run (76 s observed). 45 s gives three idle intervals of headroom while
+ * still noticing a genuinely unplugged dryer promptly.
+ */
+#define HR_LINK_TIMEOUT_MS 45000UL
 
 typedef enum {
     HR_LINK_DOWN = 0,
