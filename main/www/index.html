@@ -44,6 +44,40 @@
   .ring>div{width:120px;height:120px;border-radius:50%;background:var(--surface);
     display:grid;place-items:center}
   .ring b{font-size:24px} .ring small{color:var(--muted);font-size:12px}
+  /* phase artwork sits behind the readout inside the ring */
+  .ring>div{position:relative; overflow:hidden}
+  .ring .art{position:absolute; inset:0; background-size:114%;
+    background-position:center 46%; background-repeat:no-repeat;
+    opacity:.85; transition:opacity .5s; filter:saturate(1.2) contrast(1.05)}
+  /* darken just behind the numbers so they stay readable over the artwork */
+  .ring>div::after{content:""; position:absolute; inset:0; z-index:0;
+    background:radial-gradient(circle at 50% 50%,
+      rgba(14,18,22,.82) 0%, rgba(14,18,22,.55) 45%, rgba(14,18,22,.15) 75%)}
+  .ring .rv{position:relative; z-index:2; text-align:center;
+    text-shadow:0 1px 8px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.8)}
+
+  /* vacuum comparison + scrolling facts */
+  .vac{margin-top:14px; padding:12px 14px; border-radius:12px;
+    background:linear-gradient(135deg,rgba(78,161,255,.12),rgba(78,161,255,.03));
+    border:1px solid rgba(78,161,255,.18)}
+  .vac .big{font-size:15px; font-weight:650; color:var(--fg)}
+  .vac .sub{font-size:12.5px; color:var(--muted); margin-top:4px; line-height:1.5}
+  .vac .units{display:flex; gap:14px; flex-wrap:wrap; margin-top:8px;
+    font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums}
+  .vac .units b{color:var(--fg); font-weight:600}
+
+  .facts{overflow:hidden; border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line); background:var(--surface);
+    margin:0 -16px; padding:10px 0}
+  .facts .track{display:flex; gap:40px; white-space:nowrap; width:max-content;
+    animation:marq 48s linear infinite}
+  .facts .track:hover{animation-play-state:paused}
+  .facts span{font-size:13px; color:var(--muted)}
+  .facts b{color:var(--accent); font-weight:650}
+  @keyframes marq{from{transform:translateX(0)} to{transform:translateX(-50%)}}
+  @media (prefers-reduced-motion:reduce){
+    .facts .track{animation:none; flex-wrap:wrap; white-space:normal; width:auto}
+  }
 
   /* metric grid */
   .metrics{display:grid; grid-template-columns:repeat(2,1fr); gap:10px}
@@ -181,7 +215,8 @@
   <section id="v-dash" class="view">
     <div class="card hero">
       <div class="ring" id="ring"><div>
-        <div style="text-align:center">
+        <div class="art" id="ringart"></div>
+        <div class="rv">
           <b id="ringval">–</b><br><small id="ringlab">idle</small>
         </div></div></div>
       <div class="stage" id="stage">Connecting…</div>
@@ -221,7 +256,22 @@
           <div class="v" style="font-size:18px"><span id="m-mode">–</span></div></div>
       </div>
       <div class="hint" id="lastseen">Waiting for data from the dryer…</div>
+
+      <!-- vacuum context: what this pressure actually means -->
+      <div class="vac" id="vacbox" style="display:none">
+        <div class="big" id="vacbig">–</div>
+        <div class="sub" id="vacsub"></div>
+        <div class="units">
+          <span><b id="u-torr">–</b> Torr</span>
+          <span><b id="u-bar">–</b> bar</span>
+          <span><b id="u-atm">–</b> atm</span>
+          <span><b id="u-pa">–</b> Pa</span>
+        </div>
+      </div>
     </div>
+
+    <!-- scrolling pressure facts -->
+    <div class="facts"><div class="track" id="facts"></div></div>
 
     <div class="card">
       <h2>Actions</h2>
@@ -590,6 +640,26 @@ const PHASE = {
       {k:"END BATCH", d:"Terminate the batch early", danger:true}],
     note:"When drying nears completion the dryer adds extra dry time, then "+
          "shows PROCESS COMPLETE and asks you to open the drain valve." },
+  9:{ /* FINAL DRY */
+    head:"Final dry",
+    body:"The long final stage — shelves hold their highest temperature while "+
+         "the vacuum is pulled to its deepest point, driving off the last "+
+         "bound moisture. <b>This is usually the longest part of the cycle.</b>",
+    opts:[
+      {k:"END BATCH", d:"Terminate the batch early", danger:true}],
+    note:"In a measured 25.6-hour cycle this stage alone took nearly 13 hours." },
+  10:{ /* COMPLETE / VENTING */
+    head:"Batch complete — open the drain valve",
+    body:"Drying has finished and the chamber is venting back to normal "+
+         "pressure. <b>Check the drain hose isn't sitting in water</b>, then "+
+         "open the drain valve to release the vacuum so the door will open.",
+    opts:[
+      {k:"MORE DRY TIME", d:"If the food is still moist"},
+      {k:"WARM TRAYS / STOP WARMING", d:"Warm trays for easier handling"},
+      {k:"DEFROST", d:"Melt chamber ice — use if running another batch soon"},
+      {k:"NO DEFROST", d:"End here and let the ice melt on its own"}],
+    note:"Break a thick piece in half to check it's dry all the way through "+
+         "before packaging — one moist piece can spoil a whole bag." },
 };
 
 /*
@@ -604,6 +674,83 @@ const COMPLETE_HELP =
   "<b>STOP WARMING</b>, and <b>DEFROST</b> or <b>NO DEFROST</b>. Use DEFROST "+
   "if you plan to run another batch right away.";
 
+
+/* ---------- vacuum units + context ---------- */
+/* The dryer reports MICRONS (mTorr) - its own firmware string is "HighmTorr".
+   1 micron = 0.001 Torr. Sea level ~760,000 microns. */
+const toTorr = um => um/1000;
+const toBar  = um => toTorr(um)*0.00133322;
+const toAtm  = um => toTorr(um)/760;
+const toPa   = um => toTorr(um)*133.322;
+function sig(n){
+  if(n===0) return "0";
+  if(Math.abs(n)>=100) return n.toFixed(0);
+  if(Math.abs(n)>=1)   return n.toFixed(2);
+  if(Math.abs(n)>=0.001) return n.toFixed(4);
+  return n.toExponential(1);
+}
+/* Tiers mirror hr_vacuum_comparison() in the firmware. */
+function vacContext(um){
+  if(um>=500000) return ["About sea-level pressure",
+    "Barely pumped down yet — the chamber is still near room pressure."];
+  if(um>=250000) return ["Like a high mountain",
+    "Thinner than the air on most mountain tops."];
+  if(um>=50000)  return ["Thinner than Everest's summit",
+    "Below the air pressure where climbers need bottled oxygen."];
+  if(um>=4500)   return ["Nearing Martian pressure",
+    "Approaching the surface pressure of Mars — about 0.6% of Earth's."];
+  if(um>=1000)   return ["Below the surface of Mars",
+    "Water can't stay liquid here — ice turns straight to vapour."];
+  if(um>=200)    return ["Deep freeze-drying vacuum",
+    "Many times lower than the Martian surface. Sublimation runs well here."];
+  return ["Near-space vacuum",
+    "An exceptionally hard vacuum for a home machine — near the thin upper edge "+
+    "of Earth's atmosphere."];
+}
+function paintVacuum(st){
+  const box=$("#vacbox");
+  if(!st.vacuum_ok || !st.vacuum_um){ box.style.display="none"; return; }
+  const um=st.vacuum_um;
+  box.style.display="";
+  const [big,sub]=vacContext(um);
+  $("#vacbig").textContent = um.toLocaleString()+" microns — "+big;
+  $("#vacsub").textContent = sub;
+  $("#u-torr").textContent = sig(toTorr(um));
+  $("#u-bar").textContent  = sig(toBar(um));
+  $("#u-atm").textContent  = sig(toAtm(um));
+  $("#u-pa").textContent   = sig(toPa(um));
+}
+
+/* ---------- scrolling facts ---------- */
+const FACTS=[
+  ["Sea level","760,000 microns — the air you're breathing right now"],
+  ["Everest summit","253,000 microns, about a third of sea-level pressure"],
+  ["Mars surface","~4,500 microns — thinner than any Earth mountain"],
+  ["Your freeze dryer","often below 500 microns, far lower than Mars"],
+  ["Why the vacuum?","below ~4,580 microns water can't be liquid — ice sublimates"],
+  ["Sublimation","ice becomes vapour without ever melting, so food keeps its shape"],
+  ["Deep space","around 0.000000001 microns — a near-perfect vacuum"],
+  ["The Moon","~0.0000003 microns of gas at the surface"],
+  ["Vacuum tube TVs","ran near 0.001 microns inside the glass"],
+  ["Light bulbs","evacuated to roughly 1 micron before filling with gas"],
+  ["Freeze-dried food","keeps for decades because ~98% of its water is gone"],
+  ["NASA","freeze-dries astronaut meals — light, shelf-stable, rehydrates fast"],
+];
+function buildFacts(){
+  const html = FACTS.map(([k,v])=>`<span><b>${esc(k)}</b> · ${esc(v)}</span>`).join("");
+  $("#facts").innerHTML = html + html;   /* duplicated for a seamless loop */
+}
+
+/* ---------- phase artwork in the ring ---------- */
+/* idle | freeze (cold) | dry (warm) | heat (hottest, final dry) */
+function artFor(phase, tempF){
+  if(phase===7) return "freeze";                 /* HR_PHASE_FREEZING */
+  if(phase===9) return "heat";                   /* HR_PHASE_FINAL_DRY */
+  if(phase===8) return tempF>=100?"heat":"dry";  /* HR_PHASE_DRYING */
+  if(phase===10) return "dry";                   /* HR_PHASE_COMPLETE */
+  return "idle";
+}
+
 /* ---------- dashboard (phase-gated) ---------- */
 function paintDash(st){
   const linked = st.link === "up";
@@ -614,7 +761,8 @@ function paintDash(st){
   const prep   = phase === 2;                 /* HR_PHASE_PREPARING */
   const running= phase === 4;                 /* HR_PHASE_RUNNING   */
   const frz    = phase === 7;                 /* HR_PHASE_FREEZING  */
-  const dry    = phase === 8;                 /* HR_PHASE_DRYING    */
+  const dry    = phase === 8 || phase === 9;  /* DRYING / FINAL_DRY */
+  const done   = phase === 10;                /* HR_PHASE_COMPLETE  */
   const eta    = (st.freeze_eta_s === undefined) ? -1 : st.freeze_eta_s;
   const pct    = (st.phase_pct === undefined) ? st.freeze_pct : st.phase_pct;
 
@@ -627,6 +775,7 @@ function paintDash(st){
     : frz     ? (st.temp_f + "°F and falling · " + pct + "% frozen")
     : dry     ? (st.vacuum_ok ? (st.vacuum_um + " microns · " + st.temp_f + "°F")
                               : ("drying · " + st.temp_f + "°F"))
+    : done    ? "Venting — open the drain valve on the dryer"
     : running ? "Running for " + hhmmss(st.elapsed_s)
     : have    ? "Press START on the dryer when you're ready"
               : "Waiting for the first status frame";
@@ -645,7 +794,11 @@ function paintDash(st){
     /* Drying: show time in this phase; there's no reliable % for it yet. */
     ring.style.setProperty("--p", 100);
     $("#ringval").textContent = hhmmss(st.phase_s || 0);
-    $("#ringlab").textContent = "drying";
+    $("#ringlab").textContent = (phase===9) ? "final dry" : "drying";
+  } else if(done){
+    ring.style.setProperty("--p", 100);
+    $("#ringval").textContent = "Done";
+    $("#ringlab").textContent = "venting";
   } else if(running){
     ring.style.setProperty("--p", 100);
     $("#ringval").textContent = hhmmss(st.elapsed_s);
@@ -681,13 +834,22 @@ function paintDash(st){
       : '<span style="color:var(--muted);font-size:16px">no vacuum</span>';
     /* A batch is under way during freezing too, so show the live timer for
        any in-batch phase; only a genuinely idle dryer shows the stale value. */
-    const inBatch = running || frz || dry || prep || phase === 3;
+    const inBatch = running || frz || dry || done || prep || phase === 3;
     $("#m-elapsed").textContent = inBatch ? hhmmss(st.elapsed_s)
                                 : (st.elapsed_s>0 ? "— (last: "+hhmmss(st.elapsed_s)+")" : "—");
     $("#m-mode").textContent    = st.mode || "—";
     $("#lastseen").textContent  = "Frame type " + st.stat_type +
       " · phase " + (st.phase_label||"?");
   }
+
+  /* phase artwork inside the ring + vacuum context panel */
+  const art=artFor(phase, st.temp_f||0);
+  const artEl=$("#ringart");
+  if(artEl && artEl.dataset.art!==art){
+    artEl.dataset.art=art;
+    artEl.style.backgroundImage="url(/img/"+art+".png)";
+  }
+  paintVacuum(st);
 
   /* phase card */
   const card=$("#phasecard");

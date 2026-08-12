@@ -23,6 +23,16 @@ static const char *TAG = "hr_http";
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
 
+/* Phase artwork shown inside the progress ring (see main/www/img). */
+extern const uint8_t idle_png_start[] asm("_binary_idle_png_start");
+extern const uint8_t idle_png_end[] asm("_binary_idle_png_end");
+extern const uint8_t freeze_png_start[] asm("_binary_freeze_png_start");
+extern const uint8_t freeze_png_end[] asm("_binary_freeze_png_end");
+extern const uint8_t dry_png_start[] asm("_binary_dry_png_start");
+extern const uint8_t dry_png_end[] asm("_binary_dry_png_end");
+extern const uint8_t heat_png_start[] asm("_binary_heat_png_start");
+extern const uint8_t heat_png_end[] asm("_binary_heat_png_end");
+
 static hr_session_t *s_session;
 static hr_history_t *s_history;
 static httpd_handle_t s_httpd;
@@ -541,6 +551,24 @@ static esp_err_t h_mqtt_post(httpd_req_t *req)
     return send_json(req, "{\"ok\":true}", 11);
 }
 
+/* GET /img/<name>.png -> embedded phase artwork (cached hard, never changes) */
+static esp_err_t h_img(httpd_req_t *req)
+{
+    const uint8_t *start = NULL, *end = NULL;
+    const char *u = req->uri;
+    if (strstr(u, "idle")) { start = idle_png_start; end = idle_png_end; }
+    else if (strstr(u, "freeze")) { start = freeze_png_start; end = freeze_png_end; }
+    else if (strstr(u, "heat")) { start = heat_png_start; end = heat_png_end; }
+    else if (strstr(u, "dry")) { start = dry_png_start; end = dry_png_end; }
+    if (start == NULL) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_send(req, NULL, 0);
+    }
+    httpd_resp_set_type(req, "image/png");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=31536000, immutable");
+    return httpd_resp_send(req, (const char *)start, end - start);
+}
+
 /* Captive-portal: redirect common probe URLs to the setup page. */
 static esp_err_t h_redirect(httpd_req_t *req)
 {
@@ -600,6 +628,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/mqtt", HTTP_GET, h_mqtt_get);
     reg("/api/mqtt", HTTP_POST, h_mqtt_post);
     reg("/api/log", HTTP_GET, h_log);
+    reg("/img/*", HTTP_GET, h_img);
     /* Captive-portal probes (Android/Apple/Windows). */
     reg("/generate_204", HTTP_GET, h_redirect);
     reg("/hotspot-detect.html", HTTP_GET, h_redirect);
