@@ -23,8 +23,9 @@
 #include "hr_session.h"
 #include "hr_telemetry.h"
 
-/* Free Harvest release version, shown in Settings so users can report it. */
-#define FREEHARVEST_VERSION "0.1"
+/* Free Harvest release version, shown in Settings so users can report it.
+ * Keep this in step with the git tag when cutting a release. */
+#define FREEHARVEST_VERSION "0.3"
 
 /*
  * Provide the mutex that guards the shared history object. MUST be called
