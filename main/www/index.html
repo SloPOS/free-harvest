@@ -534,7 +534,10 @@
 <script>
 "use strict";
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let lastSeq=0, paused=false, setupDone=false, logAuto=false, lastState=null;
+/* setupDone starts null (= not yet known). It must NOT start false: when
+   Wi-Fi is unconfigured `done` is false too, so a false start made the
+   change-detection below never fire and the setup screen never appeared. */
+let lastSeq=0, paused=false, setupDone=null, logAuto=false, lastState=null;
 
 /* ---------- view routing ---------- */
 function show(id){
@@ -890,7 +893,7 @@ async function refreshState(){
     $("#dot").className = "dot" + (linked? " on":"");
     $("#hdrsub").textContent = st.wifi==="connected"
       ? (linked? "dryer connected" : "waiting for dryer") : st.wifi;
-    $("#hdr").textContent = "Freeze Dryer";
+    /* leave the "Free Harvest" wordmark alone - it used to be overwritten here */
 
     $("#d-in").textContent=st.frames_in; $("#d-out").textContent=st.frames_out;
     $("#d-unk").textContent=st.unknown_verbs; $("#d-bad").textContent=st.frames_bad;
@@ -928,11 +931,19 @@ async function refreshState(){
       show(done ? "v-dash" : "v-setup");
       $$("nav button").forEach(x=>x.classList.toggle("active", x.dataset.view==="v-dash"));
     }
-    /* Hide the tab bar and the docked facts strip during onboarding, and
-       drop the reserved bottom padding so the setup page isn't gapped. */
-    document.querySelector("nav").style.display = done ? "" : "none";
+    /*
+     * Safety net: never strand the user on the dashboard while Wi-Fi is
+     * unconfigured. Nothing there is actionable, and hiding the tab bar (as
+     * this used to do) left no route to setup at all.
+     */
+    if(!done && document.getElementById("v-dash").classList.contains("active")){
+      show("v-setup");
+    }
+    /* The tab bar stays available at all times so Settings is always reachable;
+       only the facts strip is hidden during onboarding. */
     document.querySelector(".facts").style.display = done ? "" : "none";
-    document.body.style.paddingBottom = done ? "" : "16px";
+    document.body.style.paddingBottom = done
+      ? "" : "calc(76px + env(safe-area-inset-bottom))";
     paintDash(st);
   }catch(e){}
 }
@@ -1142,7 +1153,9 @@ $("#otago").addEventListener("click",()=>{
 });
 
 /* ---------- boot ---------- */
-show("v-dash");
+/* Start on setup; refreshState() switches to the dashboard as soon as it
+   confirms Wi-Fi is configured. */
+show("v-setup");
 refreshState(); refreshVerbs(); refreshMqtt(); refreshCapture(); pollFrames();
 setInterval(pollFrames,1000);
 setInterval(refreshState,2000);
