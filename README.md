@@ -103,10 +103,17 @@ the app or MQTT, by design.
 3. Flash with [esptool](https://github.com/espressif/esptool):
 
 ```bash
-python -m esptool --chip esp32s3 -p COM7 -b 460800 write-flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x20000 hr_wifi_adapter.bin
+python -m esptool --chip esp32s3 -p COM7 -b 460800 write-flash 0x0 bootloader.bin 0x8000 partition-table.bin 0xf000 ota_data_initial.bin 0x20000 hr_wifi_adapter.bin
 ```
 
 Replace `COM7` with your port (`/dev/ttyUSB0` on Linux, `/dev/cu.usbserial-*` on macOS).
+
+> **Don't omit `ota_data_initial.bin`.** It resets the OTA boot selector. If you
+> skip it, the bootloader keeps whatever slot it was last told to use and will
+> happily boot your *previous* firmware instead of the one you just flashed —
+> the symptoms are confusing (old behaviour, failing OTA). Check
+> **Settings → About** after flashing: if the version isn't the one you
+> installed, that's what happened.
 
 ### Option B — build it yourself
 
