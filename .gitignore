@@ -5,6 +5,9 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
+# staged release assets - these belong on the GitHub release, not in git
+/dist/
+
 # host test binaries
 *.exe
 *.o
