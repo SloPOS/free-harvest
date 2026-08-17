@@ -21,3 +21,16 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # Larger HTTP request buffers so the OTA upload handler is comfortable.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
+# --- OTA safety net: make a bad update undo itself.
+#
+# The bootloader rewrites any PENDING_VERIFY slot to ABORTED on every boot
+# (bootloader_support/src/bootloader_utility.c), so an image that never calls
+# esp_ota_mark_app_valid_cancel_rollback() is abandoned at the next reboot and
+# the previous slot runs instead. main.c confirms only once the adapter is
+# actually reachable, so an update that breaks Wi-Fi reverts itself rather than
+# costing a trip to the machine with a USB cable.
+#
+# NOTE: this is enforced by the BOOTLOADER, which OTA never rewrites. It only
+# takes effect after bootloader.bin has been physically flashed at 0x0 once.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

@@ -20,6 +20,7 @@
 #include "hr_wifi.h"
 
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -38,6 +39,43 @@ static hr_phase_tracker_t s_tracker;
 static unsigned long now_ms(void)
 {
     return (unsigned long)(esp_timer_get_time() / 1000);
+}
+
+/*
+ * How long a freshly OTA'd image gets to prove it is reachable before the
+ * rollback fires. Generous: a slow AP, a DHCP retry and one failed join
+ * attempt all have to fit inside it.
+ */
+#define HR_OTA_CONFIRM_TIMEOUT_MS 120000UL
+
+/*
+ * True when this boot is running a just-installed image that the bootloader
+ * has NOT yet been told to keep. See sdkconfig.defaults for the mechanism.
+ */
+static bool ota_awaiting_confirm(void)
+{
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (run == NULL || esp_ota_get_state_partition(run, &state) != ESP_OK) {
+        return false;
+    }
+    return state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+/*
+ * "Healthy" deliberately means REACHABLE, not "fully working".
+ *
+ * If the web server is up and the user can get to it - either on their LAN or
+ * through the setup AP - then a bad build is recoverable by uploading another
+ * one, so we keep it. An image that cannot get onto the network at all is NOT
+ * recoverable that way, and rolling back is strictly better than leaving the
+ * adapter needing a USB cable. Note that failing to decode dryer frames is
+ * explicitly NOT a rollback trigger: the dryer may simply be unplugged.
+ */
+static bool adapter_reachable(void)
+{
+    hr_wifi_status_t w = hr_wifi_status();
+    return w == HR_WIFI_CONNECTED || w == HR_WIFI_AP_SETUP;
 }
 
 /*
@@ -118,15 +156,62 @@ void app_main(void)
 
     ESP_LOGI(TAG, "adapter running; waiting for dryer traffic");
 
+    bool ota_pending = ota_awaiting_confirm();
+    if (ota_pending) {
+        ESP_LOGW(TAG, "running a newly installed image on trial; it will be "
+                      "kept once the adapter is reachable, or rolled back in "
+                      "%lus", HR_OTA_CONFIRM_TIMEOUT_MS / 1000);
+    }
+
     hr_link_state_t last_link = HR_LINK_DOWN;
+    unsigned long last_beat = 0;
+    unsigned long boot_ms = now_ms();
     for (;;) {
-        hr_session_tick(&s_session, now_ms());
+        unsigned long t = now_ms();
+
+        /* Decide the fate of a trial image before anything else can crash. */
+        if (ota_pending) {
+            if (adapter_reachable()) {
+                esp_err_t cerr = esp_ota_mark_app_valid_cancel_rollback();
+                ota_pending = false;
+                ESP_LOGI(TAG, "update confirmed and kept (%s)",
+                         esp_err_to_name(cerr));
+            } else if (t - boot_ms >= HR_OTA_CONFIRM_TIMEOUT_MS) {
+                ESP_LOGE(TAG, "update never became reachable; rolling back to "
+                              "the previous firmware");
+                /* Does not return on success. */
+                esp_ota_mark_app_invalid_rollback_and_reboot();
+                ota_pending = false; /* rollback unavailable; keep running */
+            }
+        }
+        hr_session_tick(&s_session, t);
         /* Let a stale run expire even if frames stop arriving entirely. */
-        hr_phase_tracker_tick(&s_tracker, (unsigned long)now_ms());
+        hr_phase_tracker_tick(&s_tracker, t);
         hr_http_set_tracker(&s_tracker);
         if (s_session.link != last_link) {
             last_link = s_session.link;
             ESP_LOGI(TAG, "link %s", last_link == HR_LINK_UP ? "UP" : "DOWN");
+        }
+
+        /*
+         * Periodic USB/link heartbeat.
+         *
+         * Without this, the loop is silent unless the link state flips, so a
+         * console log captured for a few seconds after boot looks identical to
+         * a broken adapter - the dryer only emits idle STAT frames every ~15s,
+         * so "no RX yet" is the expected state for the whole first interval.
+         * Printing every 10s means any log long enough to matter is
+         * self-diagnosing.
+         */
+        if (t - last_beat >= 10000UL) {
+            last_beat = t;
+            ESP_LOGI(TAG,
+                     "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
+                     "frames_in=%lu link=%s",
+                     (int)hr_usb_mounted(), (int)hr_usb_suspended(),
+                     hr_usb_mount_events(), hr_usb_rx_bytes(),
+                     s_session.frames_in,
+                     s_session.link == HR_LINK_UP ? "UP" : "DOWN");
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }

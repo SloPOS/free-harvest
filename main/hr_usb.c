@@ -1,7 +1,10 @@
 #include "hr_usb.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
 
@@ -14,6 +17,12 @@ static const char *TAG = "hr_usb";
 
 static hr_session_t *s_session;
 static volatile bool s_host_present;
+
+/* USB-level diagnostic counters - see hr_usb.h for why these exist. */
+static volatile bool s_mounted;
+static volatile bool s_suspended;
+static volatile unsigned s_mount_events;
+static volatile unsigned long s_rx_bytes;
 
 static unsigned long now_ms(void)
 {
@@ -29,10 +38,83 @@ static void on_rx(int itf, cdcacm_event_t *event)
     /* Drain everything TinyUSB has buffered for us. */
     while (tinyusb_cdcacm_read(itf, buf, sizeof(buf), &got) == ESP_OK &&
            got > 0) {
+        s_rx_bytes += got;
         hr_session_rx(s_session, buf, got, now_ms());
         got = 0;
     }
 }
+
+/*
+ * TinyUSB bus-event hooks (weak symbols in the TinyUSB core; the MSC driver
+ * would also define them but it is not compiled here). These are the only
+ * signals that tell us whether the dryer enumerated us at all, which the CDC
+ * line-state callback does NOT - it fires from a class request, so its absence
+ * and a total enumeration failure look the same in the log.
+ */
+void tud_mount_cb(void)
+{
+    s_mounted = true;
+    s_suspended = false;
+    s_mount_events++;
+    ESP_LOGI(TAG, "USB mounted: host enumerated us (mount #%u)",
+             (unsigned)s_mount_events);
+}
+
+void tud_umount_cb(void)
+{
+    s_mounted = false;
+    ESP_LOGW(TAG, "USB unmounted: host dropped us");
+}
+
+void tud_suspend_cb(bool remote_wakeup_en)
+{
+    s_suspended = true;
+    ESP_LOGW(TAG, "USB suspended (remote wakeup %s)",
+             remote_wakeup_en ? "enabled" : "disabled");
+}
+
+void tud_resume_cb(void)
+{
+    s_suspended = false;
+    ESP_LOGI(TAG, "USB resumed");
+}
+
+/*
+ * Force a USB detach/re-attach without rebooting.
+ *
+ * Why this exists: the dryer's CDC thread gives up if nothing answers its probe
+ * ("CDC timed out, not connected, resumed Main thread") and nothing re-runs
+ * that probe on its own - its only recovery path is gated on an already-pending
+ * CDC message. But an adapter reboot HAS historically been enough to bring the
+ * link back, and from the dryer's point of view a reboot is just a detach
+ * followed by an attach ~1.1s later. This reproduces exactly that, so a lost
+ * link can be retried mid-batch instead of waiting to power-cycle the machine.
+ *
+ * Runs on its own short-lived task so the HTTP response goes out first and the
+ * single httpd worker is not blocked for the gap.
+ */
+static void reattach_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "forcing USB detach");
+    tud_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    tud_connect();
+    ESP_LOGW(TAG, "USB re-attached; waiting for the dryer to re-enumerate "
+                  "(watch the mount count)");
+    vTaskDelete(NULL);
+}
+
+bool hr_usb_bus_reattach(void)
+{
+    return xTaskCreate(reattach_task, "usb_reattach", 3072, NULL, 5, NULL) ==
+           pdPASS;
+}
+
+bool hr_usb_mounted(void) { return s_mounted; }
+bool hr_usb_suspended(void) { return s_suspended; }
+unsigned long hr_usb_rx_bytes(void) { return s_rx_bytes; }
+unsigned hr_usb_mount_events(void) { return s_mount_events; }
 
 static void on_line_state(int itf, cdcacm_event_t *event)
 {
@@ -87,5 +169,10 @@ void hr_usb_init(hr_session_t *session)
     };
     ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
 
-    ESP_LOGI(TAG, "USB CDC-ACM device ready");
+    /* Heap at USB bring-up. hr_capture_init() formats/mounts a 3MB SPIFFS
+     * immediately before this, so if that ever starves TinyUSB's DMA buffers
+     * the evidence needs to be in the log rather than inferred. */
+    ESP_LOGI(TAG, "USB CDC-ACM device ready (free heap %u, DMA-capable %u)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
 }

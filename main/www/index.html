@@ -466,6 +466,20 @@
     <button class="back" data-back>‹ Settings</button>
 
     <div class="card">
+      <h2>USB link to dryer</h2>
+      <div class="pill">enumerated <span id="usb-mounted">—</span></div>
+      <div class="pill" style="margin-top:8px">connect events <span id="usb-mounts">—</span></div>
+      <div class="pill" style="margin-top:8px">bytes received <span id="usb-rx">—</span></div>
+      <div id="usb-verdict" class="notice" style="margin-top:10px"></div>
+      <button id="usbreattach" class="ghost" style="margin-top:10px">Reconnect USB</button>
+      <div id="usbrestatus" class="notice"></div>
+      <div class="hint">USB-level counters, measured before any protocol
+        decoding. They separate "the dryer never connected" from "it connected
+        but sends nothing" from "it sends bytes we fail to parse" — three faults
+        that look identical on the dashboard.</div>
+    </div>
+
+    <div class="card">
       <h2>Device log</h2>
       <div class="row"><button id="logrefresh" class="ghost">Refresh</button>
         <button id="logauto" class="ghost">Auto: off</button></div>
@@ -538,6 +552,13 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
    Wi-Fi is unconfigured `done` is false too, so a false start made the
    change-detection below never fire and the setup screen never appeared. */
 let lastSeq=0, paused=false, setupDone=null, logAuto=false, lastState=null;
+/* Set while a firmware upload is in flight. ESP-IDF's httpd serves requests
+   from a SINGLE worker task, so the OTA handler blocks it for the whole
+   transfer. Our five poll timers would keep queueing requests that cannot be
+   answered, exhausting the 7-socket table - and with lru_purge_enable the
+   server then closes a socket to make room, which can be the upload's own.
+   Freezing the timers for the duration is what makes the upload dependable. */
+let otaBusy=false;
 
 /* ---------- view routing ---------- */
 function show(id){
@@ -905,6 +926,43 @@ async function refreshState(){
       $("#abouthw").textContent = "Dryer serial "+(st.serial||"—")+
         " · adapter IP "+(st.ip||"—");
     }
+
+    /* USB-level diagnosis. Deliberately reports the raw counters AND the
+       conclusion they support, so a fault can be triaged from the phone
+       without reading a serial console the adapter can't reach anyway. */
+    if(st.usb_mounted!==undefined){
+      $("#usb-mounted").textContent = st.usb_mounted ? "yes" : "no";
+      $("#usb-mounts").textContent  = st.usb_mounts;
+      $("#usb-rx").textContent      = st.usb_rx_bytes.toLocaleString()+" bytes";
+      let v;
+      if(!st.usb_mounted && st.usb_mounts===0){
+        v = "The dryer has never connected over USB. Check the cable is in the "+
+            "adapter's USB port (not UART) and that the dryer is powered on. "+
+            "This is not a firmware fault.";
+      }else if(st.usb_suspended){
+        v = "USB is suspended by the dryer — it enumerated the adapter, then "+
+            "put the bus to sleep.";
+      }else if(st.usb_rx_bytes===0){
+        /* Not a rejection. The dryer's USB probe is one-shot: its firmware
+           tries MSC first, then starts a CDC thread, and on timeout logs
+           "CDC timed out, not connected, resumed Main thread" and gives up.
+           Enumeration still succeeds at the host-stack layer, so this state
+           means the probe window closed before the adapter was ready — which
+           is exactly what a re-flash causes. */
+        v = "Enumerated, but the dryer has sent zero bytes. Its USB probe runs "+
+            "once at power-on and then stops listening, so this normally means "+
+            "the adapter rebooted after the dryer had already given up. "+
+            "Power-cycle the DRYER with the adapter left plugged in.";
+      }else if(st.frames_in===0){
+        v = "Receiving data ("+st.usb_rx_bytes+" bytes) but no frame has "+
+            "parsed. The bytes are arriving in a format we don't decode — "+
+            "grab the device log, this is fixable.";
+      }else{
+        v = "Healthy: "+st.usb_rx_bytes.toLocaleString()+" bytes, "+
+            st.frames_in+" frames decoded.";
+      }
+      $("#usb-verdict").textContent = v;
+    }
     $("#set-wifi-sub").textContent = st.wifi==="connected"
       ? (st.ssid||"connected")+" · "+st.ip : st.wifi;
     $("#wifiinfo").innerHTML = st.wifi==="connected"
@@ -1132,6 +1190,42 @@ $("#pause").addEventListener("click",()=>{ paused=!paused;
   $("#pause").textContent=paused?"Resume":"Pause"; });
 $("#dl").addEventListener("click",()=>location.href="/api/capture");
 
+/* ---------- USB reconnect ----------
+   Retries the dryer link without a reboot or a power cycle. Not destructive:
+   the adapter cannot control the cycle, and the dryer sees the same
+   detach/attach it sees on every OTA reboot. Records the mount count first so
+   the result is unambiguous - a rise means the dryer re-enumerated us. */
+$("#usbreattach").addEventListener("click",async()=>{
+  const st=$("#usbrestatus");
+  const before = lastState ? lastState.usb_mounts : 0;
+  note(st,"Detaching and re-attaching…","info");
+  try{
+    const r=await fetch("/api/usb/reattach",{method:"POST"});
+    const j=await r.json();
+    if(!j.ok){ note(st,"Could not start the re-attach.","bad"); return; }
+  }catch(e){ note(st,"Request failed — is the adapter still reachable?","bad"); return; }
+  /* The gap is 1.5s; give the dryer time to run its MSC-then-CDC probe. */
+  note(st,"Re-attached. Waiting up to 90s for the dryer to start talking…","info");
+  let waited=0;
+  const iv=setInterval(async()=>{
+    waited+=3;
+    try{
+      const s=await(await fetch("/api/state")).json();
+      if(s.usb_rx_bytes>0){
+        clearInterval(iv);
+        note(st,"✅ The dryer is talking — "+s.usb_rx_bytes+" bytes received.","ok");
+      }else if(waited>=90){
+        clearInterval(iv);
+        note(st,"Still silent after re-enumerating "+
+                (s.usb_mounts>before?"(mount count rose to "+s.usb_mounts+", so the "+
+                 "USB layer reconnected) ":"")+
+                "— the dryer's CDC thread has stopped listening. It needs a "+
+                "power cycle, which can wait until this batch finishes.","bad");
+      }
+    }catch(e){}
+  },3000);
+});
+
 /* ---------- OTA ---------- */
 $("#otago").addEventListener("click",()=>{
   const f=$("#otafile").files[0], st=$("#otastatus");
@@ -1139,16 +1233,25 @@ $("#otago").addEventListener("click",()=>{
   const bar=$("#otabar"), fill=$("#otafill");
   bar.style.display="block"; fill.style.width="0";
   note(st,"Uploading "+esc(f.name)+" ("+Math.round(f.size/1024)+" KB)…","info");
+  otaBusy=true;               /* freeze the poll timers for the transfer */
   const x=new XMLHttpRequest();
   x.open("POST","/api/ota");
   x.setRequestHeader("Content-Type","application/octet-stream");
+  /* No client timeout: a 1.3MB push over Wi-Fi to a single-threaded server can
+     legitimately take a couple of minutes, and aborting mid-write is worse
+     than waiting. */
+  x.timeout=0;
   x.upload.onprogress=e=>{ if(e.lengthComputable) fill.style.width=Math.round(100*e.loaded/e.total)+"%"; };
-  x.onload=()=>{ let ok=false,reason="rejected";
+  x.onload=()=>{ otaBusy=false; let ok=false,reason="rejected";
     try{ const j=JSON.parse(x.responseText); ok=j.ok; reason=j.reason||reason; }catch(e){}
-    if(ok){ note(st,"✅ Installed — rebooting. This page reloads shortly.","ok");
+    if(ok){ note(st,"✅ Installed — rebooting on trial. If it can't get back "+
+                    "on the network it reverts itself; this page reloads "+
+                    "shortly.","ok");
             setTimeout(()=>location.reload(),9000); }
     else note(st,"Update failed: "+esc(reason)+". Current firmware still running.","bad"); };
-  x.onerror=()=>note(st,"Upload failed. Current firmware still running.","bad");
+  x.onerror=()=>{ otaBusy=false;
+    note(st,"Upload failed. Current firmware still running.","bad"); };
+  x.onabort=()=>{ otaBusy=false; };
   x.send(f);
 });
 
@@ -1157,11 +1260,12 @@ $("#otago").addEventListener("click",()=>{
    confirms Wi-Fi is configured. */
 show("v-setup");
 refreshState(); refreshVerbs(); refreshMqtt(); refreshCapture(); pollFrames();
-setInterval(pollFrames,1000);
-setInterval(refreshState,2000);
-setInterval(refreshVerbs,4000);
-setInterval(refreshMqtt,4000);
-setInterval(refreshCapture,5000);
+/* All polling is gated on otaBusy - see its declaration for why. */
+setInterval(()=>{ if(!otaBusy) pollFrames();    },1000);
+setInterval(()=>{ if(!otaBusy) refreshState();  },2000);
+setInterval(()=>{ if(!otaBusy) refreshVerbs();  },4000);
+setInterval(()=>{ if(!otaBusy) refreshMqtt();   },4000);
+setInterval(()=>{ if(!otaBusy) refreshCapture();},5000);
 setInterval(()=>{ if(logAuto) refreshLog(); },2000);
 </script>
 </body>

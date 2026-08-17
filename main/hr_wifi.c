@@ -351,6 +351,15 @@ void hr_wifi_start(void)
     configure_ap();
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /*
+     * No power save. The adapter is mains-powered off the dryer's USB port, so
+     * the default MIN_MODEM save buys nothing and costs real throughput: it
+     * parks the radio between beacons (listen interval 3), which adds
+     * multi-second stalls to a ~1.3MB OTA upload and makes the web UI feel
+     * laggy. Worth doing purely so a remote firmware update is dependable.
+     */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+
     char ssid[33] = {0}, pw[65] = {0};
     if (load_credentials(ssid, sizeof(ssid), pw, sizeof(pw))) {
         start_sta_connect(ssid, pw); /* safe now: driver is started */

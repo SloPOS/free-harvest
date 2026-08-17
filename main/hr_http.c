@@ -3,6 +3,7 @@
 #include "hr_log.h"
 #include "hr_mqtt.h"
 #include "hr_telemetry.h"
+#include "hr_usb.h"
 #include "hr_wifi.h"
 
 #include "esp_app_desc.h"
@@ -130,7 +131,7 @@ static esp_err_t h_state(httpd_req_t *req)
     char mode_esc[32];
     hr_json_escape(s_tel_valid ? s_tel.mode : "", mode_esc, sizeof(mode_esc));
 
-    char body[768];
+    char body[900];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
@@ -143,6 +144,11 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"freeze_pct\":%ld,\"freeze_eta_s\":%ld,"
                      "\"phase_pct\":%ld,\"phase_s\":%ld,"
                      "\"vacuum_um\":%ld,\"vacuum_ok\":%s,"
+                     /* USB-level diagnostics: reachable over WiFi while the
+                      * adapter is plugged into the dryer, which the serial
+                      * console is not. See hr_usb.h for how to read them. */
+                     "\"usb_mounted\":%s,\"usb_suspended\":%s,"
+                     "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
@@ -159,7 +165,10 @@ static esp_err_t h_state(httpd_req_t *req)
                      s_tel_valid ? s_tel.phase_pct : 0,
                      s_tel_valid ? s_tel.phase_elapsed_s : 0,
                      s_tel_valid ? s_tel.pressure_microns : 0,
-                     (s_tel_valid && s_tel.pressure_valid) ? "true" : "false");
+                     (s_tel_valid && s_tel.pressure_valid) ? "true" : "false",
+                     hr_usb_mounted() ? "true" : "false",
+                     hr_usb_suspended() ? "true" : "false",
+                     hr_usb_mount_events(), hr_usb_rx_bytes());
     return send_json(req, body, n);
 }
 
@@ -298,6 +307,22 @@ static esp_err_t h_capture_info(httpd_req_t *req)
 static esp_err_t h_capture_clear(httpd_req_t *req)
 {
     bool ok = hr_capture_clear();
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
+}
+
+/* -------------------------------------------------------------------- */
+/* POST /api/usb/reattach -> force a USB detach/attach                   */
+/* -------------------------------------------------------------------- */
+/*
+ * Recovery for a dropped dryer link that does not require power-cycling the
+ * machine. Safe to use mid-batch: the adapter is a passive monitor (the
+ * protocol exposes no cycle control at all), and the dryer already handles
+ * detach/attach - that is exactly what it sees whenever we reboot for an OTA.
+ */
+static esp_err_t h_usb_reattach(httpd_req_t *req)
+{
+    bool ok = hr_usb_bus_reattach();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
                      ok ? 11 : 12);
 }
@@ -446,19 +471,37 @@ static esp_err_t h_ota(httpd_req_t *req)
 
     char buf[1024];
     int remaining = req->content_len;
+    int written = 0;
+    int stalls = 0;
     bool checked = false;
     while (remaining > 0) {
         int r = httpd_req_recv(req, buf, remaining < (int)sizeof(buf)
                                               ? remaining
                                               : (int)sizeof(buf));
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            /*
+             * Retry, but bounded. Each timeout is one recv_wait_timeout (5s by
+             * default), so this tolerates ~2.5 minutes of a genuinely slow link
+             * without spinning forever on a client that has silently vanished.
+             */
+            if (++stalls > 30) {
+                esp_ota_abort(ota);
+                ESP_LOGE(TAG, "OTA stalled after %d of %lu bytes", written,
+                         (unsigned long)req->content_len);
+                httpd_resp_set_status(req, "408 Request Timeout");
+                return httpd_resp_sendstr(
+                    req, "{\"ok\":false,\"reason\":\"upload stalled\"}");
+            }
             continue;
         }
+        stalls = 0;
         if (r <= 0) {
             esp_ota_abort(ota);
-            ESP_LOGE(TAG, "OTA recv error");
+            ESP_LOGE(TAG, "OTA recv error after %d of %lu bytes", written,
+                     (unsigned long)req->content_len);
             httpd_resp_set_status(req, "400 Bad Request");
-            return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"recv\"}");
+            return httpd_resp_sendstr(
+                req, "{\"ok\":false,\"reason\":\"connection dropped mid-upload\"}");
         }
         /* Sanity-check the very first bytes look like an ESP app image. */
         if (!checked) {
@@ -475,12 +518,15 @@ static esp_err_t h_ota(httpd_req_t *req)
         err = esp_ota_write(ota, buf, r);
         if (err != ESP_OK) {
             esp_ota_abort(ota);
-            ESP_LOGE(TAG, "esp_ota_write: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "esp_ota_write at %d bytes: %s", written,
+                     esp_err_to_name(err));
             httpd_resp_set_status(req, "500 Internal Server Error");
             return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"write\"}");
         }
+        written += r;
         remaining -= r;
     }
+    ESP_LOGI(TAG, "OTA received %d bytes, verifying image", written);
 
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
@@ -606,6 +652,13 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     /* Extra workers so a long-lived /events stream doesn't block the UI. */
     cfg.max_open_sockets = 7;
+    /*
+     * The default 4096 is too tight for h_ota: it puts a 1KB receive buffer on
+     * this stack and then calls down through esp_ota_write() into the SPI flash
+     * driver. An overflow there looks exactly like a failed upload from the
+     * browser's side, with nothing useful in the log.
+     */
+    cfg.stack_size = 8192;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "httpd start failed");
@@ -620,6 +673,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/capture", HTTP_GET, h_capture);
     reg("/api/capture/info", HTTP_GET, h_capture_info);
     reg("/api/capture/clear", HTTP_POST, h_capture_clear);
+    reg("/api/usb/reattach", HTTP_POST, h_usb_reattach);
     reg("/api/scan", HTTP_GET, h_scan);
     reg("/api/wifi", HTTP_POST, h_wifi_post);
     reg("/api/forget", HTTP_POST, h_forget);
