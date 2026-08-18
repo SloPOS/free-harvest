@@ -16,6 +16,7 @@
 #include "hr_mqtt.h"
 #include "hr_session.h"
 #include "hr_telemetry.h"
+#include "hr_trend.h"
 #include "hr_usb.h"
 #include "hr_wifi.h"
 
@@ -35,6 +36,18 @@ static SemaphoreHandle_t s_hist_lock;
 /* Tracks whether the batch-elapsed counter is actually advancing, so an idle
  * dryer isn't reported as "running" using last batch's leftover elapsed. */
 static hr_phase_tracker_t s_tracker;
+/*
+ * 30s temperature/pressure series for the graph. Guarded by s_hist_lock, the
+ * same mutex as history, because it is written from the USB RX task and read by
+ * the HTTP task.
+ *
+ * RAM only for now: a reboot loses the current run's graph. Persisting it needs
+ * a flash-write queue so no flash I/O lands on the USB RX path - that is the
+ * next commit, not this one.
+ */
+static hr_trend_t s_trend;
+/* Last batch-elapsed seen, to notice a new batch and start a fresh series. */
+static long s_last_batch_elapsed = -1;
 
 static unsigned long now_ms(void)
 {
@@ -109,6 +122,21 @@ static void on_inbound(const hr_frame_t *f, void *user)
         hr_http_set_telemetry(&tel);
         hr_http_set_tracker(&s_tracker);
         hr_mqtt_publish_telemetry(&tel);
+
+        /*
+         * Feed the graph series. The dryer's batch-elapsed counter only ever
+         * counts up within a run, so a DECREASE means a new batch started and
+         * the old curve must not be fitted across into the new one.
+         */
+        xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+        if (s_last_batch_elapsed >= 0 &&
+            tel.batch_elapsed_s < s_last_batch_elapsed) {
+            hr_trend_reset(&s_trend);
+        }
+        s_last_batch_elapsed = tel.batch_elapsed_s;
+        hr_trend_add(&s_trend, now_ms(), (int)tel.temperature_f,
+                     (uint32_t)tel.pressure_microns, tel.pressure_valid);
+        xSemaphoreGive(s_hist_lock);
     }
 
 #if CONFIG_HR_HTTP_LOG_TO_UART
@@ -136,6 +164,7 @@ void app_main(void)
     s_hist_lock = xSemaphoreCreateMutex();
     hr_history_init(&s_history);
     hr_phase_tracker_init(&s_tracker);
+    hr_trend_init(&s_trend);
 
     hr_session_init(&s_session, hr_usb_tx, NULL);
     hr_session_set_observer(&s_session, on_inbound, NULL);
@@ -158,6 +187,7 @@ void app_main(void)
     /* Share one mutex: main.c writes history (on_inbound), hr_http.c reads it.
      * Must be set before hr_http_start(). */
     hr_http_use_lock(s_hist_lock);
+    hr_http_set_trend(&s_trend);
     hr_http_start(&s_session, &s_history);
 
     /* MQTT connects only if a broker is configured (via the web setup page);
@@ -197,6 +227,11 @@ void app_main(void)
         hr_session_tick(&s_session, t);
         /* Let a stale run expire even if frames stop arriving entirely. */
         hr_phase_tracker_tick(&s_tracker, t);
+        /* Close elapsed graph buckets even while frames are absent, so a gap
+         * shows as a gap instead of compressing the time axis. */
+        xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+        hr_trend_tick(&s_trend, t);
+        xSemaphoreGive(s_hist_lock);
         hr_http_set_tracker(&s_tracker);
         if (s_session.link != last_link) {
             last_link = s_session.link;

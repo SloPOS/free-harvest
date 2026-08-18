@@ -22,6 +22,7 @@
 #include "hr_history.h"
 #include "hr_session.h"
 #include "hr_telemetry.h"
+#include "hr_trend.h"
 
 /* Free Harvest release version, shown in Settings so users can report it.
  * Keep this in step with the git tag when cutting a release. */
@@ -33,6 +34,13 @@
  * the USB RX task), so both sides serialise on the same mutex.
  */
 void hr_http_use_lock(void *mutex);
+
+/*
+ * Provide the 30s temperature/pressure series for GET /api/trend. Owned by the
+ * app; read under the same lock passed to hr_http_use_lock(). Must be called
+ * before hr_http_start().
+ */
+void hr_http_set_trend(hr_trend_t *tr);
 
 void hr_http_start(hr_session_t *session, hr_history_t *history);
 

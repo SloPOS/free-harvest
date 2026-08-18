@@ -3,6 +3,7 @@
 #include "hr_log.h"
 #include "hr_mqtt.h"
 #include "hr_telemetry.h"
+#include "hr_trend.h"
 #include "hr_usb.h"
 #include "hr_wifi.h"
 
@@ -48,6 +49,8 @@ static bool s_tel_valid;
  */
 static hr_phase_tracker_t s_tracker;
 static bool s_tracker_ready;
+/* 30s graph series, owned by main.c and guarded by the shared s_lock. */
+static hr_trend_t *s_trend;
 
 void hr_http_set_telemetry(const hr_telemetry_t *t)
 {
@@ -55,6 +58,11 @@ void hr_http_set_telemetry(const hr_telemetry_t *t)
         s_tel = *t;
         s_tel_valid = true;
     }
+}
+
+void hr_http_set_trend(hr_trend_t *tr)
+{
+    s_trend = tr;
 }
 
 void hr_http_set_tracker(const hr_phase_tracker_t *tr)
@@ -320,6 +328,109 @@ static esp_err_t h_capture_clear(httpd_req_t *req)
  * protocol exposes no cycle control at all), and the dryer already handles
  * detach/attach - that is exactly what it sees whenever we reboot for an OTA.
  */
+/* -------------------------------------------------------------------- */
+/* GET /api/trend -> the 30s temperature/pressure series                 */
+/* -------------------------------------------------------------------- */
+/*
+ * Streamed in chunks rather than built in one buffer: a full run is ~2600
+ * points, and the httpd worker stack cannot hold that as a string.
+ *
+ * Downsampled to at most HR_TREND_MAX_POINTS by taking every Nth point, and the
+ * stride is reported so the client can reconstruct real time. Phones get a small
+ * payload; the full-resolution data stays available in the capture log.
+ *
+ * Gaps are emitted as JSON null, never as a fabricated value - a break in the
+ * line is information.
+ */
+#define HR_TREND_MAX_POINTS 360
+
+static esp_err_t h_trend(httpd_req_t *req)
+{
+    if (s_trend == NULL) {
+        return send_json(req, "{\"bucket_s\":30,\"stride\":1,\"n\":0,\"temp\":[],\"smooth\":[],\"press\":[]}", 68);
+    }
+
+    LOCK();
+    size_t total = hr_trend_count(s_trend);
+    size_t stride = (total + HR_TREND_MAX_POINTS - 1) / HR_TREND_MAX_POINTS;
+    if (stride == 0) {
+        stride = 1;
+    }
+    size_t emitted = (total + stride - 1) / stride;
+    UNLOCK();
+
+    httpd_resp_set_type(req, "application/json");
+    char head[128];
+    int hn = snprintf(head, sizeof(head),
+                      "{\"bucket_s\":%lu,\"stride\":%u,\"n\":%u,\"temp\":[",
+                      (unsigned long)(HR_TREND_BUCKET_MS / 1000),
+                      (unsigned)stride, (unsigned)emitted);
+    httpd_resp_send_chunk(req, head, hn);
+
+    /* Three passes so each array streams without holding the whole series. */
+    for (int pass = 0; pass < 3; pass++) {
+        if (pass > 0) {
+            const char *sep = (pass == 1) ? "],\"smooth\":[" : "],\"press\":[";
+            httpd_resp_send_chunk(req, sep, strlen(sep));
+        }
+        char buf[256];
+        int n = 0;
+        bool first = true;
+        for (size_t i = 0; i < total; i += stride) {
+            hr_trend_point_t pt;
+            LOCK();
+            bool ok = hr_trend_get(s_trend, i, &pt);
+            UNLOCK();
+            if (!ok) {
+                break;
+            }
+            int w;
+            if (pass == 0) {
+                if (pt.temp_raw_f == HR_TREND_NO_TEMP) {
+                    w = snprintf(buf + n, sizeof(buf) - n, "%snull",
+                                 first ? "" : ",");
+                } else {
+                    w = snprintf(buf + n, sizeof(buf) - n, "%s%d",
+                                 first ? "" : ",", (int)pt.temp_raw_f);
+                }
+            } else if (pass == 1) {
+                if (pt.temp_smooth_cf == HR_TREND_NO_TEMP) {
+                    w = snprintf(buf + n, sizeof(buf) - n, "%snull",
+                                 first ? "" : ",");
+                } else {
+                    /* Hundredths of a degree; the client divides by 100. */
+                    w = snprintf(buf + n, sizeof(buf) - n, "%s%d",
+                                 first ? "" : ",", (int)pt.temp_smooth_cf);
+                }
+            } else {
+                if (pt.pressure_raw == 0) {
+                    w = snprintf(buf + n, sizeof(buf) - n, "%snull",
+                                 first ? "" : ",");
+                } else {
+                    w = snprintf(buf + n, sizeof(buf) - n, "%s%lu",
+                                 first ? "" : ",",
+                                 (unsigned long)pt.pressure_raw);
+                }
+            }
+            if (w < 0) {
+                break;
+            }
+            first = false;
+            n += w;
+            if (n > (int)sizeof(buf) - 24) {
+                httpd_resp_send_chunk(req, buf, n);
+                n = 0;
+            }
+        }
+        if (n > 0) {
+            httpd_resp_send_chunk(req, buf, n);
+        }
+    }
+
+    httpd_resp_send_chunk(req, "]}", 2);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t h_usb_reattach(httpd_req_t *req)
 {
     bool ok = hr_usb_bus_reattach();
@@ -674,6 +785,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/capture/info", HTTP_GET, h_capture_info);
     reg("/api/capture/clear", HTTP_POST, h_capture_clear);
     reg("/api/usb/reattach", HTTP_POST, h_usb_reattach);
+    reg("/api/trend", HTTP_GET, h_trend);
     reg("/api/scan", HTTP_GET, h_scan);
     reg("/api/wifi", HTTP_POST, h_wifi_post);
     reg("/api/forget", HTTP_POST, h_forget);
