@@ -777,8 +777,20 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     cfg.max_uri_handlers = 20;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
-    /* Extra workers so a long-lived /events stream doesn't block the UI. */
+    /*
+     * Client slots. httpd needs 3 more sockets than this for its own use
+     * (httpd_main.c enforces max_open_sockets + 3 <= LWIP_MAX_SOCKETS), and
+     * accept() needs a FREE descriptor to hand the next connection - if the
+     * table is exactly full it fails with ENFILE before lru_purge can
+     * reclaim a slot. So the invariant below deliberately reserves spare
+     * descriptors on top of httpd's three, for MQTT, DNS and that accept.
+     */
     cfg.max_open_sockets = 7;
+    _Static_assert(
+        CONFIG_LWIP_MAX_SOCKETS >= 7 + 3 + 3,
+        "LWIP_MAX_SOCKETS leaves no spare descriptors: accept() will fail "
+        "with ENFILE once max_open_sockets clients connect. Raise "
+        "CONFIG_LWIP_MAX_SOCKETS or lower max_open_sockets.");
     /*
      * The default 4096 is too tight for h_ota: it puts a 1KB receive buffer on
      * this stack and then calls down through esp_ota_write() into the SPI flash

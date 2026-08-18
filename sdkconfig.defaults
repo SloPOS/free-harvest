@@ -46,3 +46,20 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # "the dryer stopped talking to us": the adapter rebooted, re-enumerated, and
 # reported zero bytes received because the counter reset with it.
 CONFIG_TINYUSB_TASK_STACK_SIZE=8192
+
+# --- Socket budget.
+#
+# esp_http_server requires max_open_sockets + 3 <= CONFIG_LWIP_MAX_SOCKETS
+# (httpd_main.c). With the IDF default of 10 and our max_open_sockets of 7 that
+# is 7 + 3 = 10 of 10 - the web server consumes the ENTIRE socket table and
+# leaves nothing for anything else.
+#
+# The failure is mobile-specific and looks like a server bug: a phone browser
+# opens up to six parallel keep-alive connections (our page pulls the HTML plus
+# four embedded PNGs), saturating all seven slots. accept() then needs a fresh
+# descriptor, the system table is full, and it fails with ENFILE (errno 23) -
+# before lru_purge can reclaim a slot. A desktop browser opens one or two
+# connections and never trips it.
+#
+# 16 leaves six spare for MQTT, DNS and the captive-portal responder.
+CONFIG_LWIP_MAX_SOCKETS=16

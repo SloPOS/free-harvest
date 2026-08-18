@@ -1440,14 +1440,30 @@ $("#otago").addEventListener("click",()=>{
 show("v-setup");
 refreshState(); refreshVerbs(); refreshMqtt(); refreshCapture(); pollFrames();
 refreshTrend();
-/* All polling is gated on otaBusy - see its declaration for why. */
-setInterval(()=>{ if(!otaBusy) pollFrames();    },1000);
-setInterval(()=>{ if(!otaBusy) refreshState();  },2000);
-setInterval(()=>{ if(!otaBusy) refreshVerbs();  },4000);
-setInterval(()=>{ if(!otaBusy) refreshMqtt();   },4000);
-setInterval(()=>{ if(!otaBusy) refreshCapture();},5000);
+/* All polling is gated on otaBusy - see its declaration for why.
+
+   Each poller is ALSO gated on its own previous call having finished.
+   Without that, a slow link lets requests stack up: six independent timers
+   each open another connection while the last is still in flight, and the
+   adapter runs out of sockets. That failed only on mobile, where latency is
+   higher, and surfaced as httpd_accept_conn errno 23 (ENFILE) - which reads
+   like a server bug rather than the client asking for too much at once. */
+function poller(fn, ms){
+  let busy=false;
+  setInterval(async ()=>{
+    if(otaBusy || busy) return;
+    busy=true;
+    try{ await fn(); } catch(e){ /* next tick retries */ }
+    finally{ busy=false; }
+  }, ms);
+}
+poller(pollFrames,     1000);
+poller(refreshState,   2000);
+poller(refreshVerbs,   4000);
+poller(refreshMqtt,    4000);
+poller(refreshCapture, 5000);
 /* A new bucket only lands every 30s, so polling faster is wasted work. */
-setInterval(()=>{ if(!otaBusy) refreshTrend();   },15000);
+poller(refreshTrend, 15000);
 setInterval(()=>{ if(logAuto) refreshLog(); },2000);
 </script>
 </body>
