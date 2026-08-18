@@ -117,6 +117,11 @@ Replace `COM7` with your port (`/dev/ttyUSB0` on Linux, `/dev/cu.usbserial-*` on
 > **Settings → About** after flashing: if the version isn't the one you
 > installed, that's what happened.
 
+<p align="center">
+  <img src="docs/img/settings-about.png" width="330"
+       alt="About screen showing the installed version">
+</p>
+
 ### Option B — build it yourself
 
 See [Building from source](#building-from-source).
@@ -169,10 +174,10 @@ green and readings appear.
 Browse to the adapter's address from any device on your network. The dashboard shows
 whatever the dryer is doing right now.
 
-| Idle | Preparing | Freezing | Drying |
+| Idle | Freezing | Drying | Final dry |
 |---|---|---|---|
-| ![Idle](docs/img/dashboard-idle.png) | ![Preparing](docs/img/dashboard-preparing.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Drying](docs/img/dashboard-drying.png) |
-| Press **START** on the machine | 15-min pre-cool, load your trays | % frozen + estimated time to 100% | Live vacuum in microns, phase timer |
+| ![Idle](docs/img/dashboard-idle.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Drying](docs/img/dashboard-drying.png) | ![Final dry](docs/img/dashboard-finaldry.png) |
+| Press **START** on the machine | % frozen + estimated time to 100% | Live vacuum in microns, phase timer | The long stage — 12h+ is normal, vacuum at its deepest |
 
 The **phase card** below the dial always tells you what's happening and what comes
 next, quoting the owner's manual — including the drain-valve steps that are easy to
@@ -274,7 +279,15 @@ problem.
 
 ## Troubleshooting
 
-**Start here: Settings → Debug & advanced → Device log.** The adapter's internal log is
+<img src="docs/img/settings-usb.png" width="330" align="right" alt="USB link diagnostics">
+
+**If the dryer is not being seen, start here: Settings → Debug & advanced → USB link
+to dryer.** It reports USB-level counters measured *before* any protocol decoding,
+and states which fault this actually is — never enumerated, enumerated but silent,
+or bytes arriving that we fail to parse. Those three look identical on the
+dashboard and have completely different causes.
+
+**For anything else, the Device log** is the place to look — the adapter's internal log is
 visible in the browser and names the actual error.
 
 | Symptom | Cause / fix |
