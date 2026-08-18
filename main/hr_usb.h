@@ -47,4 +47,9 @@ bool hr_usb_suspended(void);          /* bus suspended by the host */
 unsigned long hr_usb_rx_bytes(void);  /* raw bytes received, pre-parser */
 unsigned hr_usb_mount_events(void);   /* mount count; >1 means re-enumeration */
 
+/* Live TinyUSB state for the diagnostic heartbeat - see hr_usb.c. */
+bool hr_usb_tusb_ready(void);
+bool hr_usb_cdc_connected(void);
+unsigned hr_usb_cdc_available(void);
+
 #endif /* HR_USB_H */

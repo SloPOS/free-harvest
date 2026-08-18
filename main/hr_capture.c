@@ -1,9 +1,12 @@
 #include "hr_capture.h"
 
+#include "esp_timer.h"
+
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -25,12 +28,45 @@ static size_t s_total;      /* partition capacity */
 static size_t s_used;       /* bytes written to the log */
 static bool s_full_warned;
 
+/*
+ * Mount worker.
+ *
+ * Mounting is deferred off the boot path so the ~190ms of SPI flash activity
+ * (each erase/write suspends the instruction cache) does not overlap USB
+ * enumeration. This is robustness, NOT the fix for the USB regression - that
+ * was a stack overflow, see CONFIG_TINYUSB_TASK_STACK_SIZE in
+ * sdkconfig.defaults. Deferring the mount alone did not help, because what
+ * actually broke USB was hr_capture_append() running on the TinyUSB task.
+ *
+ * The capture log simply becomes available a few seconds into the boot;
+ * nothing else depends on it being ready immediately.
+ */
+static void capture_mount_task(void *arg)
+{
+    (void)arg;
+    /* Let enumeration and the first control transfers complete first. */
+    vTaskDelay(pdMS_TO_TICKS(HR_CAPTURE_MOUNT_DELAY_MS));
+
+    int64_t t0 = esp_timer_get_time();
+    hr_capture_mount_now();
+    ESP_LOGI(TAG, "capture mount took %lld ms",
+             (long long)((esp_timer_get_time() - t0) / 1000));
+    vTaskDelete(NULL);
+}
+
 void hr_capture_init(void)
 {
     if (s_lock == NULL) {
         s_lock = xSemaphoreCreateMutex();
     }
+    if (xTaskCreate(capture_mount_task, "cap_mount", 4096, NULL, 2, NULL) !=
+        pdPASS) {
+        ESP_LOGE(TAG, "could not start mount task; capture log disabled");
+    }
+}
 
+void hr_capture_mount_now(void)
+{
     esp_vfs_spiffs_conf_t conf = {
         .base_path = MOUNT,
         .partition_label = "capture",

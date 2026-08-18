@@ -200,4 +200,43 @@ void hr_usb_init(hr_session_t *session)
     ESP_LOGI(TAG, "USB CDC-ACM device ready (free heap %u, DMA-capable %u)",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+    /*
+     * Dump the configuration descriptor TinyUSB actually built. Windows reports
+     * this device as healthy (problem=0, COM port created) yet every write to
+     * it fails and not one byte reaches us - so the question is whether the CDC
+     * data interface really carries the bulk IN/OUT endpoints it should. Read
+     * it from the device rather than trusting that the defaults are right.
+     */
+    const uint8_t *cfg = tud_descriptor_configuration_cb(0);
+    if (cfg != NULL) {
+        uint16_t total = (uint16_t)(cfg[2] | (cfg[3] << 8));
+        if (total > 128) {
+            total = 128;
+        }
+        char hex[3 * 128 + 1];
+        int o = 0;
+        for (uint16_t i = 0; i < total && o < (int)sizeof(hex) - 3; i++) {
+            o += snprintf(hex + o, sizeof(hex) - o, "%02x ", cfg[i]);
+        }
+        ESP_LOGI(TAG, "config descriptor (%u bytes): %s", (unsigned)total, hex);
+    } else {
+        ESP_LOGE(TAG, "tud_descriptor_configuration_cb returned NULL");
+    }
+}
+
+/*
+ * Live TinyUSB state, sampled from the main loop.
+ *
+ * tud_ready() being false would mean the stack is not servicing the bus at all
+ * (a starved or dead tud_task), which enumeration alone cannot rule out - the
+ * bus was enumerated seconds after boot, before Wi-Fi and HTTP started
+ * competing for CPU. tud_cdc_available() shows whether bytes are sitting in the
+ * FIFO unread, which would point at our callback rather than the transport.
+ */
+bool hr_usb_tusb_ready(void) { return tud_ready(); }
+bool hr_usb_cdc_connected(void) { return tud_cdc_n_connected(CDC_ITF); }
+unsigned hr_usb_cdc_available(void)
+{
+    return (unsigned)tud_cdc_n_available(CDC_ITF);
 }

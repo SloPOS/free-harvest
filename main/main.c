@@ -132,7 +132,6 @@ void app_main(void)
     /* Capture logs into the in-app ring buffer (viewable at /api/log) as early
      * as possible so boot and MQTT connection errors are visible in the UI. */
     hr_log_init();
-    hr_capture_init();
 
     s_hist_lock = xSemaphoreCreateMutex();
     hr_history_init(&s_history);
@@ -143,6 +142,17 @@ void app_main(void)
     hr_session_set_ack_payload(&s_session, CONFIG_HR_ACK_PAYLOAD);
 
     hr_usb_init(&s_session);
+
+    /*
+     * MUST come after hr_usb_init(). Mounting (and on first boot formatting)
+     * the 3MB SPIFFS consumes DMA-capable heap, and TinyUSB allocates its
+     * endpoint buffers from the same pool. With capture first, the device still
+     * enumerates - EP0 control transfers need almost nothing - but the bulk
+     * endpoints never deliver a byte, which reads as "the dryer stopped talking"
+     * rather than as an out-of-memory condition anywhere in the log.
+     */
+    hr_capture_init();
+
     hr_wifi_start();
 
     /* Share one mutex: main.c writes history (on_inbound), hr_http.c reads it.
@@ -207,11 +217,14 @@ void app_main(void)
             last_beat = t;
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
-                     "frames_in=%lu link=%s",
+                     "frames_in=%lu link=%s | tusb ready=%d cdc_conn=%d "
+                     "avail=%u",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in,
-                     s_session.link == HR_LINK_UP ? "UP" : "DOWN");
+                     s_session.link == HR_LINK_UP ? "UP" : "DOWN",
+                     (int)hr_usb_tusb_ready(), (int)hr_usb_cdc_connected(),
+                     hr_usb_cdc_available());
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }

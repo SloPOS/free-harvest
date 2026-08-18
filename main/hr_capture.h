@@ -17,7 +17,18 @@
 #include <stdint.h>
 
 /* Mount the capture partition. Safe to call once at startup. */
+/*
+ * Start the capture log. Returns immediately: the SPIFFS mount happens on a
+ * background task after a short delay, because doing it synchronously on the
+ * boot path breaks USB (see hr_capture.c for the full explanation).
+ */
 void hr_capture_init(void);
+
+/* How long to wait before mounting, so USB enumeration finishes untouched. */
+#define HR_CAPTURE_MOUNT_DELAY_MS 8000
+
+/* Perform the mount synchronously. Normally only called by the mount task. */
+void hr_capture_mount_now(void);
 
 /* True when the log is mounted and writable. */
 bool hr_capture_ready(void);

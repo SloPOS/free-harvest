@@ -34,3 +34,15 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 # NOTE: this is enforced by the BOOTLOADER, which OTA never rewrites. It only
 # takes effect after bootloader.bin has been physically flashed at 0x0 once.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+
+
+# --- TinyUSB task stack.
+#
+# The CDC RX callback runs on this task, and our frame observer writes each
+# frame to the SPIFFS capture log from there - fopen/fprintf/fclose through VFS
+# and newlib is far more stack-hungry than the 4096 default allows. The first
+# inbound frame overflowed it and panicked the chip, which looked exactly like
+# "the dryer stopped talking to us": the adapter rebooted, re-enumerated, and
+# reported zero bytes received because the counter reset with it.
+CONFIG_TINYUSB_TASK_STACK_SIZE=8192
