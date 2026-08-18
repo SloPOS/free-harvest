@@ -124,6 +124,8 @@
     border:1px solid var(--line); background:var(--surface2); color:var(--fg);
     font-size:16px}
   .themebtn:active{background:var(--line)}
+  /* The header gear is desktop-only; on a phone the tab bar covers it. */
+  #setbtn{display:none}
   /* --- hero refresh icon ---------------------------------------------- */
   .links{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap}
   .linkbtn{flex:1 1 180px; display:inline-flex; align-items:center;
@@ -284,11 +286,11 @@
       color:var(--fg); font-size:20px; z-index:2}
     .modalx:active{background:var(--line)}
     .facts{position:static; margin-top:14px}
-    /* Undock the tab bar: a fixed bottom bar on a large screen is a
-       phone idiom that only eats vertical space. */
-    nav{position:static; max-width:1180px; margin:18px auto 24px;
-      border-radius:var(--r); border:1px solid var(--line)}
-    nav button{min-height:52px}
+    /* No tab bar at all on desktop: with only two destinations and Settings
+       now opening as a modal, a persistent bar is wasted space. The header
+       gear replaces it. */
+    nav{display:none}
+    #setbtn{display:inline-flex}
   }
 </style>
 </head>
@@ -307,6 +309,9 @@
   <div class="sub"><span id="hdrsub">connecting…</span></div>
   <button id="themebtn" class="themebtn" title="Switch light / dark"
           aria-label="Switch light or dark theme">&#9680;</button>
+  <!-- Desktop only: replaces the bottom tab bar, which is a phone idiom. -->
+  <button id="setbtn" class="themebtn" title="Settings"
+          aria-label="Open settings">&#9881;</button>
 </header>
 
 <main>
@@ -772,6 +777,11 @@ function show(id){
   $$("nav button").forEach(b=>
     b.classList.toggle("active", (b.dataset.view === "v-dash") === onDash));
 }
+
+/* Header gear (desktop). Toggles, matching the tab button it replaces. */
+$("#setbtn").addEventListener("click",()=>{
+  show(document.body.classList.contains("modal") ? "v-dash" : "v-set");
+});
 
 /* Click the backdrop, or press Escape, to dismiss. */
 $("#scrim").addEventListener("click",()=>show("v-dash"));
