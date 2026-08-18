@@ -33,8 +33,22 @@ void hr_capture_mount_now(void);
 /* True when the log is mounted and writable. */
 bool hr_capture_ready(void);
 
-/* Append one frame line. No-op if not ready. */
+/*
+ * Append one frame line. No-op if not ready.
+ *
+ * NON-BLOCKING: the line is copied onto a queue and written by a worker task.
+ * This is called from the USB RX callback, and doing file I/O there is what
+ * overflowed the TinyUSB task stack and panicked the chip on every frame in
+ * v0.3-v0.3.3. Nothing on this path may touch flash directly, ever.
+ *
+ * If the queue is full the line is DROPPED rather than blocking the USB task;
+ * hr_capture_dropped() reports how often, so the loss is visible instead of
+ * silent.
+ */
 void hr_capture_append(uint32_t t_ms, const char *body);
+
+/* Frame lines discarded because the write queue was full. */
+unsigned long hr_capture_dropped(void);
 
 /* Bytes currently stored, and the partition's total capacity. */
 size_t hr_capture_size(void);

@@ -127,6 +127,13 @@
   /* The header gear is desktop-only; on a phone the tab bar covers it. */
   #setbtn{display:none}
   /* --- hero refresh icon ---------------------------------------------- */
+  .seg{display:flex; gap:0; border:1px solid var(--line); border-radius:12px;
+    overflow:hidden}
+  .seg button{flex:1; border:0; border-radius:0; background:var(--surface2);
+    color:var(--muted); font-weight:600; font-size:15px;
+    border-right:1px solid var(--line)}
+  .seg button:last-child{border-right:0}
+  .seg button.on{background:var(--accent); color:var(--accent-ink)}
   .links{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap}
   .linkbtn{flex:1 1 180px; display:inline-flex; align-items:center;
     justify-content:center; text-decoration:none; color:var(--fg);
@@ -307,8 +314,6 @@
   <h1 id="hdr">Free Harvest</h1>
   <span id="dot" class="dot"></span>
   <div class="sub"><span id="hdrsub">connecting…</span></div>
-  <button id="themebtn" class="themebtn" title="Switch light / dark"
-          aria-label="Switch light or dark theme">&#9680;</button>
   <!-- Desktop only: replaces the bottom tab bar, which is a phone idiom. -->
   <button id="setbtn" class="themebtn" title="Settings"
           aria-label="Open settings">&#9881;</button>
@@ -440,6 +445,19 @@
 
   <!-- ============== SETTINGS (menu) ============== -->
   <section id="v-set" class="view">
+    <!-- A three-way segmented control rather than a cycling icon: with the
+         control on its own screen there is room to show all the options and
+         which one is active, instead of making the user click to find out. -->
+    <div class="card">
+      <h2>Appearance</h2>
+      <div class="seg" id="themeseg">
+        <button type="button" data-theme="system">Auto</button>
+        <button type="button" data-theme="light">Light</button>
+        <button type="button" data-theme="dark">Dark</button>
+      </div>
+      <div class="hint">Auto follows your device's light/dark setting.</div>
+    </div>
+
     <div class="card">
       <h2>Settings</h2>
       <div class="list">
@@ -1477,18 +1495,14 @@ $("#dl").addEventListener("click",()=>location.href="/api/capture");
    Stored in localStorage, so it is per-browser rather than per-device - the
    adapter has no user accounts and this is purely a display preference. */
 const THEMES=["system","light","dark"];
-const THEME_ICON={system:"◐", light:"☀", dark:"☾"};
-const THEME_NAME={system:"Follow system", light:"Light", dark:"Dark"};
 
 function applyTheme(t){
   const root=document.documentElement;
+  /* "system" means NO attribute, so the prefers-color-scheme media query in
+     the stylesheet takes over. */
   if(t==="system") root.removeAttribute("data-theme");
   else root.setAttribute("data-theme",t);
-  const b=$("#themebtn");
-  if(b){
-    b.textContent=THEME_ICON[t];
-    b.title="Theme: "+THEME_NAME[t]+" — tap to change";
-  }
+  $$("#themeseg button").forEach(b=>b.classList.toggle("on", b.dataset.theme===t));
 }
 
 function currentTheme(){
@@ -1497,11 +1511,10 @@ function currentTheme(){
 }
 
 applyTheme(currentTheme());
-$("#themebtn").addEventListener("click",()=>{
-  const next=THEMES[(THEMES.indexOf(currentTheme())+1)%THEMES.length];
-  localStorage.setItem("fh-theme",next);
-  applyTheme(next);
-});
+$$("#themeseg button").forEach(b=>b.addEventListener("click",()=>{
+  localStorage.setItem("fh-theme", b.dataset.theme);
+  applyTheme(b.dataset.theme);
+}));
 
 /* ---------- trend chart ----------
    Hand-rolled inline SVG. No charting library: the page is served from the
