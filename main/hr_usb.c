@@ -80,6 +80,31 @@ void tud_resume_cb(void)
 }
 
 /*
+ * SET_LINE_CODING from the host. Logged purely as a host fingerprint.
+ *
+ * The dryer's own firmware issues CDC line-coding requests (its strings include
+ * "USB_CDC_GET_LINE_CODING %d %ld"), whereas a PC sends these only when an
+ * application actually opens the port. Seeing this therefore identifies WHICH
+ * host is on the wire - the one ambiguity that "mounted=1, rx_bytes=0" cannot
+ * resolve by itself.
+ *
+ * Registered via tinyusb_config_cdcacm_t; esp_tinyusb owns the real
+ * tud_cdc_line_coding_cb symbol and dispatches to us, so do NOT define that
+ * weak override here - it collides at link time.
+ */
+static void on_line_coding(int itf, cdcacm_event_t *event)
+{
+    (void)itf;
+    const cdc_line_coding_t *c = event->line_coding_changed_data.p_line_coding;
+    if (c == NULL) {
+        return;
+    }
+    ESP_LOGI(TAG, "line coding: %lu baud, %u data bits, %u stop, parity %u",
+             (unsigned long)c->bit_rate, (unsigned)c->data_bits,
+             (unsigned)c->stop_bits, (unsigned)c->parity);
+}
+
+/*
  * Force a USB detach/re-attach without rebooting.
  *
  * Why this exists: the dryer's CDC thread gives up if nothing answers its probe
@@ -165,7 +190,7 @@ void hr_usb_init(hr_session_t *session)
         .callback_rx = &on_rx,
         .callback_rx_wanted_char = NULL,
         .callback_line_state_changed = &on_line_state,
-        .callback_line_coding_changed = NULL,
+        .callback_line_coding_changed = &on_line_coding,
     };
     ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
 
