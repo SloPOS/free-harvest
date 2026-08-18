@@ -63,6 +63,9 @@
 
   main{padding:16px; max-width:720px; margin:0 auto}
   .view{display:none} .view.active{display:block}
+  /* Backdrop for the desktop Settings modal; hidden until opened. */
+  #scrim{display:none}
+  body.modal #scrim{display:block}
 
   .card{background:var(--surface); border:1px solid var(--line);
     border-radius:var(--r); padding:16px; margin-bottom:14px}
@@ -117,18 +120,36 @@
     background:var(--bg); border:1px solid var(--line); border-radius:10px;
     overflow:hidden}
   .chartwrap svg{width:100%; height:100%; display:block}
-  .themebtn{margin-left:10px; width:36px; height:36px; border-radius:50%;
+  .themebtn{margin-left:10px; width:38px; height:38px;
     border:1px solid var(--line); background:var(--surface2); color:var(--fg);
-    font-size:16px; line-height:1; cursor:pointer; padding:0; flex:0 0 auto;
-    display:flex; align-items:center; justify-content:center}
+    font-size:16px}
   .themebtn:active{background:var(--line)}
   /* --- hero refresh icon ---------------------------------------------- */
+  .links{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap}
+  .linkbtn{flex:1 1 180px; display:inline-flex; align-items:center;
+    justify-content:center; text-decoration:none; color:var(--fg);
+    background:var(--surface2); border:1px solid var(--line);
+    border-radius:12px; min-height:var(--tap); font-weight:600; font-size:15px}
+  .linkbtn:active{background:var(--line)}
   .hero{position:relative}
-  .iconbtn{position:absolute; top:10px; right:10px; width:40px; height:40px;
-    border-radius:50%; border:1px solid var(--line); background:var(--surface2);
-    color:var(--fg); font-size:19px; line-height:1; cursor:pointer; padding:0;
-    display:flex; align-items:center; justify-content:center}
-  .iconbtn:active{background:var(--line)}
+  /*
+   * Icon buttons must override the global button rule: it sets
+   * min-height:var(--tap) (52px), which against a 40px width produced tall
+   * ovals rather than circles. min-height:0 plus equal width/height and
+   * aspect-ratio:1 keeps them round whatever --tap becomes.
+   */
+  .iconbtn,.themebtn,.modalx{
+    min-height:0; aspect-ratio:1; border-radius:50%; padding:0;
+    line-height:1; cursor:pointer; flex:0 0 auto;
+    display:inline-flex; align-items:center; justify-content:center}
+
+  /* Refresh is chrome-free: the icon alone, with a full-size tap target. The
+     hero already reads as a surface, so a second bordered circle on top of it
+     was visual noise. */
+  .iconbtn{position:absolute; top:8px; right:8px; width:44px; height:44px;
+    border:0; background:none; color:var(--muted); font-size:21px}
+  .iconbtn:hover{color:var(--fg)}
+  .iconbtn:active{color:var(--accent)}
   .iconbtn.spin{animation:spin .6s linear}
   @keyframes spin{from{transform:rotate(0)} to{transform:rotate(360deg)}}
 
@@ -231,7 +252,11 @@
   @media (min-width: 900px){
     body{padding-bottom:0 !important}
     main{max-width:1180px; padding:18px}
-    #v-dash{display:grid; grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr);
+    /* MUST be .active-qualified. As a bare id selector this outranked
+       .view{display:none} and the dashboard could never hide, so Settings
+       rendered underneath it and the tab button appeared to do nothing. */
+    #v-dash.active, body.modal #v-dash{
+      display:grid; grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr);
       gap:16px; align-items:start}
     #v-dash > .hero{grid-column:1; grid-row:1}
     #v-dash > #trendcard{grid-column:2; grid-row:1 / span 2}
@@ -240,9 +265,24 @@
     #cmdstatus{grid-column:1 / -1}
     /* A taller chart earns its place when there is width to spare. */
     .chartwrap{aspect-ratio:600/300}
-    /* Settings screens stay single-column but centred, not stretched: long
-       full-width form rows are harder to scan, not easier. */
-    section.view:not(#v-dash){max-width:720px; margin:0 auto}
+    /*
+     * On a wide screen Settings becomes a modal over the dashboard rather than
+     * replacing it: the live readings stay visible while you change something,
+     * which is the whole advantage of having the width.
+     */
+    section.view.active:not(#v-dash):not(#v-setup){
+      position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+      width:min(720px,92vw); max-height:88vh; overflow-y:auto; z-index:60;
+      background:var(--bg); border:1px solid var(--line);
+      border-radius:var(--r); padding:18px;
+      box-shadow:0 24px 60px rgba(0,0,0,.45)}
+    #scrim{position:fixed; inset:0; z-index:55; background:rgba(0,0,0,.5);
+      backdrop-filter:blur(2px)}
+    body.modal{overflow:hidden}
+    .modalx{position:absolute; top:14px; right:14px; width:38px; height:38px;
+      border:1px solid var(--line); background:var(--surface2);
+      color:var(--fg); font-size:20px; z-index:2}
+    .modalx:active{background:var(--line)}
     .facts{position:static; margin-top:14px}
     /* Undock the tab bar: a fixed bottom bar on a large screen is a
        phone idiom that only eats vertical space. */
@@ -441,6 +481,19 @@
         MQTT device for Home Assistant.<br><br>
         <b>Quote this version number</b> when reporting an issue.<br><br>
         <span class="mono" id="abouthw">–</span>
+      </div>
+
+      <!-- target=_blank so following a link does not navigate away from the
+           adapter; rel=noopener because these open a third-party origin. -->
+      <div class="links">
+        <a class="btn linkbtn" target="_blank" rel="noopener noreferrer"
+           href="https://github.com/SloPOS/free-harvest">Project on GitHub</a>
+        <a class="btn linkbtn" target="_blank" rel="noopener noreferrer"
+           href="https://github.com/SloPOS/free-harvest/issues">Report an issue</a>
+      </div>
+      <div class="hint" style="text-align:left">
+        These open github.com, so they need internet on the device you are
+        browsing from — the adapter itself never reaches the internet.
       </div>
     </div>
   </section>
@@ -650,6 +703,9 @@
 <!-- scrolling pressure facts, docked directly above the tab bar -->
 <div class="facts"><div class="track" id="facts"></div></div>
 
+<!-- Backdrop for the desktop Settings modal. -->
+<div id="scrim"></div>
+
 <nav>
   <button id="nav-dash" class="active" data-view="v-dash"><span class="ic">📊</span>Dashboard</button>
   <button id="nav-set" data-view="v-set"><span class="ic">⚙️</span>Settings</button>
@@ -671,15 +727,69 @@ let lastSeq=0, paused=false, setupDone=null, logAuto=false, lastState=null;
 let otaBusy=false;
 
 /* ---------- view routing ---------- */
+/*
+ * Desktop shows Settings as a modal over the dashboard instead of replacing it,
+ * so the live readings stay visible while you change something. On a phone the
+ * behaviour is unchanged - a full-screen swap, which is right for the width.
+ *
+ * The breakpoint is read at call time rather than cached: resizing or rotating
+ * a window across 900px must not strand the UI in the wrong mode.
+ */
+const isDesktop = () => window.matchMedia("(min-width: 900px)").matches;
+const isModalView = id => id !== "v-dash" && id !== "v-setup";
+
+function closeModal(){
+  document.body.classList.remove("modal");
+  const x=document.querySelector(".modalx");
+  if(x) x.remove();
+}
+
 function show(id){
   $$(".view").forEach(v=>v.classList.remove("active"));
   const el=document.getElementById("v-"+id) || document.getElementById(id);
-  if(el) el.classList.add("active");
-  window.scrollTo(0,0);
+  closeModal();
+  if(el){
+    el.classList.add("active");
+    if(isDesktop() && isModalView(el.id)){
+      document.body.classList.add("modal");
+      /* Injected rather than authored into all nine settings sections: one
+         control, and it cannot drift out of sync with the modal state. */
+      const x=document.createElement("button");
+      x.className="modalx";
+      x.type="button";
+      x.setAttribute("aria-label","Close settings");
+      x.textContent="×";
+      x.addEventListener("click",()=>show("v-dash"));
+      el.appendChild(x);
+    }
+    /* Scroll the modal itself, not the page behind it. */
+    if(document.body.classList.contains("modal")) el.scrollTop=0;
+    else window.scrollTo(0,0);
+  }
+  /* Keep the tab highlight in step however the view changed - X, backdrop,
+     Escape and back-buttons all route through here, not just tab taps. */
+  const onDash = !el || el.id === "v-dash";
+  $$("nav button").forEach(b=>
+    b.classList.toggle("active", (b.dataset.view === "v-dash") === onDash));
 }
+
+/* Click the backdrop, or press Escape, to dismiss. */
+$("#scrim").addEventListener("click",()=>show("v-dash"));
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && document.body.classList.contains("modal")) show("v-dash");
+});
+
+/* Crossing the breakpoint with Settings open would otherwise leave a modal
+   floating on a phone layout, or a full-screen panel with no way back. */
+window.addEventListener("resize",()=>{
+  if(document.body.classList.contains("modal") && !isDesktop()) closeModal();
+});
 $$("nav button").forEach(b=>b.addEventListener("click",()=>{
-  $$("nav button").forEach(x=>x.classList.remove("active"));
-  b.classList.add("active"); show(b.dataset.view);
+  const target=b.dataset.view;
+  /* Toggle: tapping Settings while Settings is already showing closes it,
+     rather than re-opening the same panel and appearing to do nothing. */
+  const already=document.getElementById(target)?.classList.contains("active");
+  show(already && target !== "v-dash" ? "v-dash" : target);
 }));
 $$(".item[data-go]").forEach(it=>it.addEventListener("click",()=>show("v-"+it.dataset.go)));
 $$("[data-back]").forEach(b=>b.addEventListener("click",()=>show("v-set")));
