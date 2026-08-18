@@ -6,11 +6,45 @@
 <meta name="theme-color" content="#0f1419">
 <title>Free Harvest</title>
 <style>
-  :root{
+  /*
+   * Palettes. Dark is the default because the adapter is usually checked in a
+   * dim room next to a running machine. Light is a genuine second palette, not
+   * an inversion: the accent darkens so it still passes contrast on white, and
+   * the surfaces stay slightly tinted so cards remain distinguishable from the
+   * page without borders doing all the work.
+   *
+   * data-theme on <html> wins when the user has chosen explicitly; with no
+   * choice stored we follow the system preference.
+   */
+  :root, :root[data-theme="dark"]{
+    --bg-a:rgba(14,18,22,.92); --surf-a:rgba(23,29,36,.97);
+    --rv-glow:0 1px 8px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.8);
+    --scrim:rgba(14,18,22,.82); --scrim2:rgba(14,18,22,.55); --scrim3:rgba(14,18,22,.15);
     --bg:#0e1216; --surface:#171d24; --surface2:#212a33; --line:#2c3742;
     --fg:#e8eef4; --muted:#93a1b0; --accent:#4ea1ff; --accent-ink:#04121f;
     --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --shadow:0 1px 2px rgba(0,0,0,.4);
     --r:14px; --tap:52px;
+  }
+  :root[data-theme="light"]{
+    --bg-a:rgba(242,245,248,.92); --surf-a:rgba(255,255,255,.97);
+    --rv-glow:0 1px 8px rgba(255,255,255,.95), 0 0 2px rgba(255,255,255,.9);
+    --scrim:rgba(242,245,248,.85); --scrim2:rgba(242,245,248,.55); --scrim3:rgba(242,245,248,.12);
+    --bg:#f2f5f8; --surface:#ffffff; --surface2:#eef2f6; --line:#d7dee6;
+    --fg:#101720; --muted:#5b6b7c; --accent:#0a66c2; --accent-ink:#ffffff;
+    --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+    --shadow:0 1px 3px rgba(16,23,32,.10);
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme]){
+      --bg-a:rgba(242,245,248,.92); --surf-a:rgba(255,255,255,.97);
+      --rv-glow:0 1px 8px rgba(255,255,255,.95), 0 0 2px rgba(255,255,255,.9);
+      --scrim:rgba(242,245,248,.85); --scrim2:rgba(242,245,248,.55); --scrim3:rgba(242,245,248,.12);
+      --bg:#f2f5f8; --surface:#ffffff; --surface2:#eef2f6; --line:#d7dee6;
+      --fg:#101720; --muted:#5b6b7c; --accent:#0a66c2; --accent-ink:#ffffff;
+      --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+      --shadow:0 1px 3px rgba(16,23,32,.10);
+    }
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
   html,body{margin:0; background:var(--bg); color:var(--fg);
@@ -18,7 +52,7 @@
   /* room for the tab bar (64px) plus the docked facts strip (~38px) */
   body{padding-bottom:calc(110px + env(safe-area-inset-bottom))}
 
-  header{position:sticky; top:0; z-index:20; background:rgba(14,18,22,.92);
+  header{position:sticky; top:0; z-index:20; background:var(--bg-a);
     backdrop-filter:blur(8px); border-bottom:1px solid var(--line);
     padding:14px 16px calc(12px); display:flex; align-items:center; gap:12px}
   header h1{font-size:17px; margin:0; font-weight:650; letter-spacing:.2px}
@@ -53,9 +87,9 @@
   /* darken just behind the numbers so they stay readable over the artwork */
   .ring>div::after{content:""; position:absolute; inset:0; z-index:0;
     background:radial-gradient(circle at 50% 50%,
-      rgba(14,18,22,.82) 0%, rgba(14,18,22,.55) 45%, rgba(14,18,22,.15) 75%)}
+      var(--scrim) 0%, var(--scrim2) 45%, var(--scrim3) 75%)}
   .ring .rv{position:relative; z-index:2; text-align:center;
-    text-shadow:0 1px 8px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.8)}
+    text-shadow:var(--rv-glow)}
 
   /* vacuum comparison + scrolling facts */
   .vac{margin-top:14px; padding:12px 14px; border-radius:12px;
@@ -71,7 +105,7 @@
   .facts{position:fixed; left:0; right:0; z-index:29; overflow:hidden;
     bottom:calc(64px + env(safe-area-inset-bottom));
     border-top:1px solid var(--line); border-bottom:1px solid var(--line);
-    background:rgba(23,29,36,.97); backdrop-filter:blur(8px); padding:9px 0}
+    background:var(--surf-a); backdrop-filter:blur(8px); padding:9px 0}
   .facts .track{display:flex; gap:40px; white-space:nowrap; width:max-content;
     animation:marq 48s linear infinite}
   .facts .track:hover{animation-play-state:paused}
@@ -83,6 +117,21 @@
     background:var(--bg); border:1px solid var(--line); border-radius:10px;
     overflow:hidden}
   .chartwrap svg{width:100%; height:100%; display:block}
+  .themebtn{margin-left:10px; width:36px; height:36px; border-radius:50%;
+    border:1px solid var(--line); background:var(--surface2); color:var(--fg);
+    font-size:16px; line-height:1; cursor:pointer; padding:0; flex:0 0 auto;
+    display:flex; align-items:center; justify-content:center}
+  .themebtn:active{background:var(--line)}
+  /* --- hero refresh icon ---------------------------------------------- */
+  .hero{position:relative}
+  .iconbtn{position:absolute; top:10px; right:10px; width:40px; height:40px;
+    border-radius:50%; border:1px solid var(--line); background:var(--surface2);
+    color:var(--fg); font-size:19px; line-height:1; cursor:pointer; padding:0;
+    display:flex; align-items:center; justify-content:center}
+  .iconbtn:active{background:var(--line)}
+  .iconbtn.spin{animation:spin .6s linear}
+  @keyframes spin{from{transform:rotate(0)} to{transform:rotate(360deg)}}
+
   .chartlegend{display:flex; align-items:center; gap:14px; flex-wrap:wrap;
     margin-top:10px; font-size:12.5px; color:var(--muted)}
   .chartlegend span{display:inline-flex; align-items:center; gap:6px}
@@ -158,7 +207,7 @@
 
   /* bottom nav */
   nav{position:fixed; left:0; right:0; bottom:0; z-index:30; display:flex;
-    background:rgba(23,29,36,.97); backdrop-filter:blur(8px);
+    background:var(--surf-a); backdrop-filter:blur(8px);
     border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom)}
   nav button{flex:1; min-height:64px; border:0; border-radius:0; background:none;
     color:var(--muted); font-size:11.5px; font-weight:600; flex-direction:column; gap:3px}
@@ -169,6 +218,38 @@
     font-weight:600; font-size:14px; background:none; border:0; width:auto;
     min-height:40px; padding:0; margin-bottom:8px; justify-content:flex-start}
   h3.sec{font-size:19px; margin:2px 0 14px; font-weight:700}
+  /* Desktop overrides live LAST on purpose: they must win on source
+     order against the base mobile rules (same specificity). */
+  /* --- desktop layout -------------------------------------------------- */
+  /*
+   * The mobile design is a single column, which is right for a phone but wastes
+   * most of a desktop window. Above 900px the dashboard becomes two columns so
+   * the hero, the graph and the phase guidance are visible at once instead of
+   * requiring a scroll, and the tab bar moves inline rather than being docked to
+   * the bottom edge of a large screen.
+   */
+  @media (min-width: 900px){
+    body{padding-bottom:0 !important}
+    main{max-width:1180px; padding:18px}
+    #v-dash{display:grid; grid-template-columns:minmax(320px,1fr) minmax(0,1.25fr);
+      gap:16px; align-items:start}
+    #v-dash > .hero{grid-column:1; grid-row:1}
+    #v-dash > #trendcard{grid-column:2; grid-row:1 / span 2}
+    #v-dash > #phasecard{grid-column:1; grid-row:2}
+    #v-dash > .card:not(.hero):not(#trendcard):not(#phasecard){grid-column:1 / -1}
+    #cmdstatus{grid-column:1 / -1}
+    /* A taller chart earns its place when there is width to spare. */
+    .chartwrap{aspect-ratio:600/300}
+    /* Settings screens stay single-column but centred, not stretched: long
+       full-width form rows are harder to scan, not easier. */
+    section.view:not(#v-dash){max-width:720px; margin:0 auto}
+    .facts{position:static; margin-top:14px}
+    /* Undock the tab bar: a fixed bottom bar on a large screen is a
+       phone idiom that only eats vertical space. */
+    nav{position:static; max-width:1180px; margin:18px auto 24px;
+      border-radius:var(--r); border:1px solid var(--line)}
+    nav button{min-height:52px}
+  }
 </style>
 </head>
 <body>
@@ -184,6 +265,8 @@
   <h1 id="hdr">Free Harvest</h1>
   <span id="dot" class="dot"></span>
   <div class="sub"><span id="hdrsub">connecting…</span></div>
+  <button id="themebtn" class="themebtn" title="Switch light / dark"
+          aria-label="Switch light or dark theme">&#9680;</button>
 </header>
 
 <main>
@@ -232,6 +315,8 @@
   <!-- ============== DASHBOARD (phase-gated) ============== -->
   <section id="v-dash" class="view">
     <div class="card hero">
+      <button id="heroref" class="iconbtn" title="Ask the dryer for a fresh reading"
+              aria-label="Refresh now">&#x21bb;</button>
       <div class="ring" id="ring"><div>
         <div class="art" id="ringart"></div>
         <div class="rv">
@@ -303,14 +388,9 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>Actions</h2>
-      <div class="row">
-        <button data-cmd="REQSTAT">🔄 Refresh now</button>
-        <button data-cmd="BEEP">🔔 Beep</button>
-      </div>
-      <div id="cmdstatus" class="notice"></div>
-    </div>
+    <!-- Refresh lives in the hero now; Beep was a leftover bring-up toy. The
+         status line stays: /api/cmd still reports through it. -->
+    <div id="cmdstatus" class="notice" style="margin:0 16px"></div>
   </section>
 
   <!-- ============== SETTINGS (menu) ============== -->
@@ -606,6 +686,36 @@ $$("[data-back]").forEach(b=>b.addEventListener("click",()=>show("v-set")));
 
 /* ---------- helpers ---------- */
 const esc=s=>String(s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+/*
+ * Locally-ticking batch clock.
+ *
+ * The dryer only reports elapsed time when it sends a frame - every ~15s when
+ * idle, and with gaps up to 76s mid-run - so a display driven straight from the
+ * packet sits frozen and then jumps. Instead we anchor to the dryer's value
+ * whenever a frame arrives and interpolate with the local monotonic clock in
+ * between.
+ *
+ * The dryer remains the authority: every fresh reading re-anchors, so drift can
+ * never accumulate. We only ever fill the silence between its updates.
+ */
+const clocks = {};   /* name -> {base, at, running} */
+
+function clockSync(name, seconds, running){
+  const c = clocks[name];
+  /* Re-anchor whenever the dryer's own counter moves, or run state flips. */
+  if(!c || c.base !== seconds || c.running !== running){
+    clocks[name] = {base: seconds|0, at: performance.now(), running: !!running};
+  }
+}
+
+function clockNow(name){
+  const c = clocks[name];
+  if(!c) return 0;
+  if(!c.running) return c.base;          /* frozen counter: do NOT invent time */
+  return c.base + Math.floor((performance.now() - c.at) / 1000);
+}
+
+
 function hhmmss(sec){
   sec=Math.max(0,parseInt(sec||0,10));
   const h=Math.floor(sec/3600), m=Math.floor(sec%3600/60), s=sec%60;
@@ -823,6 +933,16 @@ function paintDash(st){
   const eta    = (st.freeze_eta_s === undefined) ? -1 : st.freeze_eta_s;
   const pct    = (st.phase_pct === undefined) ? st.freeze_pct : st.phase_pct;
 
+  /*
+   * Re-anchor the ticking clocks to the dryer's own counters. Only tick while a
+   * batch is genuinely under way: when idle the dryer RETAINS the last batch's
+   * elapsed value and stops advancing it, so ticking then would invent time and
+   * show a finished batch still running.
+   */
+  const inRun = running || frz || dry || done || prep || phase === 3;
+  clockSync("batch", st.elapsed_s || 0, inRun);
+  clockSync("phase", st.phase_s   || 0, inRun);
+
   /* hero */
   $("#stage").textContent = !linked ? "Dryer not connected"
                                     : (st.phase_label || "Waiting…");
@@ -850,7 +970,7 @@ function paintDash(st){
   } else if(dry){
     /* Drying: show time in this phase; there's no reliable % for it yet. */
     ring.style.setProperty("--p", 100);
-    $("#ringval").textContent = hhmmss(st.phase_s || 0);
+    $("#ringval").textContent = hhmmss(clockNow("phase"));
     $("#ringlab").textContent = (phase===9) ? "final dry" : "drying";
   } else if(done){
     ring.style.setProperty("--p", 100);
@@ -858,7 +978,7 @@ function paintDash(st){
     $("#ringlab").textContent = "venting";
   } else if(running){
     ring.style.setProperty("--p", 100);
-    $("#ringval").textContent = hhmmss(st.elapsed_s);
+    $("#ringval").textContent = hhmmss(clockNow("batch"));
     $("#ringlab").textContent = "elapsed";
   } else {
     ring.style.setProperty("--p", 0);
@@ -892,7 +1012,7 @@ function paintDash(st){
     /* A batch is under way during freezing too, so show the live timer for
        any in-batch phase; only a genuinely idle dryer shows the stale value. */
     const inBatch = running || frz || dry || done || prep || phase === 3;
-    $("#m-elapsed").textContent = inBatch ? hhmmss(st.elapsed_s)
+    $("#m-elapsed").textContent = inBatch ? hhmmss(clockNow("batch"))
                                 : (st.elapsed_s>0 ? "— (last: "+hhmmss(st.elapsed_s)+")" : "—");
     $("#m-mode").textContent    = st.mode || "—";
     $("#lastseen").textContent  = "Frame type " + st.stat_type +
@@ -1085,6 +1205,15 @@ async function sendCmd(verb,args,statusEl){
   }catch(e){ note(el,"Request failed","bad"); }
 }
 $$("button[data-cmd]").forEach(b=>b.addEventListener("click",()=>sendCmd(b.dataset.cmd)));
+
+/* Hero refresh: asks the dryer for a fresh STAT rather than waiting out its
+   ~15s idle cadence. Spins while in flight so the tap is acknowledged. */
+$("#heroref").addEventListener("click", async () => {
+  const b=$("#heroref");
+  b.classList.add("spin");
+  try{ await sendCmd("REQSTAT"); await refreshState(); }
+  finally{ setTimeout(()=>b.classList.remove("spin"), 600); }
+});
 $("#rawsend").addEventListener("click",()=>
   sendCmd($("#rawverb").value, $("#rawargs").value.trim(), $("#rawstatus")));
 $("#bnamesave").addEventListener("click",async()=>{
@@ -1219,6 +1348,40 @@ $("#capclear").addEventListener("click",async()=>{
 $("#pause").addEventListener("click",()=>{ paused=!paused;
   $("#pause").textContent=paused?"Resume":"Pause"; });
 $("#dl").addEventListener("click",()=>location.href="/api/capture");
+
+/* ---------- theme ----------
+   Three states, not two: "system" is the default and follows the OS, and the
+   two explicit choices override it. Cycling through all three means a user who
+   toggles can always get back to automatic without clearing storage.
+
+   Stored in localStorage, so it is per-browser rather than per-device - the
+   adapter has no user accounts and this is purely a display preference. */
+const THEMES=["system","light","dark"];
+const THEME_ICON={system:"◐", light:"☀", dark:"☾"};
+const THEME_NAME={system:"Follow system", light:"Light", dark:"Dark"};
+
+function applyTheme(t){
+  const root=document.documentElement;
+  if(t==="system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme",t);
+  const b=$("#themebtn");
+  if(b){
+    b.textContent=THEME_ICON[t];
+    b.title="Theme: "+THEME_NAME[t]+" — tap to change";
+  }
+}
+
+function currentTheme(){
+  const t=localStorage.getItem("fh-theme");
+  return THEMES.includes(t) ? t : "system";
+}
+
+applyTheme(currentTheme());
+$("#themebtn").addEventListener("click",()=>{
+  const next=THEMES[(THEMES.indexOf(currentTheme())+1)%THEMES.length];
+  localStorage.setItem("fh-theme",next);
+  applyTheme(next);
+});
 
 /* ---------- trend chart ----------
    Hand-rolled inline SVG. No charting library: the page is served from the
@@ -1464,6 +1627,11 @@ poller(refreshMqtt,    4000);
 poller(refreshCapture, 5000);
 /* A new bucket only lands every 30s, so polling faster is wasted work. */
 poller(refreshTrend, 15000);
+
+/* Repaint once a second so the batch/phase timers visibly advance between the
+   dryer's frames. Cheap and local - it re-renders from the last state, and
+   issues no request. */
+setInterval(()=>{ if(!otaBusy && lastState) paintDash(lastState); }, 1000);
 setInterval(()=>{ if(logAuto) refreshLog(); },2000);
 </script>
 </body>
