@@ -347,7 +347,9 @@ static esp_err_t h_capture_clear(httpd_req_t *req)
 static esp_err_t h_trend(httpd_req_t *req)
 {
     if (s_trend == NULL) {
-        return send_json(req, "{\"bucket_s\":30,\"stride\":1,\"n\":0,\"temp\":[],\"smooth\":[],\"press\":[]}", 68);
+        const char *empty = "{\"bucket_s\":30,\"stride\":1,\"n\":0,"
+                            "\"temp\":[],\"smooth\":[],\"press\":[]}";
+        return send_json(req, empty, strlen(empty));
     }
 
     LOCK();
@@ -365,13 +367,17 @@ static esp_err_t h_trend(httpd_req_t *req)
                       "{\"bucket_s\":%lu,\"stride\":%u,\"n\":%u,\"temp\":[",
                       (unsigned long)(HR_TREND_BUCKET_MS / 1000),
                       (unsigned)stride, (unsigned)emitted);
-    httpd_resp_send_chunk(req, head, hn);
+    if (httpd_resp_send_chunk(req, head, hn) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     /* Three passes so each array streams without holding the whole series. */
     for (int pass = 0; pass < 3; pass++) {
         if (pass > 0) {
             const char *sep = (pass == 1) ? "],\"smooth\":[" : "],\"press\":[";
-            httpd_resp_send_chunk(req, sep, strlen(sep));
+            if (httpd_resp_send_chunk(req, sep, strlen(sep)) != ESP_OK) {
+                return ESP_FAIL;
+            }
         }
         char buf[256];
         int n = 0;
@@ -418,16 +424,26 @@ static esp_err_t h_trend(httpd_req_t *req)
             first = false;
             n += w;
             if (n > (int)sizeof(buf) - 24) {
-                httpd_resp_send_chunk(req, buf, n);
+                /* Bail out on a vanished client. Without this the loop
+                 * keeps pushing into a dead socket and the response is
+                 * never terminated, leaking the socket - after
+                 * max_open_sockets of those the server refuses everything. */
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+                    return ESP_FAIL;
+                }
                 n = 0;
             }
         }
-        if (n > 0) {
-            httpd_resp_send_chunk(req, buf, n);
+        if (n > 0 && httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+            return ESP_FAIL;
         }
     }
 
-    httpd_resp_send_chunk(req, "]}", 2);
+    if (httpd_resp_send_chunk(req, "]}", 2) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    /* Zero-length chunk terminates the response; required or the socket
+     * stays open. */
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 

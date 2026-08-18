@@ -40,7 +40,9 @@ No cloud account. No vendor lock-in. Runs standalone or on your own network.
 | 📊 **Live dashboard** | Cycle phase, temperature, vacuum (microns), batch + phase timers, countdowns |
 | 🧭 **Phase-aware guidance** | Shows only the options valid right now, using the owner's-manual wording |
 | 🏠 **Home Assistant** | MQTT auto-discovery — sensors appear automatically, no YAML |
+| 📈 **Trend graph** | Temperature over the whole run, smoothed to kill the ±1 °F sensor flapping |
 | 📡 **Raw data feed** | Every frame the dryer sends, with changed-field highlighting |
+| 🩺 **USB diagnostics** | USB-level counters that tell you *why* the dryer is not being seen |
 | ⬆️ **OTA updates** | Flash new firmware from the web page; no cable |
 | 🔒 **Local only** | Setup hotspot auto-closes after 5 minutes; nothing phones home |
 
@@ -242,7 +244,13 @@ hrdryer/<id>/config/set   → set batch name
 
 ## Updating (OTA)
 
-No cable needed after the first flash.
+No cable needed after the first flash — **and from v0.3.4 onward a bad update
+reverts itself.**
+
+> **Upgrading from v0.2 or any 0.3.x needs one USB flash**, including
+> `bootloader.bin`. Rollback protection is enforced by the bootloader, and OTA
+> never rewrites the bootloader. That one cable trip is what buys you safe
+> wireless updates afterwards.
 
 1. Download the new `hr_wifi_adapter.bin`
 2. **Settings → Firmware update → choose file → Upload & install**
@@ -250,6 +258,17 @@ No cable needed after the first flash.
 
 If the upload fails or the file is invalid, it's **rejected and the current firmware
 keeps running** — the device won't be bricked by a bad upload.
+
+Beyond that, every OTA image boots **on trial**. It is kept only once the adapter
+is reachable again — Wi-Fi joined, or the setup hotspot up — and otherwise rolls
+back to the previous firmware after 120 seconds.
+
+Reachability is deliberately the test rather than "working properly": a build
+that cannot decode a single dryer frame is still keepable, because you can reach
+it to upload another one. A build that cannot get on the network is not. Note
+that *not seeing the dryer* is *not* a rollback trigger — the dryer may simply be
+unplugged, and reverting good firmware over that would be worse than the
+problem.
 
 ---
 
@@ -260,7 +279,9 @@ visible in the browser and names the actual error.
 
 | Symptom | Cause / fix |
 |---|---|
-| Dot stays red, no readings | Wrong USB port on the S3 — use the one labelled **USB**, not **UART** |
+| Dot stays red, no readings | Open **Settings → Debug & advanced → USB link to dryer** — it states which of the three possible faults this is. First check you are using the socket labelled **USB**, not **UART** |
+| USB panel says "enumerated, 0 bytes" | The dryer sees a USB device but is not talking to it. Try **Reconnect USB** on the same screen; if that fails, power-cycle the dryer |
+| USB panel says "never connected" | Cable, socket or power — not firmware |
 | MQTT won't connect, log shows `invalid header=0x48` | You pointed it at a web server. `0x48` is `H` from `HTTP` — use port **1883** |
 | MQTT log shows `broker REFUSED: return_code=4/5` | Wrong username/password, or that user isn't authorised on the broker |
 | MQTT log shows `TCP error: sock_errno=104/111` | Nothing listening — check Mosquitto is running and reachable on your LAN |
@@ -303,6 +324,7 @@ components/hr_protocol/     portable core (no ESP-IDF deps, fully testable)
   hr_session.[ch]             link state machine, command allow-list
   hr_history.[ch]             frame ring buffer, per-verb table, field diffing
   hr_telemetry.[ch]           STAT decoding, cycle-phase detection
+  hr_trend.[ch]               30s series + temperature-adaptive smoothing
 main/                       ESP-IDF layer
   main.c                      wiring
   hr_usb.[ch]                 TinyUSB CDC-ACM device (the dryer is USB host)
@@ -310,9 +332,13 @@ main/                       ESP-IDF layer
   hr_http.[ch]                web server + REST API
   hr_mqtt.[ch]                MQTT client + Home Assistant discovery
   hr_log.[ch]                 in-app log capture
+  hr_capture.[ch]             persistent flash log of every frame
   www/index.html              the web app (single file, embedded in firmware)
 test/                       host unit tests
-tools/mock_dryer.py         simulate a dryer over serial (no hardware)
+tools/
+  mock_dryer.py               simulate a dryer over serial (no hardware)
+  probe_adapter.py            make a PC play the dryer: proves the USB CDC
+                              path end to end with no dryer attached
 ```
 
 ---
@@ -341,10 +367,18 @@ every known verb, and which fields are confirmed vs. inferred.
 
 ### Known gaps
 
-- **Freezing and drying are detected** (STAT types 4 and 5), with live % frozen,
-  an estimated time to 100%, real vacuum readings and a per-phase timer. Extra-dry
-  time, process-complete and defrost haven't been captured yet and still read as
-  "Batch running".
+- **The full cycle is now decoded** — Freezing (type 4), Drying (5), Final dry (6),
+  Complete/vent (7) and Idle (1) — from a 22-hour capture, with real vacuum
+  readings, per-phase timers and live % frozen. **Defrost has still never been
+  captured.** A transient type 44 appeared once inside final dry and remains
+  unmapped.
+- **Time-remaining is still naive.** The freeze estimate extrapolates linearly,
+  but cooling is exponential (Newton's law of cooling), so it under-estimates the
+  final few degrees — which are the slowest. A curve-fitting estimator that learns
+  from past cycles is in progress; the trend graph is its first piece.
+- **No remote cycle control exists, and none is possible.** The dryer's serial
+  protocol has no START/CONTINUE/DEFROST/CANCEL verb — this was established by
+  disassembling its firmware, not by guessing. All flow control is panel-only.
 - **Field meanings marked "inferred"** in the protocol notes need confirmation.
 
 Captures are very welcome — see below.

@@ -76,6 +76,21 @@
     animation:marq 48s linear infinite}
   .facts .track:hover{animation-play-state:paused}
   .facts span{font-size:13px; color:var(--muted)}
+  /* --- trend chart --------------------------------------------------- */
+  /* Fixed aspect box so the SVG can stretch without the card jumping as
+     points are appended. */
+  .chartwrap{position:relative; width:100%; aspect-ratio:600/240;
+    background:var(--bg); border:1px solid var(--line); border-radius:10px;
+    overflow:hidden}
+  .chartwrap svg{width:100%; height:100%; display:block}
+  .chartlegend{display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    margin-top:10px; font-size:12.5px; color:var(--muted)}
+  .chartlegend span{display:inline-flex; align-items:center; gap:6px}
+  .sw{width:14px; height:3px; border-radius:2px; display:inline-block}
+  .sw-t{background:var(--accent)}
+  .sw-r{background:var(--muted); opacity:.55}
+  .sw-p{background:#c98bff}
+  .chiptog{margin-left:auto; padding:6px 12px; font-size:12.5px}
   .facts b{color:var(--accent); font-weight:650}
   @keyframes marq{from{transform:translateX(0)} to{transform:translateX(-50%)}}
   @media (prefers-reduced-motion:reduce){
@@ -236,6 +251,21 @@
                transition:width .4s ease"></div>
         </div>
       </div>
+    </div>
+
+    <!-- temperature/pressure trend for the current run -->
+    <div class="card" id="trendcard">
+      <h2>This run</h2>
+      <div class="chartwrap"><svg id="chart" viewBox="0 0 600 240"
+           preserveAspectRatio="none" role="img"
+           aria-label="Temperature over the current run"></svg></div>
+      <div class="chartlegend">
+        <span><i class="sw sw-t"></i>Temperature</span>
+        <span><i class="sw sw-r"></i>Raw reading</span>
+        <span id="lg-p" style="display:none"><i class="sw sw-p"></i>Vacuum</span>
+        <button id="trendpress" class="ghost chiptog">Show vacuum</button>
+      </div>
+      <div class="hint" id="trendnote">Collecting…</div>
     </div>
 
     <!-- phase-specific instructions + valid options -->
@@ -1190,6 +1220,155 @@ $("#pause").addEventListener("click",()=>{ paused=!paused;
   $("#pause").textContent=paused?"Resume":"Pause"; });
 $("#dl").addEventListener("click",()=>location.href="/api/capture");
 
+/* ---------- trend chart ----------
+   Hand-rolled inline SVG. No charting library: the page is served from the
+   adapter itself with no internet route, so every byte must already be here.
+
+   The SMOOTHED series is the headline line. Raw is drawn faintly underneath so
+   the noise it removes stays visible - without that you cannot tell whether the
+   smoothing is helping or lying to you. */
+let trendShowPress=false;
+const SVGNS="http://www.w3.org/2000/svg";
+
+function el(name,attrs){
+  const n=document.createElementNS(SVGNS,name);
+  for(const k in attrs) n.setAttribute(k,attrs[k]);
+  return n;
+}
+
+/* Round axis step so gridlines land on readable values. */
+function niceStep(span,target){
+  const rough=span/Math.max(1,target);
+  const mag=Math.pow(10,Math.floor(Math.log10(rough||1)));
+  for(const m of [1,2,2.5,5,10]){ if(mag*m>=rough) return mag*m; }
+  return mag*10;
+}
+
+function fmtDur(sec){
+  const h=Math.floor(sec/3600), m=Math.round((sec%3600)/60);
+  return h? (m? h+"h "+m+"m" : h+"h") : m+"m";
+}
+
+function drawTrend(d){
+  const svg=$("#chart"), W=600, H=240;
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+
+  const n=d.n|0;
+  if(n<2){
+    $("#trendnote").textContent =
+      "Collecting - the first points appear about a minute into a run.";
+    return;
+  }
+
+  /* Seconds per plotted point: bucket width times the server-side stride. */
+  const dt=(d.bucket_s||30)*(d.stride||1);
+  const totalS=(n-1)*dt;
+
+  const L=44, R=trendShowPress?52:12, T=12, B=26;
+  const pw=W-L-R, ph=H-T-B;
+
+  /* Temperature scale spans BOTH series so the raw band is never clipped. */
+  let lo=Infinity, hi=-Infinity;
+  const seen=v=>{ if(v!==null&&isFinite(v)){ if(v<lo)lo=v; if(v>hi)hi=v; } };
+  for(let i=0;i<n;i++){
+    seen(d.smooth[i]===null?null:d.smooth[i]/100);
+    seen(d.temp[i]);
+  }
+  if(!isFinite(lo)){ $("#trendnote").textContent="No temperature yet."; return; }
+  /* A dead-flat series would otherwise fill the whole box and look dramatic. */
+  if(hi-lo<4){ const mid=(hi+lo)/2; lo=mid-2; hi=mid+2; }
+  const pad=(hi-lo)*0.12; lo-=pad; hi+=pad;
+
+  const x=i=>L+(pw*i)/(n-1);
+  const y=v=>T+ph-((v-lo)/(hi-lo))*ph;
+
+  const stepY=niceStep(hi-lo,4);
+  for(let g=Math.ceil(lo/stepY)*stepY; g<=hi; g+=stepY){
+    svg.appendChild(el("line",{x1:L,y1:y(g),x2:W-R,y2:y(g),
+      stroke:"var(--line)","stroke-width":1}));
+    const t=el("text",{x:L-6,y:y(g)+4,"text-anchor":"end",
+      fill:"var(--muted)","font-size":11});
+    t.textContent=Math.round(g)+"\u00b0";
+    svg.appendChild(t);
+  }
+  /* Freezing point is the one temperature worth marking explicitly. */
+  if(lo<32&&hi>32){
+    svg.appendChild(el("line",{x1:L,y1:y(32),x2:W-R,y2:y(32),
+      stroke:"var(--muted)","stroke-width":1,"stroke-dasharray":"2 4",opacity:.5}));
+  }
+
+  const stepX=niceStep(totalS,4);
+  for(let g=0; g<=totalS+1; g+=stepX){
+    const t=el("text",{x:x(g/dt),y:H-8,"text-anchor":"middle",
+      fill:"var(--muted)","font-size":11});
+    t.textContent=g?fmtDur(g):"0";
+    svg.appendChild(t);
+  }
+
+  /* Gaps break the path instead of interpolating a line across missing data. */
+  const path=(vals,scale)=>{
+    let out="", pen=false;
+    for(let i=0;i<n;i++){
+      const v=vals[i];
+      if(v===null||!isFinite(v)){ pen=false; continue; }
+      out+=(pen?"L":"M")+x(i).toFixed(1)+" "+y(scale(v)).toFixed(1)+" ";
+      pen=true;
+    }
+    return out.trim();
+  };
+
+  const raw=path(d.temp,v=>v);
+  if(raw) svg.appendChild(el("path",{d:raw,fill:"none",stroke:"var(--muted)",
+    "stroke-width":1,opacity:.45}));
+
+  const sm=path(d.smooth,v=>v/100);
+  if(sm) svg.appendChild(el("path",{d:sm,fill:"none",stroke:"var(--accent)",
+    "stroke-width":2.5,"stroke-linejoin":"round","stroke-linecap":"round"}));
+
+  /* Vacuum is optional and gets its own right-hand scale - microns and degrees
+     share no meaningful axis. */
+  let anyP=false;
+  for(let i=0;i<n;i++) if(d.press[i]!==null){ anyP=true; break; }
+  $("#lg-p").style.display=(trendShowPress&&anyP)?"":"none";
+  $("#trendpress").style.display=anyP?"":"none";
+  if(trendShowPress&&anyP){
+    let plo=Infinity, phi=-Infinity;
+    for(let i=0;i<n;i++){ const v=d.press[i];
+      if(v!==null){ if(v<plo)plo=v; if(v>phi)phi=v; } }
+    if(phi-plo<10) phi=plo+10;
+    const py=v=>T+ph-((v-plo)/(phi-plo))*ph;
+    let out="",pen=false;
+    for(let i=0;i<n;i++){ const v=d.press[i];
+      if(v===null){ pen=false; continue; }
+      out+=(pen?"L":"M")+x(i).toFixed(1)+" "+py(v).toFixed(1)+" "; pen=true; }
+    if(out) svg.appendChild(el("path",{d:out.trim(),fill:"none",
+      stroke:"#c98bff","stroke-width":2,"stroke-dasharray":"4 3"}));
+    for(const g of [plo,phi]){
+      const t=el("text",{x:W-R+6,y:py(g)+4,fill:"#c98bff","font-size":11});
+      t.textContent=Math.round(g);
+      svg.appendChild(t);
+    }
+  }
+
+  /* State the sampling honestly, including any downsampling the server did. */
+  const cur=d.smooth[n-1];
+  $("#trendnote").textContent=
+    fmtDur(totalS)+" of data, "+n+" points at "+dt+"s"+
+    ((d.stride||1)>1?" (downsampled)":"")+
+    (cur!==null&&isFinite(cur)?" \u00b7 now "+(cur/100).toFixed(1)+"\u00b0F smoothed":"");
+}
+
+async function refreshTrend(){
+  try{ drawTrend(await (await fetch("/api/trend")).json()); }
+  catch(e){ /* transient; the next tick retries */ }
+}
+
+$("#trendpress").addEventListener("click",()=>{
+  trendShowPress=!trendShowPress;
+  $("#trendpress").textContent=trendShowPress?"Hide vacuum":"Show vacuum";
+  refreshTrend();
+});
+
 /* ---------- USB reconnect ----------
    Retries the dryer link without a reboot or a power cycle. Not destructive:
    the adapter cannot control the cycle, and the dryer sees the same
@@ -1260,12 +1439,15 @@ $("#otago").addEventListener("click",()=>{
    confirms Wi-Fi is configured. */
 show("v-setup");
 refreshState(); refreshVerbs(); refreshMqtt(); refreshCapture(); pollFrames();
+refreshTrend();
 /* All polling is gated on otaBusy - see its declaration for why. */
 setInterval(()=>{ if(!otaBusy) pollFrames();    },1000);
 setInterval(()=>{ if(!otaBusy) refreshState();  },2000);
 setInterval(()=>{ if(!otaBusy) refreshVerbs();  },4000);
 setInterval(()=>{ if(!otaBusy) refreshMqtt();   },4000);
 setInterval(()=>{ if(!otaBusy) refreshCapture();},5000);
+/* A new bucket only lands every 30s, so polling faster is wasted work. */
+setInterval(()=>{ if(!otaBusy) refreshTrend();   },15000);
 setInterval(()=>{ if(logAuto) refreshLog(); },2000);
 </script>
 </body>
