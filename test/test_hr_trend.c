@@ -195,6 +195,84 @@ static void test_reset_clears_between_batches(void)
     CHECK(p.temp_smooth_cf == 1200);
 }
 
+static void test_restore_rebuilds_the_series(void)
+{
+    /* A persisted run comes back verbatim - restore must not re-smooth or
+       re-bucket, or replaying it would change the shape of history. */
+    hr_trend_t tr;
+    hr_trend_init(&tr);
+    for (int i = 0; i < 5; i++) {
+        hr_trend_point_t p;
+        p.temp_raw_f = (int16_t)(20 - i);
+        p.temp_smooth_cf = (int16_t)((20 - i) * 100);
+        p.pressure_raw = (uint32_t)(500 + i);
+        CHECK(hr_trend_restore_point(&tr, &p));
+    }
+    CHECK(hr_trend_count(&tr) == 5);
+    hr_trend_point_t got;
+    CHECK(hr_trend_get(&tr, 0, &got));
+    CHECK(got.temp_raw_f == 20 && got.temp_smooth_cf == 2000);
+    CHECK(hr_trend_get(&tr, 4, &got));
+    CHECK(got.temp_raw_f == 16 && got.pressure_raw == 504);
+}
+
+static void test_outage_becomes_a_gap_not_a_line(void)
+{
+    /* The outage must be visible. Interpolating across it would assert data we
+       never had. */
+    hr_trend_t tr;
+    hr_trend_init(&tr);
+    hr_trend_point_t p = {.temp_raw_f = 10, .temp_smooth_cf = 1000,
+                          .pressure_raw = 450};
+    CHECK(hr_trend_restore_point(&tr, &p));
+    hr_trend_restore_gap(&tr, 4);          /* 4 buckets = 2 minutes down */
+    CHECK(hr_trend_count(&tr) == 5);
+
+    hr_trend_point_t g;
+    for (size_t i = 1; i < 5; i++) {
+        CHECK(hr_trend_get(&tr, i, &g));
+        CHECK(g.temp_raw_f == HR_TREND_NO_TEMP);
+        CHECK(g.pressure_raw == 0);
+    }
+}
+
+static void test_resume_continues_the_smoothed_line(void)
+{
+    /*
+     * After a restore the smoothed level must carry over. Otherwise the first
+     * reading after reboot re-anchors the line and the graph shows a step that
+     * the machine never made.
+     */
+    hr_trend_t tr;
+    hr_trend_init(&tr);
+    hr_trend_point_t p = {.temp_raw_f = -12, .temp_smooth_cf = -1200,
+                          .pressure_raw = 0};
+    CHECK(hr_trend_restore_point(&tr, &p));
+    hr_trend_restore_gap(&tr, 2);
+    hr_trend_resume(&tr, 100000);
+
+    /* One reading 1F away is inside the cold deadband, so the level holds. */
+    hr_trend_add(&tr, 100000, -13, 0, false);
+    hr_trend_tick(&tr, 100000 + B);
+    hr_trend_point_t got;
+    CHECK(hr_trend_get(&tr, hr_trend_count(&tr) - 1, &got));
+    CHECK(got.temp_smooth_cf == -1200);
+}
+
+static void test_restore_stops_at_capacity(void)
+{
+    hr_trend_t tr;
+    hr_trend_init(&tr);
+    hr_trend_point_t p = {.temp_raw_f = 1, .temp_smooth_cf = 100,
+                          .pressure_raw = 0};
+    for (size_t i = 0; i < HR_TREND_CAPACITY; i++) {
+        CHECK(hr_trend_restore_point(&tr, &p) == true);
+    }
+    CHECK(hr_trend_restore_point(&tr, &p) == false);
+    hr_trend_restore_gap(&tr, 10);   /* must not overrun */
+    CHECK(hr_trend_count(&tr) == HR_TREND_CAPACITY);
+}
+
 int main(void)
 {
     test_deadband_widens_as_it_gets_colder();
@@ -206,5 +284,9 @@ int main(void)
     test_gaps_become_empty_buckets();
     test_invalid_pressure_is_not_recorded();
     test_reset_clears_between_batches();
+    test_restore_rebuilds_the_series();
+    test_outage_becomes_a_gap_not_a_line();
+    test_resume_continues_the_smoothed_line();
+    test_restore_stops_at_capacity();
     return TEST_REPORT();
 }

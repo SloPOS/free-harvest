@@ -123,6 +123,38 @@ int hr_trend_deadband_cf(int temp_f);
  */
 int hr_trend_hysteresis(int temp_f);
 
+/* ------------------------------------------------------------------ */
+/* Restore after a power loss                                          */
+/* ------------------------------------------------------------------ */
+/*
+ * The adapter is powered from the dryer, so a brownout or a reflash wipes this
+ * RAM series. The dryer, however, keeps counting: its batch-elapsed value runs
+ * whether or not we are alive. So the outage can be measured exactly rather
+ * than guessed - persist the series with the elapsed value of its last point,
+ * and on the next boot the difference IS the gap.
+ */
+
+/*
+ * Append a previously persisted point verbatim, bypassing bucketing and
+ * smoothing. Used only when restoring; `count` grows by one. Returns false if
+ * the ring is full.
+ */
+bool hr_trend_restore_point(hr_trend_t *tr, const hr_trend_point_t *p);
+
+/*
+ * Append `n` empty buckets to represent time the adapter was not running.
+ * Drawn as a break in the line - never interpolated, because we genuinely do
+ * not know what happened during the outage.
+ */
+void hr_trend_restore_gap(hr_trend_t *tr, size_t n);
+
+/*
+ * Resume live bucketing after a restore. Anchors the next bucket to `now_ms`
+ * and seeds the smoothing level from the last restored point, so the line
+ * continues from where it left off instead of re-anchoring to a fresh value.
+ */
+void hr_trend_resume(hr_trend_t *tr, unsigned long now_ms);
+
 #ifdef __cplusplus
 }
 #endif

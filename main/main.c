@@ -41,13 +41,19 @@ static hr_phase_tracker_t s_tracker;
  * same mutex as history, because it is written from the USB RX task and read by
  * the HTTP task.
  *
- * RAM only for now: a reboot loses the current run's graph. Persisting it needs
- * a flash-write queue so no flash I/O lands on the USB RX path - that is the
- * next commit, not this one.
+ * Persisted to flash via the capture worker, so a power cut or a reflash no
+ * longer loses the run - see the resume block in the main loop.
  */
 static hr_trend_t s_trend;
 /* Last batch-elapsed seen, to notice a new batch and start a fresh series. */
 static long s_last_batch_elapsed = -1;
+/* Graph points already written to flash, so the loop only persists new ones. */
+static size_t s_trend_persisted;
+/* The resume decision runs once, after the capture log mounts and the dryer
+   has told us where its batch clock stands. */
+static bool s_resume_done;
+/* Backoff clock for the series write, so a failure cannot spin. */
+static unsigned long s_trend_last_try;
 
 static unsigned long now_ms(void)
 {
@@ -132,6 +138,8 @@ static void on_inbound(const hr_frame_t *f, void *user)
         if (s_last_batch_elapsed >= 0 &&
             tel.batch_elapsed_s < s_last_batch_elapsed) {
             hr_trend_reset(&s_trend);
+            s_trend_persisted = 0;
+            hr_capture_trend_reset();
         }
         s_last_batch_elapsed = tel.batch_elapsed_s;
         hr_trend_add(&s_trend, now_ms(), (int)tel.temperature_f,
@@ -232,6 +240,76 @@ void app_main(void)
         xSemaphoreTake(s_hist_lock, portMAX_DELAY);
         hr_trend_tick(&s_trend, t);
         xSemaphoreGive(s_hist_lock);
+
+        /*
+         * Power-loss recovery, decided once per boot.
+         *
+         * Needs two things to be true: the log is mounted, and the dryer has
+         * told us where its batch clock stands. Its counter runs while we are
+         * unpowered, so the difference against the last persisted point IS the
+         * outage - no clock of our own, and nothing inferred.
+         *
+         * Any buckets recorded in the seconds before this runs are discarded:
+         * restored history has to be contiguous and in order, and a handful of
+         * post-boot samples are worth less than a correct timeline.
+         */
+        if (!s_resume_done && hr_capture_ready() && s_last_batch_elapsed >= 0) {
+            s_resume_done = true;
+            uint32_t last = 0;
+            uint32_t now_elapsed = (uint32_t)s_last_batch_elapsed;
+            xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+            hr_trend_reset(&s_trend);
+            size_t n = hr_capture_trend_load(&s_trend, &last);
+            if (n > 0 && now_elapsed >= last) {
+                uint32_t gap_s = now_elapsed - last;
+                size_t gap_buckets = gap_s / (HR_TREND_BUCKET_MS / 1000);
+                hr_trend_restore_gap(&s_trend, gap_buckets);
+                hr_trend_resume(&s_trend, t);
+                s_trend_persisted = hr_trend_count(&s_trend);
+                ESP_LOGI(TAG,
+                         "resumed batch: %u points restored, %us gap "
+                         "(%u missing buckets)",
+                         (unsigned)n, (unsigned)gap_s, (unsigned)gap_buckets);
+            } else {
+                /* Either nothing stored, or the dryer's clock went backwards -
+                 * a new batch began while we were down, so the stored run is
+                 * finished and must not be drawn as part of this one. */
+                hr_trend_reset(&s_trend);
+                s_trend_persisted = 0;
+                hr_capture_trend_reset();
+                if (n > 0) {
+                    ESP_LOGI(TAG, "stored graph belongs to a finished batch "
+                                  "(elapsed %u < %u); discarded",
+                             (unsigned)now_elapsed, (unsigned)last);
+                }
+            }
+            xSemaphoreGive(s_hist_lock);
+        }
+
+        /*
+         * Persist newly committed buckets. Deliberately on THIS task: the USB
+         * RX callback must never queue flash work in bulk, and one point per
+         * 30s is far below the queue depth.
+         */
+        if (s_resume_done) {
+            xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+            size_t have = hr_trend_count(&s_trend);
+            bool due = (have > s_trend_persisted);
+            xSemaphoreGive(s_hist_lock);
+            /*
+             * One rewrite per new bucket - at most every 30s - and BACKED OFF
+             * on failure. Without the backoff a failing write retried every
+             * loop tick (4/s), which hammered the filesystem and buried the
+             * real error in noise.
+             */
+            if (due && t - s_trend_last_try >= 5000UL) {
+                s_trend_last_try = t;
+                if (hr_capture_trend_save(&s_trend,
+                                          (uint32_t)s_last_batch_elapsed)) {
+                    s_trend_persisted = have;
+                }
+            }
+        }
         hr_http_set_tracker(&s_tracker);
         if (s_session.link != last_link) {
             last_link = s_session.link;
@@ -252,14 +330,18 @@ void app_main(void)
             last_beat = t;
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
-                     "frames_in=%lu link=%s | tusb ready=%d cdc_conn=%d "
-                     "avail=%u",
+                     "frames_in=%lu link=%s | trend pts=%u persisted=%u "
+                     "bytes=%u writes=%lu fails=%lu drops=%lu",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
-                     (int)hr_usb_tusb_ready(), (int)hr_usb_cdc_connected(),
-                     hr_usb_cdc_available());
+                     (unsigned)hr_trend_count(&s_trend),
+                     (unsigned)s_trend_persisted,
+                     (unsigned)hr_capture_trend_bytes(),
+                     hr_capture_trend_writes(),
+                     hr_capture_trend_fails(),
+                     hr_capture_dropped());
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }

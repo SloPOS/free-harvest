@@ -16,6 +16,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "hr_trend.h"
+
 /* Mount the capture partition. Safe to call once at startup. */
 /*
  * Start the capture log. Returns immediately: the SPIFFS mount happens on a
@@ -64,5 +66,46 @@ bool hr_capture_clear(void);
 void *hr_capture_open(void);
 int hr_capture_read(void *handle, char *buf, size_t cap);
 void hr_capture_close(void *handle);
+
+/* ------------------------------------------------------------------ */
+/* Power-loss recovery for the graph series                            */
+/* ------------------------------------------------------------------ */
+/*
+ * The adapter is powered from the dryer, so a brownout - or any reflash -
+ * loses the in-RAM graph. The dryer keeps counting regardless: its batch
+ * elapsed value advances whether or not we are alive.
+ *
+ * So each persisted point carries the batch-elapsed value it was recorded at.
+ * On the next boot, comparing the dryer's current elapsed against the last
+ * stored one gives the outage duration EXACTLY, with no clock of our own and
+ * no guessing. Divided by the bucket width it becomes the number of missing
+ * buckets, which are restored as gaps.
+ *
+ * A LOWER elapsed value means the dryer started a new batch while we were
+ * down, so the stored series belongs to a finished run and is discarded.
+ */
+
+/*
+ * Write the whole series to flash, replacing whatever was there.
+ *
+ * Call from a normal task - it does file I/O synchronously. NOT from the USB
+ * RX callback. Returns false if the write failed.
+ */
+bool hr_capture_trend_save(const hr_trend_t *tr, uint32_t batch_elapsed_s);
+
+/*
+ * Load a persisted series into `tr`. Sets *last_elapsed to the batch-elapsed
+ * value of the final stored point. Returns the number of points restored, or 0
+ * if there is nothing to resume.
+ */
+size_t hr_capture_trend_load(hr_trend_t *tr, uint32_t *last_elapsed);
+
+/* Bytes currently in the persisted series file - diagnostics. */
+size_t hr_capture_trend_bytes(void);
+unsigned long hr_capture_trend_writes(void);
+unsigned long hr_capture_trend_fails(void);
+
+/* Discard the stored series (new batch, or a resume that does not apply). */
+void hr_capture_trend_reset(void);
 
 #endif /* HR_CAPTURE_H */

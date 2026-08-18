@@ -262,3 +262,65 @@ bool hr_trend_get(const hr_trend_t *tr, size_t i, hr_trend_point_t *out)
     *out = tr->pts[i];
     return true;
 }
+
+/* ------------------------------------------------------------------ */
+/* Restore after a power loss                                          */
+/* ------------------------------------------------------------------ */
+
+bool hr_trend_restore_point(hr_trend_t *tr, const hr_trend_point_t *p)
+{
+    if (tr == NULL || p == NULL || tr->count >= HR_TREND_CAPACITY) {
+        return false;
+    }
+    tr->pts[tr->count++] = *p;
+    return true;
+}
+
+void hr_trend_restore_gap(hr_trend_t *tr, size_t n)
+{
+    if (tr == NULL) {
+        return;
+    }
+    /*
+     * Empty buckets, not interpolated ones. We have no idea what the chamber
+     * did while we were unpowered, and drawing a straight line across the gap
+     * would assert something we cannot know.
+     */
+    for (size_t i = 0; i < n && tr->count < HR_TREND_CAPACITY; i++) {
+        hr_trend_point_t gap;
+        gap.temp_raw_f = HR_TREND_NO_TEMP;
+        gap.temp_smooth_cf = HR_TREND_NO_TEMP;
+        gap.pressure_raw = 0;
+        tr->pts[tr->count++] = gap;
+    }
+}
+
+void hr_trend_resume(hr_trend_t *tr, unsigned long now_ms)
+{
+    if (tr == NULL) {
+        return;
+    }
+    /* Start a fresh bucket at the current clock: our uptime reset, so the old
+     * bucket_start_ms is meaningless. */
+    tr->have_bucket = false;
+    tr->t_count = 0;
+    tr->p_count = 0;
+    tr->bucket_start_ms = now_ms;
+
+    /*
+     * Seed the smoothing level from the last real point so the line continues
+     * rather than snapping to whatever the first post-reboot reading happens to
+     * be. Scan backwards past any gap buckets.
+     */
+    tr->have_level = false;
+    tr->cand_dir = 0;
+    tr->cand_runs = 0;
+    for (size_t i = tr->count; i > 0; i--) {
+        const hr_trend_point_t *p = &tr->pts[i - 1];
+        if (p->temp_smooth_cf != HR_TREND_NO_TEMP) {
+            tr->level_cf = p->temp_smooth_cf;
+            tr->have_level = true;
+            break;
+        }
+    }
+}

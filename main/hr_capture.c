@@ -12,6 +12,8 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <string.h>
 #include <sys/stat.h>
 
 static const char *TAG = "hr_capture";
@@ -19,6 +21,9 @@ static const char *TAG = "hr_capture";
    prefix; anything longer is truncated rather than dropped. */
 #define HR_CAPTURE_LINE_MAX 544
 #define MOUNT "/capture"
+/* Graph series, separate from the frame log: compact, fixed-width records so a
+   restore is a straight read rather than a re-parse of the text log. */
+#define TRENDFILE MOUNT "/trend.bin"
 #define LOGFILE MOUNT "/frames.log"
 /*
  * Stop appending a little short of full so the filesystem always has room to
@@ -50,6 +55,15 @@ static bool s_full_warned;
  */
 #define WRITE_Q_LEN 12
 
+/* One 12-byte record per graph point. Fixed width so hr_capture_trend_load()
+   can size the series from the file length alone. */
+typedef struct __attribute__((packed)) {
+    uint32_t elapsed_s;   /* the DRYER's batch clock, not our uptime */
+    int16_t temp_raw_f;
+    int16_t temp_smooth_cf;
+    uint32_t pressure_raw;
+} trend_rec_t;
+
 typedef struct {
     uint32_t t_ms;
     char body[HR_CAPTURE_LINE_MAX];
@@ -57,6 +71,11 @@ typedef struct {
 
 static QueueHandle_t s_q;
 static volatile unsigned long s_dropped;
+/* Count write failures separately from queue drops: a full queue and a failed
+   fopen/lock look identical from outside, and they have different fixes. */
+static volatile unsigned long s_trend_writes, s_trend_fails;
+unsigned long hr_capture_trend_writes(void) { return s_trend_writes; }
+unsigned long hr_capture_trend_fails(void) { return s_trend_fails; }
 
 /* Runs on the worker task: the only place that touches the filesystem. */
 static void write_line_now(const write_msg_t *m)
@@ -112,6 +131,118 @@ void hr_capture_append(uint32_t t_ms, const char *body)
 }
 
 unsigned long hr_capture_dropped(void) { return s_dropped; }
+
+size_t hr_capture_trend_load(hr_trend_t *tr, uint32_t *last_elapsed)
+{
+    if (!s_ready || tr == NULL) {
+        return 0;
+    }
+    FILE *f = fopen(TRENDFILE, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    size_t n = 0;
+    trend_rec_t r;
+    while (fread(&r, sizeof(r), 1, f) == 1) {
+        hr_trend_point_t p;
+        p.temp_raw_f = r.temp_raw_f;
+        p.temp_smooth_cf = r.temp_smooth_cf;
+        p.pressure_raw = r.pressure_raw;
+        if (!hr_trend_restore_point(tr, &p)) {
+            break;   /* ring full - keep the earliest data, drop the rest */
+        }
+        if (last_elapsed != NULL) {
+            *last_elapsed = r.elapsed_s;
+        }
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/*
+ * Persist the whole series in one truncating write.
+ *
+ * The first design appended one record per bucket, which is cheaper - but
+ * SPIFFS refused append mode on this file with EIO every single time
+ * (writes=0, fails climbing, confirmed on hardware). "wb" is the mode SPIFFS
+ * handles reliably, and rewriting removes a subtler problem too: an appended
+ * file could disagree with the in-RAM series after a restore, because restored
+ * gap buckets were never themselves written. A rewrite is self-consistent by
+ * construction.
+ *
+ * Called from the MAIN LOOP, not the USB RX callback. That path still must
+ * never touch flash - see hr_capture_append().
+ */
+bool hr_capture_trend_save(const hr_trend_t *tr, uint32_t batch_elapsed_s)
+{
+    if (!s_ready || tr == NULL) {
+        return false;
+    }
+    size_t n = hr_trend_count(tr);
+    if (n == 0) {
+        return false;
+    }
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        s_trend_fails++;
+        return false;
+    }
+    bool ok = false;
+    FILE *f = fopen(TRENDFILE, "wb");
+    if (f != NULL) {
+        ok = true;
+        for (size_t i = 0; i < n && ok; i++) {
+            hr_trend_point_t p;
+            if (!hr_trend_get(tr, i, &p)) {
+                ok = false;
+                break;
+            }
+            trend_rec_t r;
+            r.elapsed_s = batch_elapsed_s;
+            r.temp_raw_f = p.temp_raw_f;
+            r.temp_smooth_cf = p.temp_smooth_cf;
+            r.pressure_raw = p.pressure_raw;
+            ok = (fwrite(&r, sizeof(r), 1, f) == 1);
+        }
+        if (fclose(f) != 0) {
+            ok = false;
+        }
+    } else {
+        /* Rate-limited rather than once-only: the first failure had one cause
+           and the next had another, and "once" hid the second. */
+        static unsigned n_warn;
+        if ((n_warn++ % 32) == 0) {
+            ESP_LOGE(TAG, "trend fopen(%s) failed: %s (errno %d)", TRENDFILE,
+                     strerror(errno), errno);
+        }
+    }
+    if (ok) {
+        s_trend_writes++;
+    } else {
+        s_trend_fails++;
+    }
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+
+size_t hr_capture_trend_bytes(void)
+{
+    if (!s_ready) {
+        return 0;
+    }
+    struct stat st;
+    return (stat(TRENDFILE, &st) == 0) ? (size_t)st.st_size : 0;
+}
+
+void hr_capture_trend_reset(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    remove(TRENDFILE);
+    xSemaphoreGive(s_lock);
+}
 
 /*
  * Mount worker.
@@ -171,7 +302,9 @@ void hr_capture_mount_now(void)
     esp_vfs_spiffs_conf_t conf = {
         .base_path = MOUNT,
         .partition_label = "capture",
-        .max_files = 2,
+        /* The frame writer, the trend save, stat() and an HTTP download can
+           all want a descriptor at once; 2 was too few and starved writes. */
+        .max_files = 6,
         .format_if_mount_failed = true,
     };
     esp_err_t err = esp_vfs_spiffs_register(&conf);
