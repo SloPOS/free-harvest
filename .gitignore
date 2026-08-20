@@ -22,3 +22,21 @@ dependencies.lock
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- Vendor firmware and captures: NEVER commit HarvestRight's code ---
+#
+# A flash dump of the official adapter, or a decoded dryer image, is their
+# copyrighted binary. Our own analysis and notes belong in the repo; their bytes
+# do not. This repo is pushed to GitHub, and `git add -A` is one keystroke, so
+# the safeguard lives here rather than in anyone's memory.
+*.bin
+*.srec
+*.h6r
+*.b6r
+*.hfs
+*.hft
+
+# Adapter interrogation transcripts: our own observations, but they carry the
+# machine's serial number and UID. Force-add deliberately if a capture is worth
+# sharing, after checking what is in it.
+adapter-transcript-*.txt
