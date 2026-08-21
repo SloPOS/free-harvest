@@ -25,6 +25,27 @@
 > compressor, and returned to Ready on its own. The dryer also rebooted once
 > during the sweep; the cause is not isolated.
 >
+> ### WHAT ADV ACTUALLY DOES: it SKIPS, it does not press
+>
+> Observed on the machine: `ADV` from Ready does not press START and run the
+> normal flow. It jumps straight to the **"load trays"** step, skipping the
+> pre-freeze entirely. The dryer then believes it is mid-batch without ever
+> having chilled, so pressing CONTINUE has nothing coherent to do and the
+> machine hangs. The compressor never engages at any point.
+>
+> So ADV = advance the state machine, NOT press the highlighted button. It
+> bypasses the sequence rather than following it, which is why the resulting
+> state is unrecoverable without a power cycle.
+>
+> The argument is ignored: bare `ADV`, `ADV START` and `ADV START Auto` all
+> land in the same place.
+>
+> **This is a dead end for starting a cycle, and an actively harmful one.**
+> A correct start almost certainly has to establish batch state first - the
+> `SENDBATCH` / `SENDCANDY` / `SENDCUSTOM` family is the obvious candidate,
+> since those push a batch definition rather than skipping the machine into
+> one. Sent bare they do nothing, so they need a payload we do not have.
+
 > ### ADV CAN STRAND THE MACHINE (2026-08-21)
 >
 > After `ADV` reached "Starting batch" (type 2), the dryer became stuck there

@@ -1,0 +1,24 @@
+# Walk the panel. Every screen change is logged with its STAT type.
+# Note what is on screen as each new type appears. Ctrl-C to finish.
+
+    0.0s   type 1    Idle / Ready
+           phase=Ready temp=71F elapsed=284s mode=Auto
+   59.3s   (no telemetry - dryer link down or rebooting; not a screen)
+   69.8s   type 1    Idle / Ready
+           phase=Ready temp=71F elapsed=284s mode=Auto
+   71.9s   type 2    Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)
+           phase=Starting batch temp=72F elapsed=284s mode=
+  315.8s   (no telemetry - dryer link down or rebooting; not a screen)
+  324.3s   type 1    Idle / Ready
+           phase=Ready temp=71F elapsed=0s mode=Auto
+  459.8s   (no telemetry - dryer link down or rebooting; not a screen)
+  471.3s   type 1    Idle / Ready
+           phase=Ready temp=71F elapsed=0s mode=Auto
+  604.5s   (no telemetry - dryer link down or rebooting; not a screen)
+  615.0s   type 1    Idle / Ready
+           phase=Ready temp=71F elapsed=0s mode=Auto
+  616.1s   type 2    Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)
+           phase=Starting batch temp=71F elapsed=0s mode=
+  685.2s   (no telemetry - dryer link down or rebooting; not a screen)
+  689.4s   type 1    Idle / Ready
+           phase=Ready temp=70F elapsed=0s mode=Auto
