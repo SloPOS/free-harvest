@@ -152,8 +152,36 @@ def find_port(explicit):
              "python tools/interrogate_adapter.py COM12")
 
 
-def drain(ser, tr, seconds):
-    """Read for `seconds`, logging every complete CR-terminated frame."""
+# Plausible dryer-side answers to the things the adapter asks for.
+#
+# The adapter is REACTIVE: in the first capture it burst four frames at startup
+# and then said nothing until spoken to. So a passive listen reveals almost
+# nothing, and the way to see more of its state machine is to answer it.
+#
+# These replies are GUESSES at the payloads - the shapes come from the dryer's
+# printf format strings, the contents do not. Even a wrong guess is informative:
+# whether the adapter retries, gives up, or moves on tells us something.
+#
+# Dryer->adapter frames are COMMA-delimited (the asymmetry confirmed on
+# 2026-08-20), which is why these use commas while the adapter's own frames
+# use spaces.
+RESPONSES = {
+    "REQCFG":   ("CFG", ["1", "1", "0", "0", "Auto", "v6.4"]),
+    "FDNAME":   ("FDNAME", ["Freeze Dryer"]),
+    "REQSTAT":  IDLE_STAT,
+    "REQSYSINF": ("SYSINF", ["HarvestRight Pro"]),
+    "REQPREF":  ("SYSPREF", ["0"]),
+}
+
+
+def drain(ser, tr, seconds, respond=False):
+    """
+    Read for `seconds`, logging every complete CR-terminated frame.
+
+    With respond=True, answer any request we have a plausible reply for and log
+    that we did, so the transcript shows cause and effect rather than a bare
+    stream.
+    """
     end = time.time() + seconds
     buf = b""
     got = []
@@ -163,9 +191,22 @@ def drain(ser, tr, seconds):
             buf += chunk
             while CR in buf:
                 line, buf = buf.split(CR, 1)
-                if line:
-                    tr.data("<-", line + CR)
-                    got.append(line.decode("ascii", "replace"))
+                if not line:
+                    continue
+                tr.data("<-", line + CR)
+                text = line.decode("ascii", "replace")
+                got.append(text)
+                if respond:
+                    # Adapter frames are SPACE-delimited, so the verb is the
+                    # first whitespace-separated token.
+                    verb = text.split(" ")[0].strip()
+                    reply = RESPONSES.get(verb)
+                    if reply:
+                        frame = build(*reply)
+                        tr.note(f"   (answering {verb})")
+                        tr.data("->", frame)
+                        ser.write(frame)
+                        ser.flush()
     if buf:
         tr.note(f"   (partial, no CR yet: {buf!r})")
     return got
@@ -180,6 +221,12 @@ def main():
     ap.add_argument("--listen", action="store_true",
                     help="passive: log what the adapter says unprompted, send nothing")
     ap.add_argument("--listen-secs", type=float, default=60.0)
+    ap.add_argument("--converse", action="store_true",
+                    help="answer the adapter's requests (REQCFG, FDNAME, ...) "
+                         "instead of only observing - pushes it further through "
+                         "its state machine")
+    ap.add_argument("--minutes", type=float, default=0,
+                    help="after the scripted phases, keep conversing this long")
     args = ap.parse_args()
 
     port = find_port(args.port)
@@ -218,7 +265,7 @@ def main():
                 tr.data("->", frame)
                 ser.write(frame)
                 ser.flush()
-                replies += drain(ser, tr, 3.0)
+                replies += drain(ser, tr, 3.0, args.converse)
 
             # ---------------------------------------------------------------
             # Phase 3 - idle telemetry. Some adapters only settle once they
@@ -231,7 +278,22 @@ def main():
                 tr.data("->", frame)
                 ser.write(frame)
                 ser.flush()
-                replies += drain(ser, tr, 15.0)
+                replies += drain(ser, tr, 15.0, args.converse)
+
+            # ---------------------------------------------------------------
+            # Optional long tail: keep the dryer-side conversation going, so
+            # anything periodic or delayed has a chance to show up.
+            # ---------------------------------------------------------------
+            if args.minutes > 0:
+                tr.note("")
+                tr.note(f"== Phase 4: {args.minutes:g} min of STAT cadence ==")
+                deadline = time.time() + args.minutes * 60
+                while time.time() < deadline:
+                    frame = build(*IDLE_STAT)
+                    tr.data("->", frame)
+                    ser.write(frame)
+                    ser.flush()
+                    replies += drain(ser, tr, 15.0, args.converse)
 
             # ---------------------------------------------------------------
             # Findings
