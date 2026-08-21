@@ -70,7 +70,27 @@ STATES = {
     "final":  "STAT,6,0,0,0,154,335,3581,0,68,CANDY,4,49,0,0,7,57,3619,0,,",
 }
 REAL_STAT = STATES["idle"]
-REAL_UID = ("UID,3A916C02-11D48E77-00000000-00000000,1,6.4.0,1,0,0,0,0,0,0")
+# IDENTITY
+#
+# The adapter forwards the dryer's identity to HarvestRight's cloud, which binds
+# adapter to machine 1:1. Present the wrong identity and the app offers to
+# REGISTER the unit and then refuses, because the "cpu code" does not match
+# their record - which is what happens with the placeholder below.
+#
+# The UID frame's format, from the firmware:
+#
+#     UID,%lX-%lX-%lX-%lX,%d,%d.%d.%ld,%d,%d,%d,%d,%d,%d,%d,
+#          \________ 128-bit MCU unique ID ________/
+#
+# %lX drops leading zeros, so a word of 0 prints as a bare "0" - which is why a
+# 12-hex-digit cpu code like "37C9 355A 3037" can correspond to a four-word UID
+# whose last word is zero. --cpu builds the frame that way.
+#
+# THIS DEFAULT IS A PLACEHOLDER AND IS KNOWN WRONG for this user's machine: the
+# server reported the real cpu code as 37C9 355A 3037 while this UID was being
+# presented. Pass --uid (preferred, measured) or --cpu (derived) to correct it.
+PLACEHOLDER_UID = "3A916C02-11D48E77-00000000-00000000"
+REAL_UID = "UID,%s,1,6.4.0,1,0,0,0,0,0,0" % PLACEHOLDER_UID
 # The real serial number, read off the machine's data plate.
 REAL_SNM = "SNM,P-STF 2311-03561 BKC,"
 
@@ -99,7 +119,7 @@ ANSWERS = {
 # inline frame did NOT satisfy the adapter - it kept asking (2-3 times per 40s).
 # Sending the file instead did, and it has not asked since. The dryer ships
 # files with FDFILELIST (announce) then FDFILEBLOCK (contents).
-FD_NAME = "Freeze Dryer"
+FD_NAME = "P-STF 2331 03561 BKC"
 FDNAME_REPLY = [
     f"SNM,{FD_NAME},",
     f"FDFILELIST,FDName.txt,0,{len(FD_NAME)}",
@@ -199,13 +219,60 @@ def main():
                     help="idle STAT cadence, matching the real machine")
     ap.add_argument("--reqinfo-secs", type=float, default=30.0,
                     help="how often to poll REQINFO, as the real dryer does")
+    ap.add_argument("--uid", default=None,
+                    help="the dryer's real 128-bit MCU unique ID as it appears "
+                         "in its own UID frame, e.g. 37C9-355A-3037-0. Read it "
+                         "off the machine with our adapter (/api/state 'uid') "
+                         "rather than guessing.")
+    ap.add_argument("--cpu", default=None,
+                    help="the cpu code as the APP displays it, e.g. "
+                         "'37C9 355A 3037'. Converted into a UID frame by "
+                         "treating each group as one word and zero-filling the "
+                         "rest. A DERIVED value - --uid is the measured one.")
+    ap.add_argument("--serial", default=None,
+                    help="override the serial number sent in SNM")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the identity frames that WOULD be sent, then "
+                         "exit without opening the serial port")
     ap.add_argument("--state", default="idle", choices=sorted(STATES),
                     help="which machine state to present; 'idle' is what makes "
                          "the app offer START")
     args = ap.parse_args()
 
-    global REAL_STAT
+    global REAL_STAT, REAL_UID, REAL_SNM
     REAL_STAT = STATES[args.state]
+
+    if args.uid and args.cpu:
+        sys.exit("pass --uid or --cpu, not both")
+    if args.cpu:
+        words = args.cpu.replace("-", " ").split()
+        if not words or len(words) > 4:
+            sys.exit("--cpu wants up to 4 hex groups, e.g. '37C9 355A 3037'")
+        for w in words:
+            int(w, 16)                      # fail loudly on non-hex
+        words += ["0"] * (4 - len(words))   # %lX prints an empty word as "0"
+        REAL_UID = "UID,%s,1,6.4.0,1,0,0,0,0,0,0" % "-".join(words)
+    elif args.uid:
+        REAL_UID = "UID,%s,1,6.4.0,1,0,0,0,0,0,0" % args.uid
+    if args.serial:
+        REAL_SNM = "SNM,%s," % args.serial
+
+    if PLACEHOLDER_UID in REAL_UID:
+        warn = "!! Presenting the PLACEHOLDER uid - the app will refuse commands and offer to register the unit."
+        print(warn, file=sys.stderr)
+        print("!! Pass --uid (measured) or --cpu (derived). See --help.",
+              file=sys.stderr)
+
+    if args.dry_run:
+        print("identity frames this run would present:")
+        print("  " + REAL_UID)
+        print("  " + REAL_SNM)
+        print("  " + REAL_STAT)
+        if PLACEHOLDER_UID in REAL_UID:
+            print("")
+            print("  the UID above is the PLACEHOLDER and is known wrong for")
+            print("  this machine - the app will refuse commands.")
+        return 0
 
     port = args.port
     if not port:
