@@ -83,6 +83,19 @@ STATES = {
     "starting": "STAT,2,0,0,0,68,10000,10,0,43,Auto,1,1,0,0,5,2,120,0,0,,",
     "complete": "STAT,7,0,0,0,69,151638,5,0,48,296,11,0,90,Auto,,",
     "candycfg": "STAT,43,0,0,0,69,151701,119,0,40,1023,70,140,150,160,5,120,0,CANDY,,",
+
+    # HYPOTHESIS, NOT MEASURED. Every other frame in this table was captured
+    # from the real machine; this one is the candy frame with CANDY swapped for
+    # CUSTOM.
+    #
+    # The reasoning: screen 43 looks like a GENERIC recipe-configuration screen
+    # whose trailing field names which recipe is being edited, and the firmware
+    # carries SENDCUSTOM as a sibling verb to SENDCANDY. If that is right, the
+    # app will render Custom configuration when shown this.
+    #
+    # If it does not, the guess is wrong and Custom lives on some other screen
+    # id - use --stat to try others rather than editing this file.
+    "customcfg": "STAT,43,0,0,0,69,151701,119,0,40,1023,70,140,150,160,5,120,0,CUSTOM,,",
 }
 REAL_STAT = STATES["idle"]
 # IDENTITY
@@ -223,7 +236,7 @@ class Log:
 
 STATE_KEYS = {"1": "idle", "2": "prep", "3": "freeze", "4": "dry",
               "5": "final", "6": "starting", "7": "complete",
-              "8": "candycfg"}
+              "8": "candycfg", "9": "customcfg"}
 
 try:
     import msvcrt
@@ -266,6 +279,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="print the identity frames that WOULD be sent, then "
                          "exit without opening the serial port")
+    ap.add_argument("--stat", default=None,
+                    help="present an ARBITRARY STAT frame instead of a named "
+                         "state, e.g. --stat 'STAT,31,0,0,0,69,151637,0,0,38,"
+                         "1,1,Auto,v6.4,,'. For probing screens we have not "
+                         "captured, without editing this file.")
     ap.add_argument("--state", default="idle", choices=sorted(STATES),
                     help="which machine state to present; 'idle' is what makes "
                          "the app offer START")
@@ -273,6 +291,10 @@ def main():
 
     global REAL_STAT, REAL_UID, REAL_SNM
     REAL_STAT = STATES[args.state]
+    if args.stat:
+        if not args.stat.startswith("STAT,"):
+            sys.exit("--stat must be a whole frame beginning with STAT,")
+        REAL_STAT = args.stat
 
     if args.uid and args.cpu:
         sys.exit("pass --uid or --cpu, not both")
@@ -315,7 +337,7 @@ def main():
     log(f"# Presenting the '{args.state}' screen.")
     log("#")
     log("# PRESS 1=idle 2=prep 3=freeze 4=dry 5=final 6=starting")
-    log("#       7=complete 8=candycfg  to change the screen the")
+    log("#       7=complete 8=candycfg 9=customcfg(GUESS)  to change the")
     log("# app sees, then press buttons in the app. Any frame the adapter emits")
     log("# in response is the control command we are after.")
 
