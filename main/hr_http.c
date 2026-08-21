@@ -551,12 +551,26 @@ static esp_err_t h_cmd(httpd_req_t *req)
     httpd_query_key_value(buf, "verb", verb, sizeof(verb));
     hr_url_decode(verb);
 
+    /*
+     * Arguments were parsed by the UI and then silently dropped here, so the
+     * raw-command box's args field did nothing at all. Several verbs are
+     * useless without one - GETP/GETR almost certainly take a page or row
+     * number - so pass them through.
+     */
+    char args[64] = {0};
+    httpd_query_key_value(buf, "args", args, sizeof(args));
+    hr_url_decode(args);
+
     if (hr_cmd_classify(verb) != HR_CMD_SAFE) {
         httpd_resp_set_status(req, "403 Forbidden");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"not allowed\"}");
     }
 
-    bool ok = hr_session_send_safe(s_session, verb);
+    /* send_config carries the args and re-checks the class itself, so the
+     * allow-list stays enforced in the tested core rather than here. */
+    bool ok = (args[0] != '\0')
+                  ? hr_session_send_config(s_session, verb, args)
+                  : hr_session_send_safe(s_session, verb);
     ESP_LOGI(TAG, "web command %s -> %s", verb, ok ? "sent" : "failed");
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
                      ok ? 11 : 12);

@@ -170,6 +170,21 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
         "REQSTAT", "REQSYSINF", "REQCFG", "REQPREF", "REQBATSUM", "REQTSUM",
         "REQTHST", "REQSCIENCE", "STATUS", "STATE", "SERIAL", "WIFIINFO",
         "MEMSIZE", "FDFILES",
+        /*
+         * GETP / GETR - screen readout, added 2026-08-21.
+         *
+         * The stock adapter demonstrably mirrors the dryer's SCREEN: the app
+         * offers exactly the options currently displayed, and acting on one
+         * behaves as though a human pressed the panel. Something must READ the
+         * screen for that to be possible, and these are the only candidates in
+         * the command table.
+         *
+         * Classed SAFE on the reasoning that a GET verb reads. That is an
+         * inference, not a verified fact - so they are queries only, and the
+         * verb that would ACT on a screen (ADV, "advance") is deliberately NOT
+         * here.
+         */
+        "GETP", "GETR",
         /* benign local effects (no state change) */
         "BEEP", "CLICK",
     };

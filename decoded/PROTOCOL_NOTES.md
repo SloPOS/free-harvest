@@ -55,6 +55,37 @@
 > The dryer probes MSC *first* and waits for it to time out before starting CDC,
 > which is why the link takes as long as it does to come up.
 >
+> ### Screen mirroring CONFIRMED by observation (2026-08-21)
+>
+> With the stock adapter linked and a batch started, the user reports the app
+> offers **only the options currently on the dryer's screen**, and acting on
+> one behaves exactly as though a human pressed the panel. So control is
+> screen-relative, not a per-function verb - which is why no START verb exists
+> and why looking for one was the wrong search.
+>
+> **GETP / GETR are not it.** Tried bare and with page/row arguments (0, 1,
+> "1,1") against an idle machine: no reply beyond routine STAT/REQINFO, and no
+> crash. They are safe but inert for this purpose.
+>
+> The mechanism is therefore still unidentified. Remaining candidates: ADV
+> (deliberately untested - it means "advance" and would ACT), STATE with
+> arguments, or something carried over the mass-storage channel rather than
+> the serial link.
+
+> ### Prep-phase frame decoded (2026-08-21)
+>
+> From STAT type 17 captured during a real batch start:
+>
+> ```
+> STAT,17,0,0,0,64,10000,36,0,42,Auto,1,1,0,0,5,0,864,0,
+>                          ^f6                    ^f16
+> ```
+>
+> **f6 + f16 = 900 in every frame** - f6 counts up, f16 counts down, and they
+> sum to the 15-minute pre-cool exactly. f11 steps 1 -> 5 -> 10, a progress
+> percentage. Our existing mapping already reads f16 as prep_remaining_s and
+> f11 as phase_pct, so this confirms the decode rather than correcting it.
+
 > ### CONFIRMED: commands reach the dryer (2026-08-21)
 >
 > Sending `BEEP` with the corrected space-delimited framing produced a reply

@@ -59,7 +59,8 @@ ROUTINE = {"STATE", "UNIQUE", "FDNAME", "REQCFG", "STATUS", "WIFIINFO",
 # than invented ones matters: the app may well sanity-check what it is shown.
 REAL_STAT = ("STAT,6,0,0,0,154,335,3581,0,68,CANDY,4,49,0,0,7,57,3619,0,,")
 REAL_UID = ("UID,3A916C02-11D48E77-00000000-00000000,1,6.4.0,1,0,0,0,0,0,0")
-REAL_SNM = "SNM,FD-2024-8871,"
+# The real serial number, read off the machine's data plate.
+REAL_SNM = "SNM,P-STF 2311-03561 BKC,"
 
 # Answers to what the adapter asks for. CFG is CONFIRMED - replying with this
 # made a real adapter stop asking REQCFG (3 requests in 45s -> 0).
