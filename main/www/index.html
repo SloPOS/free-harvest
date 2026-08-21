@@ -456,11 +456,7 @@
          seeded from the machine when it is already showing one of those
          screens, so what you edit is what is actually loaded. -->
     <div class="card" id="setupcard" style="display:none">
-      <h2>Batch setup</h2>
-      <div class="seg" id="famseg">
-        <button type="button" data-fam="4">Candy</button>
-        <button type="button" data-fam="5">Custom</button>
-      </div>
+      <h2 id="settitle">Batch setup</h2>
       <div class="rcpfield" style="margin-top:12px">
         <label for="setname">Batch name</label>
         <input id="setname" maxlength="23" placeholder="CANDY">
@@ -470,6 +466,9 @@
       <div class="rcprow">
         <button type="button" id="setsubmit">Submit settings</button>
         <button type="button" id="setstart">Start batch</button>
+      </div>
+      <div class="rcprow">
+        <button type="button" id="setcancel">Back to home screen</button>
       </div>
       <div class="hint" id="sethint"></div>
     </div>
@@ -1290,21 +1289,38 @@ function seedFrom(stat, fam){
 var seededName = "";
 function setNameFromStat(n){ seededName = n; }
 
+var setScreen = 0;   /* the config screen this panel was loaded for */
+
+/*
+ * The panel exists only while the dryer is ON a configuration screen.
+ *
+ * There is no Candy/Custom selector, because the machine already has one - the
+ * Candy Setup and Custom Setup buttons on the home screen. Offering a second
+ * one in the app would let the two disagree, and then the panel would be
+ * editing a recipe family the dryer is not showing.
+ */
 function paintSetup(st){
   const card = $("#setupcard");
   if(!card) return;
-  if(!st.control){ card.style.display="none"; return; }
-  card.style.display = "";
 
-  /* Follow the machine: if it is already on a config screen, show that one. */
-  if(setVals === null){
-    if(st.stat_type === 31) setFam = 5;
-    else if(st.stat_type === 43) setFam = 4;
+  const fam = st.stat_type === 43 ? 4 : (st.stat_type === 31 ? 5 : 0);
+  if(!st.control || !fam){
+    card.style.display = "none";
+    setScreen = 0;
+    setVals = null;          /* reseed next time rather than reusing stale edits */
+    return;
+  }
+
+  card.style.display = "";
+  if(setScreen !== st.stat_type){
+    /* Arrived on a config screen, or moved between the two. Load from what the
+       machine is actually showing. */
+    setScreen = st.stat_type;
+    setFam = fam;
     loadFamily(st.last_stat);
   }
-  $$("#famseg button").forEach(function(b){
-    b.classList.toggle("on", +b.dataset.fam === setFam);
-  });
+  $("#settitle").textContent =
+    (fam === 4 ? "Candy" : "Custom") + " batch setup";
 }
 
 function loadFamily(lastStat){
@@ -1453,6 +1469,22 @@ async function submitSetup(start){
   $("#sethint").textContent = start
     ? "Batch starting."
     : "Settings sent to the dryer. Start is now available.";
+  refreshState();
+}
+
+/*
+ * Leave the configuration screen without applying anything.
+ *
+ * Needed because the mirrored button list is hidden while this panel is up, so
+ * without it the only ways off a config screen would be starting a batch or
+ * walking to the machine.
+ */
+async function cancelSetup(){
+  const action = setFam === 4 ? "cfg_cancel" : "custom_cancel";
+  try{
+    await fetch("/api/control",{method:"POST",
+      body:"action="+action+"&screen="+setScreen+"&confirm=1"});
+  }catch(e){}
   refreshState();
 }
 
@@ -2308,11 +2340,7 @@ $("#setname").addEventListener("input", ()=>{
 });
 $("#setsubmit").addEventListener("click", ()=>submitSetup(false));
 $("#setstart").addEventListener("click", askStartSetup);
-$$("#famseg button").forEach(b=>b.addEventListener("click", ()=>{
-  setFam = +b.dataset.fam;
-  loadFamily(lastState ? lastState.last_stat : "");
-  $$("#famseg button").forEach(x=>x.classList.toggle("on", x===b));
-}));
+$("#setcancel").addEventListener("click", cancelSetup);
 
 $("#rcpsave").addEventListener("click", saveRecipe);
 $("#rcpcancel").addEventListener("click", hideEditor);
