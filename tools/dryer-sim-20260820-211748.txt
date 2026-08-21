@@ -1,0 +1,4 @@
+    0.00  # Playing the dryer on COM3. Adapter frames are space-delimited;
+    0.00  # ours are comma-delimited. Watch for *** NEW *** lines.
+    0.44  -> UID,3A916C02-11D48E77-00000000-00000000,1,6.4.0,1,0,0,0,0,0,0    (identity)
+    0.94  -> SNM,FD-2024-8871,    (serial number)

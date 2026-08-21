@@ -64,6 +64,13 @@ REAL_SNM = "SNM,FD-2024-8871,"
 # Answers to what the adapter asks for. CFG is CONFIRMED - replying with this
 # made a real adapter stop asking REQCFG (3 requests in 45s -> 0).
 # Dryer->adapter is COMMA-delimited; adapter->dryer is space-delimited.
+# VERIFIED handshake, in the order the adapter drives it:
+#   STATUS   -> STATUS,1,
+#   FDNAME   -> SNM + FDFILELIST + FDFILEBLOCK   (as a FILE, not a frame)
+#   REQCFG   -> CFG,1,1,0,0,Auto,v6.4
+#   FDFILES  -> ignore
+# After that the adapter stops asking for anything and just heartbeats
+# STATE/UNIQUE every ~15s, which is what a satisfied adapter looks like.
 ANSWERS = {
     "REQCFG":     "CFG,1,1,0,0,Auto,v6.4",
     "REQSTAT":    REAL_STAT,
@@ -86,14 +93,13 @@ FDNAME_REPLY = [
     f"FDFILEBLOCK,FDName.txt,0,0,0,{FD_NAME}",
 ]
 
-# The adapter answers a file transfer by asking for MORE files:
-#     <- FDFILES .dat 1
-# The dryer's batch history lives in HB/HS/HH.%05ld.dat, so it is asking for
-# batch records. An empty list is a valid answer - we have no history to give -
-# and lets it move on rather than stall waiting.
-def fdfiles_reply(arg):
-    ext = arg.strip() or ".dat"
-    return [f"FDFILELIST,,0,0", f"FDEXT,0"]
+# DO NOT answer FDFILES.
+#
+# Answering it wrongly is what produced an infinite loop: the adapter rejected
+# each reply and re-asked roughly once a second. Left alone it asks exactly ONCE
+# and moves on - verified over 187s of silence afterwards. An empty file list is
+# apparently not expressible, but not answering is fine.
+FDFILES_ANSWER = []
 
 
 class Log:
@@ -198,10 +204,7 @@ def main():
                         send(r, "answering FDNAME (as a file)")
                         time.sleep(0.3)
                 elif verb == "FDFILES":
-                    parts = text.split(" ", 1)
-                    for r in fdfiles_reply(parts[1] if len(parts) > 1 else ""):
-                        send(r, "answering FDFILES")
-                        time.sleep(0.3)
+                    pass   # deliberately unanswered - see FDFILES_ANSWER
                 else:
                     reply = ANSWERS.get(verb)
                     if reply:
