@@ -162,7 +162,9 @@ static esp_err_t h_state(httpd_req_t *req)
     hr_wifi_ip(ip, sizeof(ip));
     hr_wifi_current_ssid(ssid, sizeof(ssid));
 
+    char laststat[HR_MAX_FRAME * 2];
     LOCK();
+    hr_json_escape(s_session->info.last_stat, laststat, sizeof(laststat));
     hr_json_escape(s_session->info.serial, serial, sizeof(serial));
     hr_json_escape(s_session->info.uid, uid, sizeof(uid));
     unsigned long fin = s_session->frames_in, fout = s_session->frames_out;
@@ -205,7 +207,7 @@ static esp_err_t h_state(httpd_req_t *req)
     }
     acts[ai] = '\0';
 
-    char body[1500];
+    char body[2048];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
@@ -225,6 +227,11 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
                      "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
                      "\"control\":%s,\"actions\":%s,"
+                     /* Raw frame: the config screens carry the live
+                      * recipe in fields we do not decode here, and the
+                      * editor seeds itself from what is on the panel
+                      * rather than from a remembered default. */
+                     "\"last_stat\":\"%s\","
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
@@ -247,7 +254,7 @@ static esp_err_t h_state(httpd_req_t *req)
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      (unsigned long)(esp_timer_get_time() / 1000000),
                      reset_reason_str(), ctrl_enabled() ? "true" : "false",
-                     acts);
+                     acts, laststat);
     return send_json(req, body, n);
 }
 
@@ -1338,6 +1345,91 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
     return send_json(req, out, n);
 }
 
+
+/*
+ * POST /api/recipes/apply   family,name,num=csv,start=<0|1>,confirm=<0|1>
+ *
+ * Sends a recipe built from values supplied in the request rather than from a
+ * saved slot. This is what the setup panel uses: the operator adjusts controls,
+ * presses Submit, and those exact values go to the dryer without being stored
+ * as a saved recipe first.
+ *
+ * Same gates as /send. start=1 begins a batch and needs confirmation; there is
+ * no screen to validate against because a recipe frame is accepted wherever the
+ * machine is, so the confirmation is the only barrier.
+ */
+static esp_err_t h_recipe_apply(httpd_req_t *req)
+{
+    if (!ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
+    char buf[512];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
+    }
+    char fam_s[8] = {0}, nums[256] = {0}, start_s[8] = {0}, conf_s[8] = {0};
+    hr_recipe_t r;
+    memset(&r, 0, sizeof(r));
+    httpd_query_key_value(buf, "family", fam_s, sizeof(fam_s));
+    httpd_query_key_value(buf, "name", r.name, sizeof(r.name));
+    httpd_query_key_value(buf, "num", nums, sizeof(nums));
+    httpd_query_key_value(buf, "start", start_s, sizeof(start_s));
+    httpd_query_key_value(buf, "confirm", conf_s, sizeof(conf_s));
+    hr_url_decode(r.name);
+    hr_url_decode(nums);
+
+    bool start = (start_s[0] == '1');
+    bool confirmed = (conf_s[0] == '1');
+    if (start && !confirmed) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
+    }
+
+    r.family = (hr_family_t)atoi(fam_s);
+    r.used = true;
+    char *p = nums;
+    r.nnum = 0;
+    while (*p && r.nnum < HR_RECIPE_MAX_NUM) {
+        r.num[r.nnum++] = (int32_t)strtol(p, &p, 10);
+        if (*p == ',') {
+            p++;
+        } else {
+            break;
+        }
+    }
+
+    hr_recipe_err_t e = hr_recipe_validate(&r);
+    if (e != HR_RECIPE_OK) {
+        char out[224];
+        int n = snprintf(out, sizeof(out), "{\"ok\":false,\"reason\":\"%s\"}",
+                         hr_recipe_err_str(e));
+        httpd_resp_set_status(req, "400 Bad Request");
+        ESP_LOGW(TAG, "recipe apply refused: %s", hr_recipe_err_str(e));
+        return send_json(req, out, n);
+    }
+
+    char frame[320];
+    if (hr_recipe_build(&r, start, ctrl_next_seq(), frame, sizeof(frame)) == 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"build failed\"}");
+    }
+    LOCK();
+    bool ok = hr_session_send_raw(s_session, frame);
+    UNLOCK();
+    ESP_LOGW(TAG, "recipe applied %s%s: %s", r.name,
+             start ? " WITH START" : "", ok ? "ok" : "failed");
+
+    char out[160];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":%s,\"started\":%s}",
+                     ok ? "true" : "false", start ? "true" : "false");
+    return send_json(req, out, n);
+}
+
 /* -------------------------------------------------------------------- */
 /* Registration                                                          */
 /* -------------------------------------------------------------------- */
@@ -1407,6 +1499,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/recipes/save", HTTP_POST, h_recipe_save);
     reg("/api/recipes/delete", HTTP_POST, h_recipe_delete);
     reg("/api/recipes/send", HTTP_POST, h_recipe_send);
+    reg("/api/recipes/apply", HTTP_POST, h_recipe_apply);
     reg("/api/control/enable", HTTP_POST, h_control_enable);
     reg("/api/history", HTTP_GET, h_history);
     reg("/api/verbs", HTTP_GET, h_verbs);

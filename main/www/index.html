@@ -227,6 +227,22 @@
   .suggest{border:1px solid var(--accent); border-radius:12px; padding:10px;
            margin-bottom:10px; font-size:13px}
 
+  /* Setup panel. Sliders carry a live readout because a bare slider tells you
+     a proportion, and a freeze-dryer recipe is set in degrees. */
+  .setrow{margin:14px 0}
+  .setrow .lab{display:flex; justify-content:space-between; align-items:baseline;
+               font-size:13px; margin-bottom:6px}
+  .setrow .lab b{font-size:15px; font-variant-numeric:tabular-nums}
+  .setrow input[type=range]{width:100%; accent-color:var(--accent)}
+  .setrow .lim{font-size:11.5px; color:var(--muted); display:flex;
+               justify-content:space-between; margin-top:2px}
+  .setrow.off{opacity:.4}
+  .settog{display:flex; justify-content:space-between; align-items:center;
+          gap:12px; margin:14px 0; font-size:14px}
+  .setwarn{font-size:12.5px; color:#e5484d; margin-top:6px}
+  #setupcard .rcprow{margin-top:18px}
+  button.primed{border-color:var(--accent); color:var(--accent); font-weight:700}
+
   /* Confirmation dialog. Its own fixed overlay rather than the Settings view
      machinery, so it behaves identically on phone and desktop. */
   .cfwrap{position:fixed; inset:0; z-index:60; display:flex; align-items:center;
@@ -432,6 +448,30 @@
       <h2>Controls</h2>
       <div class="ctrlgrid" id="ctrlbtns"></div>
       <div class="hint" id="ctrlhint"></div>
+    </div>
+
+    <!-- Recipe setup.
+         Replicates the dryer's own Candy and Custom configuration screens so a
+         batch can be set up and started without touching the panel. Values are
+         seeded from the machine when it is already showing one of those
+         screens, so what you edit is what is actually loaded. -->
+    <div class="card" id="setupcard" style="display:none">
+      <h2>Batch setup</h2>
+      <div class="seg" id="famseg">
+        <button type="button" data-fam="4">Candy</button>
+        <button type="button" data-fam="5">Custom</button>
+      </div>
+      <div class="rcpfield" style="margin-top:12px">
+        <label for="setname">Batch name</label>
+        <input id="setname" maxlength="23" placeholder="CANDY">
+      </div>
+      <div id="setnamewarn" class="setwarn" style="display:none"></div>
+      <div id="setfields"></div>
+      <div class="rcprow">
+        <button type="button" id="setsubmit">Submit settings</button>
+        <button type="button" id="setstart">Start batch</button>
+      </div>
+      <div class="hint" id="sethint"></div>
     </div>
 
     <!-- temperature/pressure trend for the current run -->
@@ -1160,6 +1200,273 @@ function artFor(phase, tempF){
 }
 
 /* ---------- dashboard (phase-gated) ---------- */
+/* ---- Batch setup panel --------------------------------------------------
+ *
+ * Replicates the dryer's Candy and Custom configuration screens.
+ *
+ * The submit/start split is the point. Editing a control changes nothing on the
+ * machine; Submit sends the whole recipe; only then can Start run it. So the
+ * dryer is never mid-way through someone's edits, and Start always runs
+ * something that was explicitly confirmed.
+ *
+ * Ranges come from the operator: cooling -50..0 F, heating 70..150 F. A value
+ * already outside that widens its own slider rather than being snapped into
+ * range - silently changing a number nobody touched is worse than showing an
+ * unusual one. Our Candy capture set a prewarm temp of 175, so this is not
+ * hypothetical.
+ */
+var COOL_MIN = -50, COOL_MAX = 0;
+var HEAT_MIN = 70,  HEAT_MAX = 150;
+
+var SET_SPEC = {
+  4: {                                   /* Candy */
+    label: "Candy",
+    screen: 43,
+    def: [4,70,140,150,160,300,7200,300],
+    rows: [
+      {i:1, t:"temp", name:"Tray load temperature"},
+      {i:5, t:"mins", name:"Prewarm time", max:240,
+       toggle:"Prewarm", toggleOff:0, pairs:[2]},
+      {i:2, t:"temp", name:"Prewarm temperature"},
+      {i:3, t:"temp", name:"Dry temperature"},
+      {i:6, t:"mins", name:"Dry time", max:1440}
+    ]
+  },
+  5: {                                   /* Custom */
+    label: "Custom",
+    screen: 31,
+    def: [5,-10,0,120,7200,500,1,100,54000,0],
+    rows: [
+      {i:1, t:"cool", name:"Initial freeze temperature"},
+      {i:2, t:"mins", name:"Extra freeze time", max:1440},
+      {i:3, t:"temp", name:"Dry temperature"}
+    ]
+  }
+};
+
+var setFam = 4;
+var setVals = null;      /* live edit buffer, in WIRE units (seconds) */
+var setBase = null;      /* what the machine last accepted */
+var setName = "", setNameBase = "";
+
+/* Verbs the dryer tests before SENDCANDY - a name containing one is routed to
+   the wrong command. The firmware refuses these too; catching it here means
+   the operator finds out while typing rather than on submit. */
+var NAME_VERBS = ["MEMTEST","PRINT","BEEP","DIR","MEMSIZE","RMOLD","XWIFI","XW",
+  "DUTY","SERIAL","FUZZY","DUMP","COPY","DEL","DIRC","GETR","GETP","ADV","ADD",
+  "UNIQUE","FDNAME","STATUS","CLICK","STATE","FDRENAME","SENDBATCH"];
+
+function nameProblem(n){
+  if(!n) return "A batch name is required.";
+  if(/[,"]/.test(n)) return "A comma or quote would shift the recipe fields.";
+  for(const v of NAME_VERBS){
+    if(n.indexOf(v) >= 0){
+      return 'Contains "' + v + '", which the dryer reads as a command. ' +
+             'Lower case is fine.';
+    }
+  }
+  return "";
+}
+
+/* Seed from the machine when it is showing the matching screen, so the panel
+   edits what is really loaded rather than a remembered default. */
+function seedFrom(stat, fam){
+  const spec = SET_SPEC[fam];
+  const v = spec.def.slice();
+  if(!stat) return v;
+  const p = stat.split(",");
+  if(parseInt(p[1],10) !== spec.screen) return v;
+  if(fam === 4){
+    v[1]=+p[11]; v[2]=+p[12]; v[3]=+p[13]; v[4]=+p[14];
+    v[5]=(+p[15])*60; v[6]=(+p[16])*60;
+    if(p[18]) setNameFromStat(p[18]);
+  } else {
+    v[1]=+p[12]; v[2]=(+p[13])*60; v[3]=+p[14];
+    if(p[19]) setNameFromStat(p[19]);
+  }
+  return v.map(function(x){ return isNaN(x) ? 0 : x; });
+}
+
+var seededName = "";
+function setNameFromStat(n){ seededName = n; }
+
+function paintSetup(st){
+  const card = $("#setupcard");
+  if(!card) return;
+  if(!st.control){ card.style.display="none"; return; }
+  card.style.display = "";
+
+  /* Follow the machine: if it is already on a config screen, show that one. */
+  if(setVals === null){
+    if(st.stat_type === 31) setFam = 5;
+    else if(st.stat_type === 43) setFam = 4;
+    loadFamily(st.last_stat);
+  }
+  $$("#famseg button").forEach(function(b){
+    b.classList.toggle("on", +b.dataset.fam === setFam);
+  });
+}
+
+function loadFamily(lastStat){
+  seededName = "";
+  setVals = seedFrom(lastStat || "", setFam);
+  setBase = setVals.slice();
+  setName = seededName || SET_SPEC[setFam].label.toUpperCase();
+  setNameBase = setName;
+  $("#setname").value = setName;
+  renderSetup();
+}
+
+function isDirty(){
+  if(!setVals || !setBase) return false;
+  if(setName !== setNameBase) return true;
+  for(let i=0;i<setVals.length;i++){ if(setVals[i] !== setBase[i]) return true; }
+  return false;
+}
+
+function renderSetup(){
+  const spec = SET_SPEC[setFam], box = $("#setfields");
+  box.innerHTML = "";
+  spec.rows.forEach(function(row){
+    if(row.toggle){
+      const on = setVals[row.i] > 0;
+      const t = document.createElement("div");
+      t.className = "settog";
+      const lab = document.createElement("span");
+      lab.textContent = row.toggle;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = on ? "On" : "Skipped";
+      btn.style.maxWidth = "120px";
+      btn.onclick = function(){
+        /* "Skip prewarm" is not a flag on the wire - it is the time set to
+           zero. Restoring the default on re-enable avoids handing the dryer a
+           prewarm of zero that claims to be enabled. */
+        setVals[row.i] = on ? row.toggleOff : spec.def[row.i];
+        renderSetup(); updateButtons();
+      };
+      t.appendChild(lab); t.appendChild(btn);
+      box.appendChild(t);
+    }
+    const disabled = row.toggle ? false
+                   : (rowGatedOff(spec, row) ? true : false);
+    box.appendChild(sliderRow(spec, row, disabled));
+  });
+  updateButtons();
+}
+
+/* A row is inert when the toggle that governs it is off. */
+function rowGatedOff(spec, row){
+  for(const r of spec.rows){
+    if(r.pairs && r.pairs.indexOf(row.i) >= 0 && setVals[r.i] === 0) return true;
+    if(r.toggle && r.i === row.i && setVals[r.i] === 0 && row.i !== r.i) return true;
+  }
+  return false;
+}
+
+function sliderRow(spec, row, gated){
+  const wrap = document.createElement("div");
+  wrap.className = "setrow" + (gated ? " off" : "");
+  let min, max, val = setVals[row.i], unit;
+  if(row.t === "temp"){ min = HEAT_MIN; max = HEAT_MAX; unit = "\u00b0F"; }
+  else if(row.t === "cool"){ min = COOL_MIN; max = COOL_MAX; unit = "\u00b0F"; }
+  else { min = 0; max = row.max || 1440; val = Math.round(val/60); unit = " min"; }
+
+  /* Widen rather than clamp: a value already outside the range must remain
+     visible and editable, not be silently pulled to the nearest limit. */
+  if(val < min) min = val;
+  if(val > max) max = val;
+
+  const lab = document.createElement("div");
+  lab.className = "lab";
+  const nm = document.createElement("span"); nm.textContent = row.name;
+  const rd = document.createElement("b");
+  lab.appendChild(nm); lab.appendChild(rd);
+
+  const inp = document.createElement("input");
+  inp.type = "range"; inp.min = min; inp.max = max; inp.value = val;
+  inp.disabled = gated;
+  const show = function(){ rd.textContent = inp.value + unit; };
+  show();
+  inp.oninput = function(){
+    show();
+    setVals[row.i] = row.t === "mins" ? (+inp.value)*60 : +inp.value;
+    updateButtons();
+  };
+
+  const lim = document.createElement("div");
+  lim.className = "lim";
+  const a = document.createElement("span"); a.textContent = min + unit;
+  const b = document.createElement("span"); b.textContent = max + unit;
+  lim.appendChild(a); lim.appendChild(b);
+
+  wrap.appendChild(lab); wrap.appendChild(inp); wrap.appendChild(lim);
+  return wrap;
+}
+
+function updateButtons(){
+  const dirty = isDirty();
+  const prob = nameProblem(setName);
+  const w = $("#setnamewarn");
+  w.style.display = prob ? "" : "none";
+  w.textContent = prob;
+
+  const sub = $("#setsubmit"), st = $("#setstart");
+  sub.disabled = !dirty || !!prob;
+  sub.classList.toggle("primed", dirty && !prob);
+  st.disabled = dirty || !!prob;
+  st.classList.toggle("sev2", !dirty && !prob);
+
+  $("#sethint").textContent = prob ? ""
+    : dirty ? "Settings changed. Submit them to the dryer before starting."
+            : "These are the settings the dryer is holding. Start runs them.";
+}
+
+function setNumsForWire(){
+  const v = setVals.slice();
+  v[0] = setFam;
+  return v.join(",");
+}
+
+async function submitSetup(start){
+  const prob = nameProblem(setName);
+  if(prob) return;
+  const body = "family="+setFam+"&name="+encodeURIComponent(setName)+
+               "&num="+encodeURIComponent(setNumsForWire())+
+               "&start="+(start?"1":"0")+"&confirm="+(start?"1":"0");
+  try{
+    const r = await fetch("/api/recipes/apply",{method:"POST",body:body});
+    const j = await r.json().catch(function(){return {};});
+    if(!j.ok){
+      $("#sethint").textContent = "Refused: " + (j.reason || "unknown error");
+      return;
+    }
+  }catch(e){
+    $("#sethint").textContent = "Could not reach the adapter.";
+    return;
+  }
+  /* The machine now holds these values, so they become the new baseline and
+     Start unlocks. */
+  setBase = setVals.slice();
+  setNameBase = setName;
+  updateButtons();
+  $("#sethint").textContent = start
+    ? "Batch starting."
+    : "Settings sent to the dryer. Start is now available.";
+  refreshState();
+}
+
+function askStartSetup(){
+  if(isDirty() || nameProblem(setName)) return;
+  pendingAction = {setup:true};
+  $("#cftitle").textContent = "Start " + setName + " now?";
+  $("#cfbody").textContent = "This begins a batch on the settings shown, and " +
+    "the dryer will run for roughly a day. Make sure the trays are loaded and " +
+    "the drain valve is shut before confirming.";
+  $("#cfyes").textContent = "Start batch";
+  $("#cfwrap").style.display = "flex";
+}
+
 /* ---- Recipes ------------------------------------------------------------
  *
  * The adapter stores these, not the browser: they are a record of what worked
@@ -1430,6 +1737,12 @@ function paintControls(st){
   var acts = st.actions || [];
 
   if(!st.control){ card.style.display="none"; return; }
+  /* The setup panel replicates the dryer's own configuration screens, so the
+     mirrored button list for those screens would just be a stray Cancel next
+     to a full editor. Every other screen still shows its buttons. */
+  if(st.stat_type === 43 || st.stat_type === 31){
+    card.style.display="none"; return;
+  }
   if(st.link!=="up" || !st.have_tel){
     card.style.display="";
     box.innerHTML="";
@@ -1729,6 +2042,7 @@ async function refreshState(){
       ? "" : "calc(76px + env(safe-area-inset-bottom))";
     paintDash(st);
     paintControls(st);
+    paintSetup(st);
   }catch(e){}
 }
 
@@ -1983,9 +2297,22 @@ $("#cfyes").addEventListener("click", async ()=>{
     refreshRecipes();
     return;
   }
+  if(p.setup){ submitSetup(true); return; }
   if(p.start){ sendRecipe(p.recipe, true); return; }
   sendAction(p.act, p.screen, true);
 });
+
+$("#setname").addEventListener("input", ()=>{
+  setName = $("#setname").value.trim();
+  updateButtons();
+});
+$("#setsubmit").addEventListener("click", ()=>submitSetup(false));
+$("#setstart").addEventListener("click", askStartSetup);
+$$("#famseg button").forEach(b=>b.addEventListener("click", ()=>{
+  setFam = +b.dataset.fam;
+  loadFamily(lastState ? lastState.last_stat : "");
+  $$("#famseg button").forEach(x=>x.classList.toggle("on", x===b));
+}));
 
 $("#rcpsave").addEventListener("click", saveRecipe);
 $("#rcpcancel").addEventListener("click", hideEditor);
