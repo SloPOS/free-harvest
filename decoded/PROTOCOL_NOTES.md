@@ -537,3 +537,54 @@ resuming batch history.
 
 It also means the simulator's `REAL_UID` is NOT this user's dryer, despite the
 comment claiming captured values. The server's disagreement is the evidence.
+
+## Newer firmware G0644170 decompiled (2026-08-21)
+
+Recovered from the stock adapter's USB volume and decoded with
+`tools/decode_h6r.py`. Same app region (0x18000-0xA238C) but 436KB of 566KB
+differs from G0641041 - a genuinely newer build. Ran the four HR*.java scripts
+against it. Function addresses moved; the scripts that locate targets by STRING
+still worked, the ones with hardcoded addresses pointed at the wrong code.
+
+New-build addresses (supersede the July analysis where they differ):
+  - Serial verb dispatcher (strcmp chain):   FUN_00029418   (was 0x291b0)
+  - Verb->handler references all land here, confirmed for
+    ADV@2976a HCS@2982e SPC@2983c GETR@2974e GETP@2975c DUTY@2967e
+    UNIQUE@29786 and @2958c (referenced TWICE - the second, outside the main
+    cluster, is consistent with UNIQUE having a real handler / being live)
+  - ADD is referenced from FUN_0004d72c, NOT the serial dispatcher - so ADD is
+    an internal op, not a wire verb, despite being in the string table.
+  - Router/logger:  FUN_0001b5e4 -> FUN_0001b254, still just a varargs wrapper
+    that LOGS "Command found = %s". Confirms the dispatcher logs the match; the
+    action happens elsewhere.
+  - Shared run-state handler:  FUN_00021414  (was 0x218ec / 0x404c8 era)
+
+FUN_00021414(zone, code) is the state-machine updater - the thing that makes
+ADV able to start a cycle:
+  - param_1 is a small phase/zone index 0..8 (Ghidra renders 4/6/8 as &Reset /
+    &DAT_00000006 / &NMI - those are low-address vector symbols, not pointers).
+  - param_2 is the state/command code. Writes it into run-state global
+    *DAT_000216a0, gated on zone and prior state, and keeps a state-history
+    ring capped at 15 entries (DAT_000216bc[]).
+  - Special block: when (zone==5 && code==9) AND a temperature-like global
+    (*DAT_0002c2e0) is over ~90 (or over 14 with a flag set) AND *DAT_0002c2e4
+    == 5, it increments a batch counter (*DAT_0002c34c), sets flags, and
+    formats a record with FUN_0007d8d8 (an sprintf). Reads like the
+    batch-complete / final-dry summary transition.
+
+CONFIRMED AT THE BINARY LEVEL: state globals are written by BOTH serial-reachable
+and touchscreen functions - e.g. global 0x20002794 has 28 writers, 13
+serial-reachable and 15 not. This is the mechanism behind ADV driving run-state,
+and it means the serial path and the panel share one executor. So the difference
+between a WORKING start (panel/app) and a BROKEN one (raw ADV -> "load trays",
+compressor never engages) is NOT a different executor - it is the SEQUENCE of
+(zone, code) transitions and the preconditions (temperature gates, prior state)
+the proper path satisfies and ADV skips.
+
+=> The proper-start question reduces to: what does SENDBATCH/SENDCANDY/
+   SENDCUSTOM feed into this machine, and in what order? That is the next
+   decompilation target (tools' HRSendBatch.java).
+
+Dispatchers FUN_00076dc0 and FUN_00077078 (up near the entry point) also
+reference command verbs - a probable second/higher-level command path, not yet
+read.
