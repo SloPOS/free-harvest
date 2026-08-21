@@ -804,3 +804,64 @@ update, reproducibly, across two updates. The new image boots and runs
 correctly, so this is cosmetic in effect - but a clean `esp_restart()` should
 report `sw`, and something is crashing on the way down. Only visible because
 reset_reason was added earlier the same day.
+
+## The complete control surface, measured (2026-08-21)
+
+Captured from the genuine app driving the simulator through every screen.
+
+    screen  btn  action                    verb
+    ------  ---  ------------------------  --------------------------
+      1      10  Start Auto                CLICK 1 10 26457 175300
+      1       9  Start Custom              CLICK 1 9 49057 175300
+      1       8  Start Candy               CLICK 1 8 49058 175300
+      1       3  Machine config            CLICK 1 3 49059 175300
+     17       3  Advance to next step      CLICK 17 3 48716 175300
+     17       4  End batch (prep)          CLICK 17 4 48727 175300
+      4       3  Advance to next step      CLICK 4 3 26460 175300
+      4       4  End batch (freezing)      CLICK 4 4 48719 175300
+      5       1  End batch (drying)        CLICK 5 1 48725 175300
+      6       1  End batch (final dry)     CLICK 6 1 48722 175300
+      6       2  Increase final dry time   CLICK 6 2 48720 175300
+      6       3  Decrease final dry time   CLICK 6 3 48721 175300
+
+**End Batch is button 4 on screens 17 and 4, but button 1 on screens 5 and 6.**
+Button numbers carry no meaning across screens. This is the concrete
+justification for refusing a stale view rather than trusting the caller.
+
+**The counter is GLOBAL across verbs, not per-verb.** A captured
+`CLICK 1 3 49059` was immediately followed by `SPC 255 76 80 49060`. So it is a
+single command sequence for the whole session.
+
+**The trailing 175300 is CONSTANT.** It held identical across three capture
+sessions on different days with counters in the 26k, 48k and 49k ranges. It is
+not a session token or a nonce, and can be sent as a literal.
+
+### Non-CLICK commands the app uses
+
+    Rename machine        FDRENAME "Freezie McDry"
+    Set machine colour    SPC 255 76 80 49060        <- RGB red, + counter
+    Reboot after update   REBOOT 6000                <- takes a delay argument
+    End-batch options     REQPREF
+    Batch history         REQBATSUM 0 5              <- paginated: start, count
+    System details        REQSYSINF
+
+**Correction: SPC is not what we assumed.** Our never-probe list described it as
+energising the shelf/pump, alongside DUTY and HCS. The observed use is setting
+the machine's display COLOUR as an RGB triple. That reclassification is based on
+a single observation, so SPC stays off the allow-list - but the stated reason
+for excluding it was wrong, and a wrong reason is worth correcting even when the
+conclusion holds.
+
+**REBOOT takes an argument** (`REBOOT 6000`), presumably a delay. Still excluded.
+
+**REQPREF crashes our simulator's peer.** Answering it with `SYSPREF,0` dropped
+the serial connection - so the reply shape is wrong and REQPREF expects
+something richer. The app uses it for end-batch options.
+
+### Still unknown
+
+- Whether the counter must be monotonic, merely distinct, or is ignored.
+- Screen 2 ("Starting batch") has no captured buttons. That is the screen the
+  machine stranded on during the ADV probe, so it is the one screen where
+  guessing would be worst.
+- Screens 7 (Complete/venting), 15 (Diagnostics) and 31 (Recipe settings).

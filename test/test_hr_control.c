@@ -80,16 +80,77 @@ static void test_unknown_action(void)
 static void test_screen_listing(void)
 {
     const hr_action_t *buf[8];
-    size_t n = hr_control_for_screen(1, buf, 8);
-    CHECK_INT((int)n, 4);
+    CHECK_INT((int)hr_control_for_screen(1,  buf, 8), 4);  /* Ready      */
+    CHECK_INT((int)hr_control_for_screen(17, buf, 8), 2);  /* Preparing  */
+    CHECK_INT((int)hr_control_for_screen(4,  buf, 8), 2);  /* Freezing   */
+    CHECK_INT((int)hr_control_for_screen(5,  buf, 8), 1);  /* Drying     */
+    CHECK_INT((int)hr_control_for_screen(6,  buf, 8), 3);  /* Final dry  */
 
     /* Screens whose buttons have never been captured must offer NOTHING.
      * An empty toolbar is correct; a guessed one presses unknown controls on
-     * a running machine. */
-    CHECK_INT((int)hr_control_for_screen(4, buf, 8), 0);
-    CHECK_INT((int)hr_control_for_screen(5, buf, 8), 0);
-    CHECK_INT((int)hr_control_for_screen(17, buf, 8), 0);
-    CHECK_INT((int)hr_control_for_screen(0, buf, 8), 0);
+     * a running machine. Screen 2 is "Starting batch", which is exactly where
+     * the machine stranded during the ADV probe - do not invent buttons for it. */
+    CHECK_INT((int)hr_control_for_screen(2,  buf, 8), 0);
+    CHECK_INT((int)hr_control_for_screen(7,  buf, 8), 0);
+    CHECK_INT((int)hr_control_for_screen(15, buf, 8), 0);
+    CHECK_INT((int)hr_control_for_screen(31, buf, 8), 0);
+    CHECK_INT((int)hr_control_for_screen(0,  buf, 8), 0);
+
+    /* A cap smaller than the match count must not overrun. */
+    const hr_action_t *two[2];
+    CHECK_INT((int)hr_control_for_screen(1, two, 2), 2);
+}
+
+static void test_end_batch_button_differs_per_screen(void)
+{
+    /*
+     * This is the whole reason the table is keyed by screen. "End Batch" is
+     * button 4 on Preparing and Freezing, but button 1 on Drying and Final Dry.
+     * Send a screen-17 End Batch against a live screen 5 and button 4 would
+     * address something else entirely.
+     */
+    CHECK_INT(hr_control_lookup("prep_end")->button,   4);
+    CHECK_INT(hr_control_lookup("freeze_end")->button, 4);
+    CHECK_INT(hr_control_lookup("dry_end")->button,    1);
+    CHECK_INT(hr_control_lookup("final_end")->button,  1);
+
+    /* Every End Batch is destructive, on every screen. */
+    CHECK_INT(hr_control_lookup("prep_end")->sev,   HR_SEV_DESTRUCTIVE);
+    CHECK_INT(hr_control_lookup("freeze_end")->sev, HR_SEV_DESTRUCTIVE);
+    CHECK_INT(hr_control_lookup("dry_end")->sev,    HR_SEV_DESTRUCTIVE);
+    CHECK_INT(hr_control_lookup("final_end")->sev,  HR_SEV_DESTRUCTIVE);
+
+    /* Skipping a step is destructive too - it advances the batch past a stage
+     * the recipe asked for, and cannot be undone from the app. */
+    CHECK_INT(hr_control_lookup("prep_advance")->sev,   HR_SEV_DESTRUCTIVE);
+    CHECK_INT(hr_control_lookup("freeze_advance")->sev, HR_SEV_DESTRUCTIVE);
+
+    /* The concrete stale-view case: user tapped End Batch on the Preparing
+     * screen, machine has since reached Drying. Must refuse. */
+    const hr_action_t *a = NULL;
+    CHECK_INT(hr_control_check("prep_end", 17, 5, true, &a), HR_CTRL_STALE_VIEW);
+    CHECK(a == NULL);
+}
+
+static void test_drying_direction_asymmetry(void)
+{
+    /* More dry time is the conservative direction and costs only time.
+     * Less dry time moves toward an under-dried batch, so it asks first. */
+    CHECK_INT(hr_control_lookup("final_more")->sev, HR_SEV_BENIGN);
+    CHECK_INT(hr_control_lookup("final_less")->sev, HR_SEV_CONFIRM);
+
+    const hr_action_t *a = NULL;
+    CHECK_INT(hr_control_check("final_more", 6, 6, false, &a), HR_CTRL_OK);
+    CHECK_INT(hr_control_check("final_less", 6, 6, false, &a), HR_CTRL_NEEDS_CONFIRM);
+}
+
+static void test_action_names_are_unique(void)
+{
+    for (size_t i = 0; i < hr_control_count(); i++) {
+        for (size_t j = i + 1; j < hr_control_count(); j++) {
+            CHECK(strcmp(hr_control_at(i)->name, hr_control_at(j)->name) != 0);
+        }
+    }
 }
 
 static void test_every_action_is_self_consistent(void)
@@ -120,6 +181,9 @@ int main(void)
     test_confirmation_is_required();
     test_unknown_action();
     test_screen_listing();
+    test_end_batch_button_differs_per_screen();
+    test_drying_direction_asymmetry();
+    test_action_names_are_unique();
     test_every_action_is_self_consistent();
     return TEST_REPORT();
 }

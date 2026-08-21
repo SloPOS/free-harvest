@@ -6,27 +6,66 @@
 /*
  * THE ACTION TABLE
  *
- * Only screen 1 (Ready) is populated, because only screen 1 has been MEASURED.
- * The four entries below come from a capture of the genuine app driving a
- * simulated dryer on 2026-08-21:
+ * Every row below is MEASURED - captured from the genuine app driving each
+ * screen on 2026-08-21. Nothing here is inferred, and rows must only ever be
+ * added the same way. Guessing a button number is guessing which control gets
+ * pressed on a running machine.
  *
- *     CLICK 1 10 54779 175300   Start
- *     CLICK 1  9 54780 175300   Custom
- *     CLICK 1  8 54781 175300   Candy
- *     CLICK 1  3 54782 175300   Config
+ *     CLICK 1  10  Start Auto        CLICK 4  3  Skip to Drying
+ *     CLICK 1   9  Start Custom      CLICK 4  4  End Batch
+ *     CLICK 1   8  Start Candy       CLICK 5  1  End Batch
+ *     CLICK 1   3  Settings          CLICK 6  1  End Batch
+ *     CLICK 17  3  Skip to Freezing  CLICK 6  2  More Dry Time
+ *     CLICK 17  4  End Batch         CLICK 6  3  Less Dry Time
  *
- * Every other screen's buttons are UNKNOWN and this table stays empty for them
- * on purpose. Guessing a button number is guessing which control gets pressed
- * on a running machine, and the whole point of this layer is to not do that.
- * Add rows only from captures.
+ * The trailing field is 175300 in every capture, across three separate
+ * sessions on different days, so it is a fixed constant rather than a session
+ * token. The counter before it is a GLOBAL command sequence shared with other
+ * verbs - a captured CLICK ...49059 was followed by SPC ...49060.
  */
 static const hr_action_t k_actions[] = {
-    /* name          label            screen button severity */
-    { "config",      "Settings",           1,  3, HR_SEV_BENIGN     },
-    { "start_candy", "Start (Candy)",      1,  8, HR_SEV_CONFIRM    },
-    { "start_custom","Start (Custom)",     1,  9, HR_SEV_CONFIRM    },
-    { "start_auto",  "Start (Auto)",       1, 10, HR_SEV_CONFIRM    },
+    /* --- Screen 1: Ready ------------------------------------------------ */
+    { "config",         "Settings",            1,  3, HR_SEV_BENIGN      },
+    { "start_candy",    "Start Candy",         1,  8, HR_SEV_CONFIRM     },
+    { "start_custom",   "Start Custom",        1,  9, HR_SEV_CONFIRM     },
+    { "start_auto",     "Start Auto",          1, 10, HR_SEV_CONFIRM     },
+
+    /* --- Screen 17: Preparing (pre-cool) -------------------------------- */
+    { "prep_advance",   "Skip to Freezing",   17,  3, HR_SEV_DESTRUCTIVE },
+    { "prep_end",       "End Batch",          17,  4, HR_SEV_DESTRUCTIVE },
+
+    /* --- Screen 4: Freezing --------------------------------------------- */
+    { "freeze_advance", "Skip to Drying",      4,  3, HR_SEV_DESTRUCTIVE },
+    { "freeze_end",     "End Batch",           4,  4, HR_SEV_DESTRUCTIVE },
+
+    /* --- Screen 5: Drying ------------------------------------------------ */
+    { "dry_end",        "End Batch",           5,  1, HR_SEV_DESTRUCTIVE },
+
+    /* --- Screen 6: Final dry --------------------------------------------- */
+    { "final_end",      "End Batch",           6,  1, HR_SEV_DESTRUCTIVE },
+    { "final_more",     "More Dry Time",       6,  2, HR_SEV_BENIGN      },
+    { "final_less",     "Less Dry Time",       6,  3, HR_SEV_CONFIRM     },
 };
+
+/*
+ * SEVERITY, and why these particular calls.
+ *
+ * The two "advance" actions are DESTRUCTIVE even though they sound like
+ * navigation. Skipping out of pre-cool or freezing moves the batch past a step
+ * the recipe asked for, on a process where the cost of being wrong is a ruined
+ * 24-hour run rather than an error message. They are irreversible from the app.
+ *
+ * "More Dry Time" is BENIGN: extending drying is the conservative direction and
+ * costs only time. "Less Dry Time" is CONFIRM for the same reason inverted -
+ * it shortens the run toward an under-dried result.
+ *
+ * Starting a cycle is CONFIRM rather than DESTRUCTIVE: it commits the machine
+ * for a day but destroys nothing, and it is reversible with End Batch.
+ *
+ * Note button numbers are NOT consistent between screens - End Batch is 4 on
+ * Preparing and Freezing but 1 on Drying and Final Dry. That is exactly why
+ * this table is keyed by screen and why a stale view has to be refused.
+ */
 
 #define N_ACTIONS (sizeof(k_actions) / sizeof(k_actions[0]))
 
