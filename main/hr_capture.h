@@ -63,6 +63,10 @@ bool hr_capture_clear(void);
  * Open the log for reading. Returns NULL if unavailable. Caller must call
  * hr_capture_close(). Kept opaque so the HTTP layer can stream it.
  */
+/* Flush and unmount before a deliberate reboot, so SPIFFS is not left
+ * inconsistent. After this the capture APIs are inert. */
+void hr_capture_shutdown(void);
+
 void *hr_capture_open(void);
 int hr_capture_read(void *handle, char *buf, size_t cap);
 void hr_capture_close(void *handle);

@@ -61,13 +61,14 @@ static void test_confirmation_is_required(void)
     /* Starting a 24-hour cycle needs an explicit yes. */
     CHECK_INT(hr_control_check("start_auto", 1, 1, false, &a), HR_CTRL_NEEDS_CONFIRM);
     CHECK(a == NULL);
-    CHECK_INT(hr_control_check("start_candy", 1, 1, false, &a), HR_CTRL_NEEDS_CONFIRM);
-    CHECK_INT(hr_control_check("start_custom", 1, 1, false, &a), HR_CTRL_NEEDS_CONFIRM);
+    CHECK_INT(hr_control_check("candy_setup", 1, 1, false, &a), HR_CTRL_NEEDS_CONFIRM);
+    CHECK_INT(hr_control_check("custom_setup", 1, 1, false, &a), HR_CTRL_NEEDS_CONFIRM);
 
-    /* Opening settings does not. */
-    CHECK_INT(hr_control_check("config", 1, 1, false, &a), HR_CTRL_OK);
-    CHECK(a != NULL);
-    CHECK_INT(a->button, 3);
+    /* Nothing on the Ready screen is benign any more: the one benign button
+     * was Settings, and Settings kills USB comms until someone walks to the
+     * machine. It is no longer offered at all. */
+    CHECK(hr_control_lookup("config") == NULL);
+    CHECK_INT(hr_control_check("config", 1, 1, true, &a), HR_CTRL_UNKNOWN_ACTION);
 }
 
 static void test_unknown_action(void)
@@ -80,7 +81,7 @@ static void test_unknown_action(void)
 static void test_screen_listing(void)
 {
     const hr_action_t *buf[8];
-    CHECK_INT((int)hr_control_for_screen(1,  buf, 8), 4);  /* Ready      */
+    CHECK_INT((int)hr_control_for_screen(1,  buf, 8), 3);  /* Ready      */
     CHECK_INT((int)hr_control_for_screen(17, buf, 8), 2);  /* Preparing  */
     CHECK_INT((int)hr_control_for_screen(4,  buf, 8), 2);  /* Freezing   */
     CHECK_INT((int)hr_control_for_screen(5,  buf, 8), 1);  /* Drying     */

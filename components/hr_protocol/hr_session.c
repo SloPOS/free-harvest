@@ -171,6 +171,21 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
         "REQTHST", "REQSCIENCE", "STATUS", "STATE", "SERIAL", "WIFIINFO",
         "MEMSIZE", "FDFILES",
         /*
+         * FILEREAD - reads a file the dryer is serving.
+         *
+         * Honest basis: this is classified from the firmware's own verb
+         * grouping (it sits among the queries) and from need, NOT from a
+         * demonstration that it is inert. That is the same reasoning that
+         * misfiled CLICK as benign and mislabelled SPC as a pump control.
+         *
+         * It is here because FDFILES - already allow-listed and proven
+         * read-only - enumerates files but cannot fetch their contents,
+         * and the batch history we want lives in those files. If FILEREAD
+         * ever turns out to write, truncate or rename, it comes straight
+         * back out. Reads are the only thing it is allowed to be.
+         */
+        "FILEREAD",
+        /*
          * GETP / GETR - tested 2026-08-21 against a real machine and found
          * INERT: no reply bare or with page/row arguments, and no crash.
          * Kept allow-listed because they demonstrably do not act, but they

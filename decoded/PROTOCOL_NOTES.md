@@ -865,3 +865,61 @@ something richer. The app uses it for end-batch options.
   machine stranded on during the ADV probe, so it is the one screen where
   guessing would be worst.
 - Screens 7 (Complete/venting), 15 (Diagnostics) and 31 (Recipe settings).
+
+## GOTIT is the CLICK acknowledgement (2026-08-21)
+
+The first CLICKs sent by our own adapter produced, from the dryer:
+
+    GOTIT,100001,   GOTIT,100002,   ...   GOTIT,100006,
+
+Those are our own counter values echoed back - our sequence starts at 100001.
+So the dryer explicitly ACKs a control command by returning its counter; we do
+not have to infer success from a screen change. Note the direction: our
+outbound GOTIT is space-delimited, these are comma-delimited, i.e. dryer to
+adapter.
+
+## Screens 2, 7 and 43, and the settings trap
+
+    STAT,2  ... "Starting batch"   between Preparing and Freezing
+    STAT,7  ... Complete / venting
+    STAT,43 ... Recipe configuration, opened by Candy and Custom
+
+**Screen 2 carries a CONTINUE button that must be pressed for the batch to
+proceed.** A remote start therefore stalls there until someone presses it, which
+is exactly what happened. Its button number is not captured yet.
+
+**Candy and Custom do not start anything** - each opens STAT 43, a recipe
+configuration screen. Its parameters are visible in the frame
+(`1023,70,140,150,160,5,120,0,CANDY`) and one of them changed from 160 to 0
+while values were edited on the panel. Buttons not captured.
+
+**The settings/diagnostics page (screen 1, button 3) STOPS USB SERVICE.**
+Telemetry went silent for ~147 seconds and only resumed when the page was
+dismissed by hand. It is the one control that destroys the channel it was sent
+over, and nothing remote can undo it. Removed from the action table rather than
+gated - no confirmation makes "someone must now walk to the machine" acceptable.
+
+## Reading the dryer's files
+
+The DRYER is the file server; the adapter asks. `FDFILES <pattern> <index>`
+enumerates, one entry per call, where index is a page number:
+
+    FDFILES .dat 0  ->  FDFILELIST,HH.37935.dat,0,4341
+    FDFILES .dat 1  ->  FDFILELIST,HB.3793501.dat,1,258
+    FDFILES .dat 2  ->  FDFILELIST,HB.3793502.dat,2,278
+
+Format is `FDFILELIST,<name>,<index>,<size>`. `HH.<id>` looks like a history
+header and `HB.<id><nn>` per-batch records, sharing the machine id 37935.
+
+**FILEREAD does not yet yield contents.** Sent as `FILEREAD <name>`,
+`FILEREAD <name> 0` and `FILEREAD <name> 0 0`, the dryer replied `A1` to each -
+two characters, not a 258-byte file. `A1` is unparsed by us and counted as a bad
+frame. It is probably an error or status code, so the argument shape is wrong.
+FILEREAD is allow-listed as SAFE on the strength of the firmware's own verb
+grouping and of need, NOT on a demonstration that it is inert - the same
+reasoning that misfiled CLICK. It is harmless in practice so far: the link
+stayed up and the machine stayed idle through every attempt.
+
+Next: the block transfer almost certainly mirrors what the dryer itself sends
+for FDNAME - `FDFILELIST` to announce, then `FDFILEBLOCK,<name>,<seq>,<off>,<?>,
+<data>`. Finding the request that triggers a block is the remaining step.

@@ -25,9 +25,27 @@
  */
 static const hr_action_t k_actions[] = {
     /* --- Screen 1: Ready ------------------------------------------------ */
-    { "config",         "Settings",            1,  3, HR_SEV_BENIGN      },
-    { "start_candy",    "Start Candy",         1,  8, HR_SEV_CONFIRM     },
-    { "start_custom",   "Start Custom",        1,  9, HR_SEV_CONFIRM     },
+    /*
+     * "config" (button 3) IS DELIBERATELY ABSENT.
+     *
+     * It opens the machine's settings/diagnostics page, and that page stops
+     * servicing USB - telemetry went silent for ~147 seconds in a capture and
+     * only resumed when the panel was dismissed BY HAND. So it is the one
+     * button that destroys the channel it was pressed over: no state arrives,
+     * no further command can be sent, and nothing remote can undo it.
+     *
+     * There is no confirmation dialog that makes that safe, because the cost is
+     * not "are you sure" - it is "someone must now walk to the machine". So it
+     * is not offered rather than offered-with-a-warning.
+     *
+     * Candy and Custom do NOT start anything. Each opens a recipe
+     * configuration screen (STAT type 43), which keeps talking over USB and can
+     * be backed out of, but whose buttons we have not captured - so they lead
+     * to a screen the UI cannot yet operate. Labelled for what they actually
+     * do rather than what the app's own button text implies.
+     */
+    { "candy_setup",    "Candy Setup…",    1,  8, HR_SEV_CONFIRM     },
+    { "custom_setup",   "Custom Setup…",   1,  9, HR_SEV_CONFIRM     },
     { "start_auto",     "Start Auto",          1, 10, HR_SEV_CONFIRM     },
 
     /* --- Screen 17: Preparing (pre-cool) -------------------------------- */

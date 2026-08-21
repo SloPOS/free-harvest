@@ -68,6 +68,21 @@ STATES = {
     "freeze": "STAT,4,0,0,0,13,10000,3676,0,60,Auto,1,83,0,0,5,0,0,0,",
     "dry":    "STAT,5,0,0,0,41,452,18300,0,46,Auto,1,34,0,0,5,0,0,0,",
     "final":  "STAT,6,0,0,0,154,335,3581,0,68,CANDY,4,49,0,0,7,57,3619,0,,",
+
+    # Screens 2, 7 and 43, captured 2026-08-21. All three are reachable in
+    # normal use and none has had its buttons mapped yet.
+    #
+    #   starting - the "Starting batch" screen between Preparing and Freezing.
+    #              It carries a CONTINUE button that must be pressed for the
+    #              batch to proceed, which is why a remote start currently
+    #              stalls here.
+    #   complete - end of cycle / venting.
+    #   candycfg - the recipe configuration screen that Candy and Custom open.
+    #              The trailing numbers are recipe parameters: a capture showed
+    #              160 change to 0 while values were being edited on screen.
+    "starting": "STAT,2,0,0,0,68,10000,10,0,43,Auto,1,1,0,0,5,2,120,0,0,,",
+    "complete": "STAT,7,0,0,0,69,151638,5,0,48,296,11,0,90,Auto,,",
+    "candycfg": "STAT,43,0,0,0,69,151701,119,0,40,1023,70,140,150,160,5,120,0,CANDY,,",
 }
 REAL_STAT = STATES["idle"]
 # IDENTITY
@@ -206,7 +221,9 @@ class Log:
         self.f.flush()
 
 
-STATE_KEYS = {"1": "idle", "2": "prep", "3": "freeze", "4": "dry", "5": "final"}
+STATE_KEYS = {"1": "idle", "2": "prep", "3": "freeze", "4": "dry",
+              "5": "final", "6": "starting", "7": "complete",
+              "8": "candycfg"}
 
 try:
     import msvcrt
@@ -297,7 +314,8 @@ def main():
     log("# ours are comma-delimited. Watch for >>> NON-ROUTINE <<< lines.")
     log(f"# Presenting the '{args.state}' screen.")
     log("#")
-    log("# PRESS 1=idle 2=prep 3=freeze 4=dry 5=final to change the screen the")
+    log("# PRESS 1=idle 2=prep 3=freeze 4=dry 5=final 6=starting")
+    log("#       7=complete 8=candycfg  to change the screen the")
     log("# app sees, then press buttons in the app. Any frame the adapter emits")
     log("# in response is the control command we are after.")
 

@@ -341,9 +341,21 @@ static esp_err_t h_capture(httpd_req_t *req)
             static char buf[1024];
             int n;
             int first = hr_capture_read(h, buf, sizeof(buf));
-            ESP_LOGI(TAG, "capture download: first read = %d", first);
-            if (first > 0 &&
-                httpd_resp_send_chunk(req, buf, first) != ESP_OK) {
+            if (first <= 0) {
+                /*
+                 * stat() said there were bytes and the file opened, yet it
+                 * reads empty - SPIFFS metadata and data disagree. Returning
+                 * the empty body here is what made this look like a working
+                 * download of nothing for days. Fall through to the RAM ring
+                 * instead, which at least has the recent frames.
+                 */
+                ESP_LOGE(TAG, "capture log stats %u bytes but reads empty - "
+                              "falling back to the RAM ring",
+                         (unsigned)hr_capture_size());
+                hr_capture_close(h);
+                goto ram_fallback;
+            }
+            if (httpd_resp_send_chunk(req, buf, first) != ESP_OK) {
                 hr_capture_close(h);
                 return ESP_FAIL;
             }
@@ -358,6 +370,7 @@ static esp_err_t h_capture(httpd_req_t *req)
         }
     }
 
+ram_fallback:;
     static hr_hist_entry_t out[HR_HIST_CAP];
     int n;
     LOCK();
@@ -711,6 +724,9 @@ static void ota_reboot_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(1200));
+    /* Unmount before restarting. An OTA reboot that leaves SPIFFS mounted has
+     * been corrupting the capture log - see hr_capture_shutdown(). */
+    hr_capture_shutdown();
     ESP_LOGW(TAG, "rebooting into new firmware");
     esp_restart();
 }
@@ -1099,7 +1115,14 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     }
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 20;
+    /*
+     * MUST be >= the number of reg() calls below. There are 25, and this said
+     * 20 - so five handlers failed to register at boot with nothing but a
+     * warning buried in the log, and whichever routes fell off the end simply
+     * 404ed. Adding the two control routes is what pushed it over, but the
+     * margin had already gone.
+     */
+    cfg.max_uri_handlers = 32;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     /*

@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -355,12 +359,60 @@ bool hr_capture_clear(void)
     return true;
 }
 
+/*
+ * Reading the log uses POSIX open/read rather than stdio.
+ *
+ * fopen(LOGFILE, "r") SUCCEEDED and the very first fread() then returned 0, on
+ * a file SPIFFS reported as 270KB - reproducibly, and only after a reboot. The
+ * download had been silently returning an empty body ever since. Note the trend
+ * file in this same module is read with "rb" and has never had the problem,
+ * which points at newlib's buffered text-mode path over SPIFFS rather than at
+ * the file or the filesystem.
+ *
+ * open/read has no buffering layer to get this wrong, so instead of working out
+ * which stdio subtlety bites here, the layer is removed. The handle is the file
+ * descriptor biased by +1, because a valid fd of 0 is indistinguishable from
+ * the NULL this API uses for failure.
+ */
+/*
+ * Flush and unmount the capture filesystem.
+ *
+ * Called before the deliberate reboot after an OTA. Without it SPIFFS is never
+ * cleanly unmounted, and the symptom is not a lost write - it is a file whose
+ * metadata and data disagree: stat() reported 26,359 bytes on a log whose very
+ * first read() returned nothing. Since the mount is configured with
+ * format_if_mount_failed, a bad enough inconsistency then wipes the partition
+ * silently, which is how a 270KB capture became 26KB between two reboots.
+ *
+ * Takes the writer lock so an in-flight line finishes first, and never releases
+ * it: nothing should write after this point, and blocking a late writer is
+ * better than letting it reopen the filesystem we just closed.
+ */
+void hr_capture_shutdown(void)
+{
+    if (!s_ready) {
+        return;
+    }
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, pdMS_TO_TICKS(1000));
+    }
+    s_ready = false;
+    esp_vfs_spiffs_unregister("capture");
+    ESP_LOGI(TAG, "capture filesystem unmounted cleanly");
+}
+
 void *hr_capture_open(void)
 {
     if (!s_ready) {
         return NULL;
     }
-    return (void *)fopen(LOGFILE, "r");
+    int fd = open(LOGFILE, O_RDONLY);
+    if (fd < 0) {
+        ESP_LOGE(TAG, "capture open(%s) failed: %s (errno %d)", LOGFILE,
+                 strerror(errno), errno);
+        return NULL;
+    }
+    return (void *)(intptr_t)(fd + 1);
 }
 
 int hr_capture_read(void *handle, char *buf, size_t cap)
@@ -368,12 +420,14 @@ int hr_capture_read(void *handle, char *buf, size_t cap)
     if (handle == NULL || buf == NULL || cap == 0) {
         return 0;
     }
-    return (int)fread(buf, 1, cap, (FILE *)handle);
+    int fd = (int)(intptr_t)handle - 1;
+    int n = (int)read(fd, buf, cap);
+    return (n < 0) ? 0 : n;
 }
 
 void hr_capture_close(void *handle)
 {
     if (handle != NULL) {
-        fclose((FILE *)handle);
+        close((int)(intptr_t)handle - 1);
     }
 }
