@@ -124,6 +124,8 @@ def main():
                     help="how long to keep playing the dryer")
     ap.add_argument("--stat-secs", type=float, default=15.0,
                     help="idle STAT cadence, matching the real machine")
+    ap.add_argument("--reqinfo-secs", type=float, default=30.0,
+                    help="how often to poll REQINFO, as the real dryer does")
     args = ap.parse_args()
 
     port = args.port
@@ -162,6 +164,8 @@ def main():
 
     buf = b""
     last_stat = time.time()
+    last_reqinfo = 0.0
+    last_state = None          # watch for STATE's fields changing
     deadline = time.time() + args.minutes * 60
 
     while time.time() < deadline:
@@ -190,7 +194,15 @@ def main():
                 text = line.decode("ascii", "replace")
                 verb = text.split(" ")[0].strip()
 
-                if verb in ROUTINE:
+                if verb == "STATE":
+                    if text != last_state:
+                        if last_state is not None:
+                            log(f"<- {text}    *** STATE CHANGED (was "
+                                f"{last_state!r}) ***")
+                        else:
+                            log(f"<- {text}")
+                        last_state = text
+                elif verb in ROUTINE:
                     log(f"<- {text}")
                 else:
                     # The whole point of the exercise.
@@ -214,6 +226,13 @@ def main():
         if time.time() - last_stat >= args.stat_secs:
             last_stat = time.time()
             send(REAL_STAT, "idle cadence")
+
+        # The genuine dryer polls REQINFO - it appears in captures taken from
+        # the live machine. We were never sending it, so the adapter was never
+        # asked to identify itself the way a real install would ask.
+        if time.time() - last_reqinfo >= args.reqinfo_secs:
+            last_reqinfo = time.time()
+            send("REQINFO,", "identity poll, as the real dryer does")
 
     log("")
     log("=== summary ===")
