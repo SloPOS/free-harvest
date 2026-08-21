@@ -999,3 +999,29 @@ different screen id. Unresolved.
 Screen 2's Continue is the one a remote start stalls on. Note what it asserts:
 that trays are loaded and the valve is shut - a claim about the physical world
 that nobody at a phone can actually make, which is why it is not benign here.
+
+## Custom configuration is a different screen (2026-08-21)
+
+Checked on the machine: **Candy and Custom are not the same screen.** The guess
+that 43 was a generic recipe editor whose trailing field selected the recipe -
+so CANDY swapped for CUSTOM would render Custom - is wrong, and the fabricated
+frame has been removed from the simulator rather than left to be mistaken for a
+capture later.
+
+Custom offers only **three** settings against Candy's eight:
+
+    initial freeze temp
+    extra freeze time
+    drying temp
+
+Its screen id is unknown. Screens 31 ("Recipe settings", seen once) and 44
+(seen once inside final dry) are the only ids we have observed without
+identifying, so they are the first candidates.
+
+To find it, run `tools/map_screens.py` and press Custom on the panel; the new
+STAT type is the answer and the capture log holds the frame verbatim for the
+simulator. That is also the general recipe for any screen we are missing - it
+needs no stock adapter and touches nothing.
+
+Note the asymmetry this implies: `SENDCUSTOM` will carry a different and
+shorter payload than `SENDCANDY`, not the same csv with a different name.

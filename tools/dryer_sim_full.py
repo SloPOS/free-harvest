@@ -84,18 +84,16 @@ STATES = {
     "complete": "STAT,7,0,0,0,69,151638,5,0,48,296,11,0,90,Auto,,",
     "candycfg": "STAT,43,0,0,0,69,151701,119,0,40,1023,70,140,150,160,5,120,0,CANDY,,",
 
-    # HYPOTHESIS, NOT MEASURED. Every other frame in this table was captured
-    # from the real machine; this one is the candy frame with CANDY swapped for
-    # CUSTOM.
+    # Custom configuration is NOT here, and the guess that used to sit in this
+    # slot was wrong. It assumed screen 43 was a generic recipe editor whose
+    # trailing field named the recipe, so CANDY -> CUSTOM would produce the
+    # Custom screen. Checked on the real machine: they are different screens
+    # entirely, and Custom offers only three settings - initial freeze temp,
+    # extra freeze time, drying temp - against Candy's eight.
     #
-    # The reasoning: screen 43 looks like a GENERIC recipe-configuration screen
-    # whose trailing field names which recipe is being edited, and the firmware
-    # carries SENDCUSTOM as a sibling verb to SENDCANDY. If that is right, the
-    # app will render Custom configuration when shown this.
-    #
-    # If it does not, the guess is wrong and Custom lives on some other screen
-    # id - use --stat to try others rather than editing this file.
-    "customcfg": "STAT,43,0,0,0,69,151701,119,0,40,1023,70,140,150,160,5,120,0,CUSTOM,,",
+    # Its screen id is unknown. Walk the panel to Custom and read stat_type
+    # from /api/state, or press it and pull the frame out of the capture log;
+    # then add the real frame here. Do not guess again.
 }
 REAL_STAT = STATES["idle"]
 # IDENTITY
@@ -236,7 +234,7 @@ class Log:
 
 STATE_KEYS = {"1": "idle", "2": "prep", "3": "freeze", "4": "dry",
               "5": "final", "6": "starting", "7": "complete",
-              "8": "candycfg", "9": "customcfg"}
+              "8": "candycfg"}
 
 try:
     import msvcrt
@@ -337,7 +335,7 @@ def main():
     log(f"# Presenting the '{args.state}' screen.")
     log("#")
     log("# PRESS 1=idle 2=prep 3=freeze 4=dry 5=final 6=starting")
-    log("#       7=complete 8=candycfg 9=customcfg(GUESS)  to change the")
+    log("#       7=complete 8=candycfg  to change the screen the")
     log("# app sees, then press buttons in the app. Any frame the adapter emits")
     log("# in response is the control command we are after.")
 

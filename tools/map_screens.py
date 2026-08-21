@@ -39,16 +39,28 @@ import urllib.request
 # Screens already identified, from cycle captures and the ADV probe.
 KNOWN = {
     1:  "Idle / Ready",
-    2:  "Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)",
-    4:  "Freezing",
-    5:  "Drying",
-    6:  "Final dry",
-    7:  "Complete / venting",
+    2:  "Load trays / Continue  (btn 1 continue, 2 end batch)",
+    4:  "Freezing  (btn 3 advance, 4 end batch)",
+    5:  "Drying  (btn 1 end batch)",
+    6:  "Final dry  (btn 1 end, 2 more time, 3 less time)",
+    7:  "Complete  (btn 1 defrost, 2 +2h dry, 3 no defrost, 5 warm trays)",
     15: "Diagnostics",
-    17: "Preparing (15-min pre-cool)",
-    31: "Recipe settings",
+    17: "Preparing / pre-cool  (btn 3 advance, 4 end batch)",
+    31: "Recipe settings - seen once, unmapped",
+    43: "Candy recipe config  (btn 18 cancel; values go via SENDCANDY)",
     44: "seen once inside final dry, unmapped",
 }
+
+# WANTED: the Custom recipe configuration screen.
+#
+# It is NOT screen 43 - verified on the machine. Candy and Custom are separate
+# screens, and Custom offers only three settings (initial freeze temp, extra
+# freeze time, drying temp) against Candy's eight. Its id is unknown, and 31
+# and 44 are the two ids we have seen but never identified, so they are the
+# first candidates.
+#
+# To find it: run this, then press Custom on the panel. The new type is the
+# answer, and the capture log will hold the frame verbatim for the simulator.
 
 
 def main():
