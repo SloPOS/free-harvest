@@ -52,7 +52,8 @@ CR = b"\r"
 
 # Verbs the adapter emits as routine housekeeping. Anything outside this set is
 # worth stopping for - it is a response to something YOU did in the app.
-ROUTINE = {"STATE", "UNIQUE", "FDNAME", "REQCFG", "STATUS", "WIFIINFO"}
+ROUTINE = {"STATE", "UNIQUE", "FDNAME", "REQCFG", "STATUS", "WIFIINFO",
+           "FDFILES"}
 
 # Real frames, captured from the user's own machine. Using genuine values rather
 # than invented ones matters: the app may well sanity-check what it is shown.
@@ -70,8 +71,29 @@ ANSWERS = {
     "REQPREF":    "SYSPREF,0",
     "REQBATSUM":  "BATSUM,0,",
     "STATUS":     "STATUS,1,",
-    "FDNAME":     "FDNAME,Freeze Dryer,",   # not yet accepted; shape unknown
 }
+
+# FDNAME is a FILE request, not a frame request.
+#
+# The firmware holds the string "FDName.txt", and answering FDNAME with an
+# inline frame did NOT satisfy the adapter - it kept asking (2-3 times per 40s).
+# Sending the file instead did, and it has not asked since. The dryer ships
+# files with FDFILELIST (announce) then FDFILEBLOCK (contents).
+FD_NAME = "Freeze Dryer"
+FDNAME_REPLY = [
+    f"SNM,{FD_NAME},",
+    f"FDFILELIST,FDName.txt,0,{len(FD_NAME)}",
+    f"FDFILEBLOCK,FDName.txt,0,0,0,{FD_NAME}",
+]
+
+# The adapter answers a file transfer by asking for MORE files:
+#     <- FDFILES .dat 1
+# The dryer's batch history lives in HB/HS/HH.%05ld.dat, so it is asking for
+# batch records. An empty list is a valid answer - we have no history to give -
+# and lets it move on rather than stall waiting.
+def fdfiles_reply(arg):
+    ext = arg.strip() or ".dat"
+    return [f"FDFILELIST,,0,0", f"FDEXT,0"]
 
 
 class Log:
@@ -170,9 +192,20 @@ def main():
                     if verb not in log.new_verbs:
                         log.new_verbs.append(verb)
 
-                reply = ANSWERS.get(verb)
-                if reply:
-                    send(reply, f"answering {verb}")
+                # Multi-frame answers first, then the simple table.
+                if verb == "FDNAME":
+                    for r in FDNAME_REPLY:
+                        send(r, "answering FDNAME (as a file)")
+                        time.sleep(0.3)
+                elif verb == "FDFILES":
+                    parts = text.split(" ", 1)
+                    for r in fdfiles_reply(parts[1] if len(parts) > 1 else ""):
+                        send(r, "answering FDFILES")
+                        time.sleep(0.3)
+                else:
+                    reply = ANSWERS.get(verb)
+                    if reply:
+                        send(reply, f"answering {verb}")
 
         # Keep the telemetry flowing, or the adapter may decide we are gone.
         if time.time() - last_stat >= args.stat_secs:
