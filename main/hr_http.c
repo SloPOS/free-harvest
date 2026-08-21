@@ -270,9 +270,19 @@ static esp_err_t h_capture(httpd_req_t *req)
      */
     if (hr_capture_ready() && hr_capture_size() > 0) {
         void *h = hr_capture_open();
+        ESP_LOGI(TAG, "capture download: ready=%d size=%u open=%s",
+                 (int)hr_capture_ready(), (unsigned)hr_capture_size(),
+                 h ? "ok" : "FAILED");
         if (h != NULL) {
             static char buf[1024];
             int n;
+            int first = hr_capture_read(h, buf, sizeof(buf));
+            ESP_LOGI(TAG, "capture download: first read = %d", first);
+            if (first > 0 &&
+                httpd_resp_send_chunk(req, buf, first) != ESP_OK) {
+                hr_capture_close(h);
+                return ESP_FAIL;
+            }
             while ((n = hr_capture_read(h, buf, sizeof(buf))) > 0) {
                 if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
                     hr_capture_close(h);

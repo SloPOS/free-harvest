@@ -57,7 +57,19 @@ ROUTINE = {"STATE", "UNIQUE", "FDNAME", "REQCFG", "STATUS", "WIFIINFO",
 
 # Real frames, captured from the user's own machine. Using genuine values rather
 # than invented ones matters: the app may well sanity-check what it is shown.
-REAL_STAT = ("STAT,6,0,0,0,154,335,3581,0,68,CANDY,4,49,0,0,7,57,3619,0,,")
+# The state we present decides what the APP offers. Presenting a mid-cycle
+# machine gets you end-of-cycle buttons; to capture a START sequence the app has
+# to believe the dryer is idle and ready.
+#
+# All of these are real frames captured from the user's own machine.
+STATES = {
+    "idle":   "STAT,1,0,0,0,69,151637,0,0,38,1,1,Auto,v6.4,,",
+    "prep":   "STAT,17,0,0,0,64,10000,36,0,42,Auto,1,1,0,0,5,0,864,0,",
+    "freeze": "STAT,4,0,0,0,13,10000,3676,0,60,Auto,1,83,0,0,5,0,0,0,",
+    "dry":    "STAT,5,0,0,0,41,452,18300,0,46,Auto,1,34,0,0,5,0,0,0,",
+    "final":  "STAT,6,0,0,0,154,335,3581,0,68,CANDY,4,49,0,0,7,57,3619,0,,",
+}
+REAL_STAT = STATES["idle"]
 REAL_UID = ("UID,3A916C02-11D48E77-00000000-00000000,1,6.4.0,1,0,0,0,0,0,0")
 # The real serial number, read off the machine's data plate.
 REAL_SNM = "SNM,P-STF 2311-03561 BKC,"
@@ -148,7 +160,13 @@ def main():
                     help="idle STAT cadence, matching the real machine")
     ap.add_argument("--reqinfo-secs", type=float, default=30.0,
                     help="how often to poll REQINFO, as the real dryer does")
+    ap.add_argument("--state", default="idle", choices=sorted(STATES),
+                    help="which machine state to present; 'idle' is what makes "
+                         "the app offer START")
     args = ap.parse_args()
+
+    global REAL_STAT
+    REAL_STAT = STATES[args.state]
 
     port = args.port
     if not port:
@@ -216,6 +234,14 @@ def main():
                     continue
                 text = line.decode("ascii", "replace")
                 verb = text.split(" ")[0].strip()
+
+                # Anything outside the known housekeeping set is a candidate
+                # control command - that is the entire point of this session.
+                if verb not in ROUTINE:
+                    log("")
+                    log(f"  >>> {text}")
+                    log(f"  >>> NON-ROUTINE - likely a control command <<<")
+                    log("")
 
                 if verb == "WIFIINFO":
                     d = decode_wifiinfo(text)

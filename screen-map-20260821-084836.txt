@@ -22,3 +22,17 @@
   685.2s   (no telemetry - dryer link down or rebooting; not a screen)
   689.4s   type 1    Idle / Ready
            phase=Ready temp=70F elapsed=0s mode=Auto
+  778.5s   type 2    Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)
+           phase=Starting batch temp=71F elapsed=0s mode=
+  782.7s   (no telemetry - dryer link down or rebooting; not a screen)
+  793.5s   type 2    Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)
+           phase=Starting batch temp=71F elapsed=16s mode=
+  951.5s   (no telemetry - dryer link down or rebooting; not a screen)
+  967.9s   type 1    Idle / Ready
+           phase=Ready temp=71F elapsed=0s mode=Auto
+
+=== screen types observed ===
+  type 1    seen 7x   Idle / Ready
+  type 2    seen 4x   Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)
+
+  saved to screen-map-20260821-084836.txt
