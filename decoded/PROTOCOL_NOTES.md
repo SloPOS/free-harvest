@@ -1,5 +1,62 @@
 # HarvestRight ↔ WiFi Adapter Protocol — Static-Analysis Notes
 
+> ## ⚠️ Corrections from a genuine adapter (2026-08-20)
+>
+> A stock HarvestRight adapter was interrogated over its OTG port. Three things
+> below were **wrong**, and they were wrong in ways that mattered.
+>
+> ### 1. The framing is ASYMMETRIC
+>
+> This document said "ASCII, comma-delimited, CR-terminated" for both
+> directions. Only the dryer→adapter direction is comma-delimited. The
+> adapter→dryer direction is **space-delimited**:
+>
+> ```
+> STATE 1 0
+> UNIQUE lH
+> FDNAME
+> REQCFG
+> WIFIINFO 1 0 "" 0 HR_3cdc75f95aac 0 0 161
+> ```
+>
+> If the dryer tokenised on commas, `STATE 1 0` could never match the verb
+> `STATE`, so its inbound parser must split on whitespace. **Every
+> comma-delimited command we sent therefore arrived as one unrecognised token**
+> and was discarded as "Command not found". Fixed in hr_protocol.c.
+>
+> ### 2. `GOTIT` is not the session gate
+>
+> This document called the GOTIT payload "the session gate" and our firmware
+> answered `REQINFO` with it. The real adapter answers `REQINFO` with
+> **`WIFIINFO`** (0.2 s later, unmistakably a reply). GOTIT was a guess built on
+> a format string, not on observed behaviour.
+>
+> ### 3. `UNIQUE` is live
+>
+> Previously recorded as referenced by the dispatcher but with no handler. The
+> real adapter sends `UNIQUE lH` unprompted at startup, so it is in active use.
+>
+> ### The adapter is a COMPOSITE device (CDC + Mass Storage)
+>
+> Not a correction so much as a large omission. `VID 0x303A / PID 0x4003`, two
+> interfaces:
+>
+> | Interface | Class | Descriptor string |
+> |---|---|---|
+> | MI_00 | `02/02/00` CDC-ACM | `HarvestRightCDC Device` |
+> | MI_02 | `08/06/50` Mass Storage, SCSI bulk-only | `HarvestRightMSC Device` |
+>
+> Ours presents CDC only, as `0x303A/0x4001`. This finally explains the dryer
+> firmware strings that never fit: *"USB thumb drive timed out, continuing to
+> CDC"*, *"Waiting on USB MSC Init thread"*, *"Error in initializing FAT on
+> USB_HMSC"*. The mass-storage volume is how file transfer works — `FDFILELIST`,
+> `FDFILEBLOCK`, `HRWiFi.txt`, `version.txt`, the `1:/esp` paths.
+>
+> The dryer probes MSC *first* and waits for it to time out before starting CDC,
+> which is why the link takes as long as it does to come up.
+
+
+
 Derived from the decoded main-app firmware (`G0641041_mainapp.bin`, Renesas RA / FSP 5.7.0 / FreeRTOS).
 Everything here is from firmware strings + string-table layout. **Field meanings marked "(guess)" need sniffer confirmation.**
 

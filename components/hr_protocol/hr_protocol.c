@@ -141,12 +141,31 @@ void hr_build_begin(hr_builder_t *b, const char *verb)
     }
 }
 
+/*
+ * Field separator for OUTBOUND frames is a SPACE, not a comma.
+ *
+ * The protocol is asymmetric, which we only learned by interrogating a genuine
+ * HarvestRight adapter (2026-08-20). It sends:
+ *
+ *     STATE 1 0
+ *     UNIQUE lH
+ *     WIFIINFO 1 0 "" 0 HR_3cdc75f95aac 0 0 161
+ *
+ * while the dryer's own frames TO us remain comma-delimited (STAT,1,0,0,...),
+ * which is what hr_frame_parse() still splits on.
+ *
+ * This matters more than a cosmetic difference. If the dryer tokenised on
+ * commas, "STATE 1 0" would be a single token and could never match the verb
+ * STATE - so its inbound parser must split on whitespace. Which means every
+ * comma-delimited command we have ever sent, including GOTIT, arrived as one
+ * unrecognised token and was silently discarded ("Command not found = %s").
+ */
 void hr_build_str(hr_builder_t *b, const char *s)
 {
     if (b == NULL) {
         return;
     }
-    build_append(b, ",", 1);
+    build_append(b, " ", 1);
     build_append(b, s ? s : "", s ? strlen(s) : 0);
 }
 

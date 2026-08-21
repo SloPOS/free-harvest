@@ -35,7 +35,7 @@ static void test_acks_reqinfo_with_gotit(void)
     feed(&s, "REQINFO\r", 1000);
 
     CHECK_INT(log.frames, 1);
-    CHECK_STR(log.buf, "GOTIT,HRADAPT1,\r");
+    CHECK_STR(log.buf, "GOTIT HRADAPT1 \r");
 }
 
 static void test_captures_serial_number(void)
@@ -234,7 +234,7 @@ static void test_send_config_transmits_with_args(void)
     hr_session_init(&s, tx_capture, &log);
 
     CHECK(hr_session_send_config(&s, "SETBNAME", "MyBatch"));
-    CHECK_STR(log.buf, "SETBNAME,MyBatch\r");
+    CHECK_STR(log.buf, "SETBNAME MyBatch\r");
 
     log.buf[0] = '\0';
     log.len = 0;

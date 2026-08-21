@@ -22,12 +22,12 @@ static void test_builds_frame_with_mixed_fields(void)
     hr_build_str(&b, "abc");
     hr_build_int(&b, 42);
 
-    CHECK_STR(hr_build_finish(&b, NULL), "STAT,1,abc,42\r");
+    CHECK_STR(hr_build_finish(&b, NULL), "STAT 1 abc 42\r");
 }
 
 static void test_builds_trailing_empty_field(void)
 {
-    /* Mirrors the dryer's own "BATSUM,%d,," - two empty trailing fields. */
+    /* Empty trailing fields still occupy their slot, as spaces. */
     TEST_CASE("builds trailing empty field");
     hr_builder_t b;
     hr_build_begin(&b, "BATSUM");
@@ -35,24 +35,37 @@ static void test_builds_trailing_empty_field(void)
     hr_build_str(&b, "");
     hr_build_str(&b, "");
 
-    CHECK_STR(hr_build_finish(&b, NULL), "BATSUM,3,,\r");
+    CHECK_STR(hr_build_finish(&b, NULL), "BATSUM 3  \r");
 }
 
-static void test_built_frame_round_trips_through_parser(void)
+static void test_outbound_framing_is_not_inbound_framing(void)
 {
-    TEST_CASE("built frame round-trips through parser");
+    /*
+     * The protocol is ASYMMETRIC and this test exists to pin that down.
+     *
+     * A genuine HarvestRight adapter sends space-separated frames
+     * ("STATE 1 0", "UNIQUE lH"), while the dryer sends comma-separated
+     * ones ("STAT,1,0,..."). So a frame we BUILD deliberately does not
+     * parse with hr_frame_parse(), which handles the inbound direction.
+     *
+     * An earlier version of this test asserted a round trip, which looked
+     * reasonable and quietly encoded the wrong assumption: that both
+     * directions share a framing. They do not.
+     */
+    TEST_CASE("outbound framing differs from inbound");
     hr_builder_t b;
     hr_build_begin(&b, "GOTIT");
     hr_build_str(&b, "SN12345");
     hr_build_int(&b, 7);
 
     const char *wire = hr_build_finish(&b, NULL);
+    CHECK_STR(wire, "GOTIT SN12345 7\r");
+
+    /* Parsed as INBOUND it is one comma-free token - verb only. */
     hr_frame_t f;
     CHECK(hr_frame_parse(wire, &f));
-    CHECK_STR(f.verb, "GOTIT");
-    CHECK_INT(f.nfields, 2);
-    CHECK_STR(hr_frame_field(&f, 0), "SN12345");
-    CHECK_INT(hr_frame_field_int(&f, 1, -1), 7);
+    CHECK_STR(f.verb, "GOTIT SN12345 7");
+    CHECK_INT(f.nfields, 0);
 }
 
 static void test_overflow_is_reported_not_truncated(void)
@@ -75,7 +88,7 @@ int main(void)
     test_builds_verb_only_frame();
     test_builds_frame_with_mixed_fields();
     test_builds_trailing_empty_field();
-    test_built_frame_round_trips_through_parser();
+    test_outbound_framing_is_not_inbound_framing();
     test_overflow_is_reported_not_truncated();
     return TEST_REPORT();
 }
