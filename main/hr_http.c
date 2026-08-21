@@ -570,7 +570,7 @@ static esp_err_t h_forget(httpd_req_t *req)
 /*
  * POST /api/cmd  body: verb=REQSTAT
  * Sends a command to the dryer, but ONLY if hr_session_send_safe() accepts it
- * (read-only queries + BEEP/CLICK). The allow-list is enforced in the tested
+ * (read-only queries + BEEP). The allow-list is enforced in the tested
  * session layer; anything else is rejected here with 403.
  */
 /* -------------------------------------------------------------------- */

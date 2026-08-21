@@ -98,7 +98,9 @@ bool hr_session_send_simple(hr_session_t *s, const char *verb);
 
 /*
  * Safety classification for outbound command verbs.
- *   HR_CMD_SAFE   - read-only queries + benign BEEP/CLICK. No state change.
+ *   HR_CMD_SAFE   - read-only queries + BEEP. No state change. CLICK is
+ *                   NOT in this class: it is the control verb the app
+ *                   uses to press on-screen buttons.
  *   HR_CMD_CONFIG - writes config/recipe/date/name. Recoverable, does NOT run
  *                   a cycle (remote cycle-start is not exposed by the firmware).
  *   HR_CMD_UNKNOWN- not allow-listed (incl. hardware verbs DUTY/HCS/SPC and

@@ -180,8 +180,12 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
          * see the note below.
          */
         "GETP", "GETR",
-        /* benign local effects (no state change) */
-        "BEEP", "CLICK",
+        /*
+         * BEEP only. CLICK WAS HERE AND WAS THE CONTROL VERB - see the
+         * note below. BEEP is genuinely inert: it sounds the buzzer and
+         * replies "Thanks for Beeping!".
+         */
+        "BEEP",
     };
     for (size_t i = 0; i < sizeof(safe) / sizeof(safe[0]); i++) {
         if (strcmp(verb, safe[i]) == 0) {
@@ -189,7 +193,28 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
         }
     }
     /*
-     * ADV IS NOT SAFE AND IS NOT CONFIG. It is the control verb.
+     * CLICK IS THE CONTROL VERB. It is not "a benign local effect", which is
+     * what this list called it until 2026-08-21, and it shipped that way in
+     * v0.3.5.
+     *
+     * Captured from the genuine app driving a real machine:
+     *
+     *     CLICK 1 10 54779 175300      <- Start
+     *     CLICK 1  9 54780 175300      <- Custom
+     *     CLICK 1  8 54781 175300      <- Candy
+     *     CLICK 1  3 54782 175300      <- Config
+     *
+     * Fields are <screen> <button> <counter> <session>. Screen 1 is Ready, so
+     * "CLICK 1 10 ..." starts a 24-hour cycle. The counter increments once per
+     * distinct press and is reused across retries, which makes it an
+     * idempotency key rather than a nonce.
+     *
+     * The exposure was real, not theoretical: hr_session_send_config() accepts
+     * HR_CMD_SAFE as well as HR_CMD_CONFIG, and /api/cmd routes there whenever
+     * args are present. So verb=CLICK&args=1,10,... from the web UI's raw
+     * command box would have started a cycle.
+     *
+     * ADV IS ALSO NOT SAFE AND NOT CONFIG.
      *
      * Verified 2026-08-21: sending ADV to an idle machine moved it from Ready
      * (STAT type 1) to "Starting batch" (type 2), acknowledged by NTFY,2. It

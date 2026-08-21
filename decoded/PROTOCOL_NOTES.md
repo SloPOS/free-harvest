@@ -703,3 +703,54 @@ stores this field as `info.serial` and publishes it as `"serial"` in
 - Traffic is overwhelmingly NAKs - 127,283 of 130,976 packets in 21 seconds are
   the host polling an endpoint with nothing to say. The link is near-idle by
   design, which is worth remembering before reading anything into quiet periods.
+
+## CLICK IS THE CONTROL VERB (2026-08-21) — captured from the real app
+
+With the simulator presenting the measured identity, the app connected, offered
+Start / Custom / Candy / Config, and emitted:
+
+    CLICK 1 10 54779 175300      <- Start
+    CLICK 1  9 54780 175300      <- Custom
+    CLICK 1  8 54781 175300      <- Candy
+    CLICK 1  3 54782 175300      <- Config
+
+    CLICK <screen> <button> <counter> <session>
+
+- **screen** - 1 here, matching STAT type 1 (Ready). This is why control is
+  screen-relative: the same button number means different things per screen.
+- **button** - the widget on that screen. Start=10, Custom=9, Candy=8, Config=3.
+- **counter** - increments once per DISTINCT press and is REUSED across retries.
+  The app resent each click 4-6 times when unacknowledged and the counter held
+  steady, so it is an idempotency key, not a nonce.
+- **session** - 175300, constant for the whole session.
+
+The app retries until the machine's state changes to match. That is the
+acknowledgement: not a reply frame, but the next STAT reflecting the new screen.
+A simulator that never changes state makes the app give up gracefully.
+
+### This was a live security hole in v0.3.5
+
+`CLICK` sat in the SAFE allow-list described as a "benign local effect (no state
+change)". It is the opposite. And the exposure was reachable, not theoretical:
+`hr_session_send_config()` accepts `HR_CMD_SAFE` as well as `HR_CMD_CONFIG`, and
+`/api/cmd` routes there whenever args are present, so
+
+    POST /api/cmd  verb=CLICK&args=1,10,54779,175300
+
+from the web UI's raw-command box would have started a 24-hour cycle. Removed
+from the allow-list, from the UI's verb picker, and the unit test now asserts
+`HR_CMD_UNKNOWN`. Verified against the live adapter: CLICK returns
+`{"ok":false,"reason":"not allowed"}` while BEEP still returns ok.
+
+**The lesson generalises.** `CLICK` was classified benign by reading the verb
+name and seeing no obvious handler - the same reasoning that declared `ADV`
+dead and remote control impossible. Verb names are not evidence. Anything not
+demonstrated inert on real hardware should default to excluded.
+
+### Still unknown
+
+- What acknowledges a CLICK, beyond the state change itself.
+- Whether the counter must be monotonic, or merely different from the last.
+- What `session` (175300) is derived from, and whether the dryer validates it.
+- Button IDs for every screen other than Ready. Walking the simulator through
+  states 2-5 with the app connected would enumerate them.

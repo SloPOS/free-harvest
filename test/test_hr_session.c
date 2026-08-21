@@ -157,7 +157,9 @@ static void test_classify_safe_verbs(void)
     CHECK_INT(hr_cmd_classify("REQSYSINF"), HR_CMD_SAFE);
     CHECK_INT(hr_cmd_classify("STATUS"), HR_CMD_SAFE);
     CHECK_INT(hr_cmd_classify("BEEP"), HR_CMD_SAFE);
-    CHECK_INT(hr_cmd_classify("CLICK"), HR_CMD_SAFE);
+    /* CLICK is the control verb - "CLICK 1 10 <n> <s>" presses Start on
+     * the Ready screen. It must never be reachable from the web UI. */
+    CHECK_INT(hr_cmd_classify("CLICK"), HR_CMD_UNKNOWN);
 }
 
 static void test_classify_refuses_dangerous_and_unknown(void)
