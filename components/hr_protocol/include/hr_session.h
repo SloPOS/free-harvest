@@ -133,6 +133,10 @@ bool hr_session_send_safe(hr_session_t *s, const char *verb);
  * nothing, returns false) for UNKNOWN/hardware verbs. The frame sent is
  * "VERB,args\r" (or "VERB\r" when args is empty).
  */
+/* Send an already-formed frame verbatim. For payloads the field
+ * builder would corrupt - see hr_recipe_build(). */
+bool hr_session_send_raw(hr_session_t *s, const char *frame);
+
 bool hr_session_send_config(hr_session_t *s, const char *verb,
                             const char *args);
 

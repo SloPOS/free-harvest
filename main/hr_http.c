@@ -1,5 +1,6 @@
 #include "hr_capture.h"
 #include "hr_control.h"
+#include "hr_recipe.h"
 #include "hr_http.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
@@ -56,11 +57,17 @@ static bool s_tracker_ready;
 /* 30s graph series, owned by main.c and guarded by the shared s_lock. */
 static hr_trend_t *s_trend;
 
+/* Learns how often drying had to be extended - see hr_recipe.h. */
+static hr_dry_tracker_t s_dry = {-1, 0};
+
 void hr_http_set_telemetry(const hr_telemetry_t *t)
 {
     if (t != NULL && t->valid) {
         s_tel = *t;
         s_tel_valid = true;
+        /* Watch the SCREEN rather than our own commands: most
+         * More Dry Time presses happen on the panel by hand. */
+        hr_dry_observe(&s_dry, (int)t->type);
     }
 }
 
@@ -1092,6 +1099,246 @@ static esp_err_t h_control_enable(httpd_req_t *req)
 }
 
 /* -------------------------------------------------------------------- */
+/* Recipes                                                               */
+/* -------------------------------------------------------------------- */
+#define RCP_NVS_NS "hrrcp"
+#define RCP_SLOTS  8
+
+static bool rcp_load(int slot, hr_recipe_t *out)
+{
+    if (slot < 0 || slot >= RCP_SLOTS || out == NULL) {
+        return false;
+    }
+    nvs_handle_t nh;
+    if (nvs_open(RCP_NVS_NS, NVS_READONLY, &nh) != ESP_OK) {
+        return false;
+    }
+    char k[8];
+    snprintf(k, sizeof(k), "r%d", slot);
+    size_t len = sizeof(*out);
+    bool ok = nvs_get_blob(nh, k, out, &len) == ESP_OK && len == sizeof(*out);
+    nvs_close(nh);
+    return ok && out->used;
+}
+
+static bool rcp_store(int slot, const hr_recipe_t *r)
+{
+    if (slot < 0 || slot >= RCP_SLOTS) {
+        return false;
+    }
+    nvs_handle_t nh;
+    if (nvs_open(RCP_NVS_NS, NVS_READWRITE, &nh) != ESP_OK) {
+        return false;
+    }
+    char k[8];
+    snprintf(k, sizeof(k), "r%d", slot);
+    bool ok = true;
+    if (r == NULL) {
+        esp_err_t e = nvs_erase_key(nh, k);
+        ok = (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND);
+    } else {
+        ok = nvs_set_blob(nh, k, r, sizeof(*r)) == ESP_OK;
+    }
+    ok = (nvs_commit(nh) == ESP_OK) && ok;
+    nvs_close(nh);
+    return ok;
+}
+
+static int read_body(httpd_req_t *req, char *buf, size_t cap)
+{
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)cap) {
+        return -1;
+    }
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return -1;
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+    return got;
+}
+
+/* GET /api/recipes */
+static esp_err_t h_recipes(httpd_req_t *req)
+{
+    static char body[2048];
+    size_t at = 0;
+    at += (size_t)snprintf(body + at, sizeof(body) - at,
+                           "{\"extra_dry_s\":%ld,\"slots\":[",
+                           (long)hr_dry_extra_s(&s_dry));
+    bool first = true;
+    for (int i = 0; i < RCP_SLOTS; i++) {
+        hr_recipe_t r;
+        if (!rcp_load(i, &r)) {
+            continue;
+        }
+        char nm[64], nt[400];
+        hr_json_escape(r.name, nm, sizeof(nm));
+        hr_json_escape(r.notes, nt, sizeof(nt));
+        at += (size_t)snprintf(body + at, sizeof(body) - at,
+                               "%s{\"slot\":%d,\"family\":%d,\"name\":\"%s\","
+                               "\"notes\":\"%s\",\"runs\":%lu,\"nnum\":%u,"
+                               "\"suggest_dry_s\":%ld,\"num\":[",
+                               first ? "" : ",", i, (int)r.family, nm, nt,
+                               (unsigned long)r.runs, (unsigned)r.nnum,
+                               (long)hr_recipe_suggested_dry_s(&r, &s_dry));
+        for (uint8_t k = 0; k < r.nnum && at < sizeof(body) - 16; k++) {
+            at += (size_t)snprintf(body + at, sizeof(body) - at, "%s%ld",
+                                   k ? "," : "", (long)r.num[k]);
+        }
+        at += (size_t)snprintf(body + at, sizeof(body) - at, "]}");
+        first = false;
+        if (at > sizeof(body) - 320) {
+            break;
+        }
+    }
+    at += (size_t)snprintf(body + at, sizeof(body) - at, "]}");
+    return send_json(req, body, (int)at);
+}
+
+/* POST /api/recipes/save   slot,family,name,notes,num=csv */
+static esp_err_t h_recipe_save(httpd_req_t *req)
+{
+    char buf[1024];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
+    }
+    char slot_s[8] = {0}, fam_s[8] = {0}, nums[256] = {0};
+    hr_recipe_t r;
+    memset(&r, 0, sizeof(r));
+    httpd_query_key_value(buf, "slot", slot_s, sizeof(slot_s));
+    httpd_query_key_value(buf, "family", fam_s, sizeof(fam_s));
+    httpd_query_key_value(buf, "name", r.name, sizeof(r.name));
+    httpd_query_key_value(buf, "notes", r.notes, sizeof(r.notes));
+    httpd_query_key_value(buf, "num", nums, sizeof(nums));
+    hr_url_decode(r.name);
+    hr_url_decode(r.notes);
+    hr_url_decode(nums);
+
+    int slot = atoi(slot_s);
+    r.family = (hr_family_t)atoi(fam_s);
+    r.used = true;
+
+    /* Keep the run count across an edit - it is the record of what worked. */
+    hr_recipe_t old;
+    if (rcp_load(slot, &old)) {
+        r.runs = old.runs;
+    }
+
+    char *p = nums;
+    r.nnum = 0;
+    while (*p && r.nnum < HR_RECIPE_MAX_NUM) {
+        r.num[r.nnum++] = (int32_t)strtol(p, &p, 10);
+        if (*p == ',') {
+            p++;
+        } else {
+            break;
+        }
+    }
+
+    hr_recipe_err_t e = hr_recipe_validate(&r);
+    if (e != HR_RECIPE_OK) {
+        char out[224];
+        int n = snprintf(out, sizeof(out), "{\"ok\":false,\"reason\":\"%s\"}",
+                         hr_recipe_err_str(e));
+        httpd_resp_set_status(req, "400 Bad Request");
+        ESP_LOGW(TAG, "recipe save refused: %s", hr_recipe_err_str(e));
+        return send_json(req, out, n);
+    }
+    bool ok = rcp_store(slot, &r);
+    ESP_LOGI(TAG, "recipe slot %d saved as %s -> %s", slot, r.name,
+             ok ? "ok" : "FAILED");
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
+}
+
+/* POST /api/recipes/delete   slot */
+static esp_err_t h_recipe_delete(httpd_req_t *req)
+{
+    char buf[64];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    char slot_s[8] = {0};
+    httpd_query_key_value(buf, "slot", slot_s, sizeof(slot_s));
+    bool ok = rcp_store(atoi(slot_s), NULL);
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
+}
+
+/*
+ * POST /api/recipes/send   slot, start=<0|1>, confirm=<0|1>
+ *
+ * With start=1 this begins a batch, so it passes the same gates as a button:
+ * control must be switched on, and starting needs an explicit confirmation.
+ *
+ * Note what is DIFFERENT from a CLICK. A CLICK is screen-relative and can be
+ * validated against live telemetry; a recipe frame is accepted from wherever
+ * the machine happens to be, so there is no equivalent check to make. The
+ * confirmation is the only barrier, which is exactly why it is not optional.
+ */
+static esp_err_t h_recipe_send(httpd_req_t *req)
+{
+    if (!ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
+    char buf[128];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    char slot_s[8] = {0}, start_s[8] = {0}, conf_s[8] = {0};
+    httpd_query_key_value(buf, "slot", slot_s, sizeof(slot_s));
+    httpd_query_key_value(buf, "start", start_s, sizeof(start_s));
+    httpd_query_key_value(buf, "confirm", conf_s, sizeof(conf_s));
+    bool start = (start_s[0] == '1');
+    bool confirmed = (conf_s[0] == '1');
+
+    if (start && !confirmed) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
+    }
+
+    hr_recipe_t r;
+    if (!rcp_load(atoi(slot_s), &r)) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"no recipe\"}");
+    }
+
+    char frame[320];
+    uint32_t seq = ctrl_next_seq();
+    if (hr_recipe_build(&r, start, seq, frame, sizeof(frame)) == 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"recipe failed validation\"}");
+    }
+
+    /*
+     * Sent raw. The payload is one pre-quoted argument; the ordinary field
+     * builder would split it on commas and re-quote the pieces, which the
+     * dryer would read as a different recipe rather than as an error.
+     */
+    LOCK();
+    bool ok = hr_session_send_raw(s_session, frame);
+    UNLOCK();
+    ESP_LOGW(TAG, "recipe %s sent%s: %s", r.name, start ? " WITH START" : "",
+             ok ? "ok" : "failed");
+
+    char out[160];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":%s,\"name\":\"%s\",\"started\":%s}",
+                     ok ? "true" : "false", r.name, start ? "true" : "false");
+    return send_json(req, out, n);
+}
+
+/* -------------------------------------------------------------------- */
 /* Registration                                                          */
 /* -------------------------------------------------------------------- */
 static void reg(const char *uri, httpd_method_t method,
@@ -1156,6 +1403,10 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/events", HTTP_GET, h_events);
     reg("/api/state", HTTP_GET, h_state);
     reg("/api/control", HTTP_POST, h_control);
+    reg("/api/recipes", HTTP_GET, h_recipes);
+    reg("/api/recipes/save", HTTP_POST, h_recipe_save);
+    reg("/api/recipes/delete", HTTP_POST, h_recipe_delete);
+    reg("/api/recipes/send", HTTP_POST, h_recipe_send);
     reg("/api/control/enable", HTTP_POST, h_control_enable);
     reg("/api/history", HTTP_GET, h_history);
     reg("/api/verbs", HTTP_GET, h_verbs);

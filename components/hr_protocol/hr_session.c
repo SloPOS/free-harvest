@@ -283,6 +283,35 @@ bool hr_session_send_safe(hr_session_t *s, const char *verb)
     return hr_session_send_simple(s, verb);
 }
 
+/*
+ * Send a frame that is already fully formed.
+ *
+ * The recipe frames are the reason this exists. Their payload is ONE argument
+ * that is already quoted and comma-separated internally, so putting it through
+ * hr_build_str() - which quotes empty fields and separates on spaces - would
+ * take a valid recipe apart into fields the dryer reads as a different recipe.
+ *
+ * There is no allow-list check here because there is no verb to check: the
+ * caller has already built the frame. Everything reaching this must have been
+ * validated by whatever built it, which for recipes is hr_recipe_build().
+ */
+bool hr_session_send_raw(hr_session_t *s, const char *frame)
+{
+    if (s == NULL || frame == NULL || frame[0] == '\0' || s->tx == NULL) {
+        return false;
+    }
+    size_t len = strlen(frame);
+    if (len + 2 >= HR_MAX_FRAME) {
+        return false;
+    }
+    char buf[HR_MAX_FRAME];
+    memcpy(buf, frame, len);
+    buf[len] = '\r';          /* same terminator every outbound frame uses */
+    s->tx(buf, len + 1, s->tx_user);
+    s->frames_out++;
+    return true;
+}
+
 bool hr_session_send_config(hr_session_t *s, const char *verb, const char *args)
 {
     hr_cmd_class_t cls = hr_cmd_classify(verb);

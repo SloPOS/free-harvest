@@ -1,5 +1,99 @@
 # Changelog
 
+## v0.3.6
+
+Remote control, recipes, and a security fix. **Update over Wi-Fi.**
+
+### Security: CLICK was reachable from the web UI
+
+`CLICK` sat in the SAFE allow-list annotated "benign local effects (no state
+change)". It is the opposite — it is the dryer's control verb, and
+
+```
+POST /api/cmd  verb=CLICK&args=1,10,54779,175300
+```
+
+from the raw-command box would have started a 24-hour cycle. `SETSN` and
+`FDRENAME` were likewise sendable over MQTT while sitting on our own
+"never probe" list. All three are now refused, and the tests assert it by
+exercising the call the UI would really have made rather than merely checking a
+classification.
+
+Anyone running v0.3.5 or earlier on an untrusted network should update.
+
+### New: remote control
+
+The dashboard can now drive the dryer, **off by default** behind a switch in
+Settings → Remote control.
+
+Twelve actions across seven screens, every one captured from the genuine app.
+The browser never names a button number: it posts an action name plus the
+screen it believed it was showing, and the firmware refuses if telemetry
+disagrees. That matters because button numbers are screen-relative — End Batch
+is button 4 on Freezing and button 1 on Drying — so a stale view does not
+mis-fire, it presses something else entirely.
+
+Screens whose buttons have never been captured offer nothing at all rather than
+guesses. Anything that starts, ends or skips part of a cycle asks first, and
+names the cost: "You will lose 18h 04m of progress on this batch."
+
+The settings/diagnostics button is deliberately **not** offered. It stops the
+dryer servicing USB — telemetry went silent for 147 seconds in testing and only
+returned when the panel was dismissed by hand. It is the one control that
+destroys the channel it was sent over, and no confirmation dialog makes
+"someone must now walk to the machine" acceptable.
+
+### New: recipes
+
+Save, recall and send Candy and Custom recipes, stored on the adapter so they
+survive reboots and read the same from every device. Each carries a name, free
+notes, and a run count.
+
+Sending with Start begins a batch immediately.
+
+The adapter also **learns**: if drying had to be extended, it counts the
+extensions and offers to add that time to the recipe. It detects this from the
+screen returning from Complete to Drying, so it works when the button is
+pressed by hand on the panel — which is how it usually happens.
+
+Recipe names are validated against the protocol. The dryer matches verbs by
+substring over the whole line and checks `ADD`, `DIR`, `DEL` and others
+*before* `SENDCANDY`, so a recipe called `ADDED SUGAR` or `RED DIRT` would be
+routed to a different command. Those names are refused. Lowercase is safe and
+accepted — the dryer's compare is case-sensitive.
+
+### Fixed: five HTTP routes silently failed to register
+
+`max_uri_handlers` was 20 against 25 routes. Handlers past the limit failed at
+boot with only a log warning, and whichever fell off the end simply returned
+404.
+
+### Fixed: capture downloads returned an empty file
+
+`stat()` reported 26,359 bytes on a log whose first read returned nothing —
+SPIFFS metadata and data disagreeing on a partition mounted with
+`format_if_mount_failed`, which is how a 270 KB capture silently became 26 KB.
+The OTA reboot never unmounted the filesystem; it now does. The download no
+longer trusts `stat()` either: a file that reads empty falls back to the RAM
+ring and says so, instead of serving a successful download of nothing.
+
+### Also
+
+- `/api/state` reports `uptime_s` and `reset_reason`, so a restart is a reading
+  rather than something you notice by catching a counter going backwards.
+- `/api/state` carries the actions valid on the current screen, so the UI
+  renders from the machine rather than a hardcoded list.
+
+### Known issues
+
+- `reset_reason` reports `panic` after an OTA reboot where a clean restart
+  should report `sw`. The new image boots and runs correctly and the clean
+  unmount protects the filesystem, but the cause is unfound.
+- `SENDCANDY`/`SENDCUSTOM` sent through `/api/cmd` or MQTT are still built by
+  the generic field builder and would be malformed. The recipe endpoints build
+  them correctly; the raw paths do not.
+
+
 ## v0.3.5
 
 Point fix on top of v0.3.4. **Update over Wi-Fi — no cable needed** (assuming

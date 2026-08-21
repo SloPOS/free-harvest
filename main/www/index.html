@@ -213,6 +213,20 @@
   .ctrlbtn.sev2{border-color:#e5484d; color:#e5484d}
   .ctrlbtn:disabled{opacity:.45}
 
+  .rcp{border:1px solid var(--line); border-radius:14px; padding:12px;
+       margin-bottom:10px}
+  .rcp h3{margin:0 0 2px; font-size:15px}
+  .rcp .meta{font-size:12.5px; color:var(--muted); margin-bottom:8px}
+  .rcp .notes{font-size:13px; margin:6px 0 10px; white-space:pre-wrap}
+  .rcprow{display:flex; gap:8px; flex-wrap:wrap}
+  .rcprow button{flex:1; min-width:104px}
+  .rcpfield{display:flex; justify-content:space-between; gap:10px;
+            align-items:center; margin:6px 0}
+  .rcpfield label{font-size:13px; color:var(--muted)}
+  .rcpfield input{width:120px}
+  .suggest{border:1px solid var(--accent); border-radius:12px; padding:10px;
+           margin-bottom:10px; font-size:13px}
+
   /* Confirmation dialog. Its own fixed overlay rather than the Settings view
      machinery, so it behaves identically on phone and desktop. */
   .cfwrap{position:fixed; inset:0; z-index:60; display:flex; align-items:center;
@@ -742,6 +756,37 @@
     </div>
 
     <div class="card">
+      <h2>Recipes</h2>
+      <div id="rcpsuggest"></div>
+      <div id="rcplist"></div>
+      <div id="rcpedit" style="display:none">
+        <div class="rcpfield">
+          <label for="rcpname">Name</label>
+          <input id="rcpname" maxlength="23" placeholder="Strawberries">
+        </div>
+        <div id="rcpfields"></div>
+        <div class="rcpfield" style="display:block">
+          <label for="rcpnotes">Notes</label>
+          <textarea id="rcpnotes" rows="3" maxlength="190" style="width:100%"
+            placeholder="What worked, what to change next time"></textarea>
+        </div>
+        <div class="rcprow">
+          <button type="button" id="rcpsave">Save</button>
+          <button type="button" id="rcpcancel">Cancel</button>
+        </div>
+      </div>
+      <div class="rcprow" id="rcpnewrow">
+        <button type="button" id="rcpnewcandy">New Candy</button>
+        <button type="button" id="rcpnewcustom">New Custom</button>
+      </div>
+      <div class="hint">
+        Saved on the adapter, so they survive a reboot and are the same on
+        every device. Sending a recipe with Start begins a batch immediately -
+        it needs Remote control switched on, and it asks first.
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Remote control</h2>
       <div class="seg" id="ctrlseg">
         <button type="button" data-on="0">Off</button>
@@ -1115,6 +1160,223 @@ function artFor(phase, tempF){
 }
 
 /* ---------- dashboard (phase-gated) ---------- */
+/* ---- Recipes ------------------------------------------------------------
+ *
+ * The adapter stores these, not the browser: they are a record of what worked
+ * on this machine, and that should not live in one phone's local storage.
+ *
+ * Only the fields we have actually decoded are editable. The rest of the
+ * payload is carried through untouched, because a field whose meaning we have
+ * not established is not one to let anyone type into.
+ */
+var FAM_CANDY = 4, FAM_CUSTOM = 5;
+var rcpState = {slots: [], extra_dry_s: 0};
+var rcpDraft = null;
+
+/* index -> [label, kind] per family. kind: "temp" F, "mins" minutes. */
+var RCP_FIELDS = {
+  4: {1:["Tray load temp (F)","temp"], 2:["Prewarm temp (F)","temp"],
+      3:["Dry temp (F)","temp"], 5:["Prewarm time (min)","mins"],
+      6:["Dry time (min)","mins"]},
+  5: {1:["Initial freeze temp (F)","temp"], 2:["Extra freeze time (min)","mins"],
+      3:["Dry temp (F)","temp"]}
+};
+
+/* Defaults are the captured factory payloads, so a new recipe starts from
+   something the machine is known to accept rather than from zeros. */
+var RCP_DEFAULT = {
+  4: [4,70,140,150,160,300,7200,300],
+  5: [5,-10,0,120,7200,500,1,100,54000,0]
+};
+
+function fmtMins(sec){ return Math.round(sec/60); }
+
+async function refreshRecipes(){
+  try{
+    const r = await fetch("/api/recipes");
+    rcpState = await r.json();
+  }catch(e){ return; }
+  renderRecipes();
+}
+
+function renderRecipes(){
+  const list = $("#rcplist"), sug = $("#rcpsuggest");
+  if(!list) return;
+
+  /* Surface the learned extra drying once, above the list - it applies to
+     whichever recipe just ran, and we do not track which that was. */
+  if(rcpState.extra_dry_s > 0){
+    sug.innerHTML = '<div class="suggest">This batch needed <b>' +
+      fmtMins(rcpState.extra_dry_s) + ' minutes</b> of extra drying. ' +
+      'Consider adding it to the recipe you used - the Suggest button on each ' +
+      'recipe below applies it.</div>';
+  } else { sug.innerHTML = ""; }
+
+  list.innerHTML = "";
+  (rcpState.slots||[]).forEach(function(r){
+    const d = document.createElement("div");
+    d.className = "rcp";
+    const fam = r.family === FAM_CANDY ? "Candy" : "Custom";
+    let meta = fam + " \u00b7 " + r.runs + " run" + (r.runs===1?"":"s");
+    const f = RCP_FIELDS[r.family] || {};
+    const bits = [];
+    Object.keys(f).forEach(function(k){
+      const v = r.num[k];
+      if(v === undefined) return;
+      bits.push(f[k][0].replace(/ \(.*/,"") + " " +
+                (f[k][1]==="mins" ? fmtMins(v)+"m" : v+"F"));
+    });
+    d.innerHTML = "<h3></h3><div class='meta'></div>" +
+                  "<div class='notes'></div>" +
+                  "<div class='meta'></div>";
+    d.querySelector("h3").textContent = r.name;
+    d.querySelectorAll(".meta")[0].textContent = meta;
+    d.querySelector(".notes").textContent = r.notes || "";
+    d.querySelectorAll(".meta")[1].textContent = bits.join("  \u00b7  ");
+
+    const row = document.createElement("div");
+    row.className = "rcprow";
+    row.appendChild(rcpBtn("Send", function(){ sendRecipe(r, false); }));
+    const st = rcpBtn("Send + Start", function(){ askStartRecipe(r); });
+    st.className = "ctrlbtn sev2";
+    row.appendChild(st);
+    row.appendChild(rcpBtn("Edit", function(){ editRecipe(r); }));
+    if(rcpState.extra_dry_s > 0 && r.family === FAM_CANDY &&
+       r.suggest_dry_s > (r.num[6]||0)){
+      row.appendChild(rcpBtn("Apply +" + fmtMins(rcpState.extra_dry_s) + "m",
+                             function(){ applySuggestion(r); }));
+    }
+    row.appendChild(rcpBtn("Delete", function(){ deleteRecipe(r); }));
+    d.appendChild(row);
+    list.appendChild(d);
+  });
+  if(!(rcpState.slots||[]).length){
+    list.innerHTML = '<div class="hint">No recipes saved yet.</div>';
+  }
+}
+
+function rcpBtn(label, fn){
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = label; b.onclick = fn;
+  return b;
+}
+
+function firstFreeSlot(){
+  const used = (rcpState.slots||[]).map(function(r){ return r.slot; });
+  for(let i=0;i<8;i++){ if(used.indexOf(i)<0) return i; }
+  return -1;
+}
+
+function editRecipe(r){
+  rcpDraft = {slot:r.slot, family:r.family, name:r.name, notes:r.notes,
+              num:r.num.slice()};
+  showEditor();
+}
+
+function newRecipe(fam){
+  const slot = firstFreeSlot();
+  if(slot < 0){ alert("All 8 recipe slots are in use. Delete one first."); return; }
+  rcpDraft = {slot:slot, family:fam, name:"", notes:"",
+              num:RCP_DEFAULT[fam].slice()};
+  showEditor();
+}
+
+function showEditor(){
+  $("#rcpedit").style.display = "";
+  $("#rcpnewrow").style.display = "none";
+  $("#rcpname").value = rcpDraft.name;
+  $("#rcpnotes").value = rcpDraft.notes;
+  const box = $("#rcpfields");
+  box.innerHTML = "";
+  const f = RCP_FIELDS[rcpDraft.family] || {};
+  Object.keys(f).forEach(function(k){
+    const idx = parseInt(k,10), spec = f[k];
+    const wrap = document.createElement("div");
+    wrap.className = "rcpfield";
+    const lab = document.createElement("label");
+    lab.textContent = spec[0];
+    const inp = document.createElement("input");
+    inp.type = "number";
+    inp.value = spec[1]==="mins" ? fmtMins(rcpDraft.num[idx]) : rcpDraft.num[idx];
+    inp.dataset.idx = idx; inp.dataset.kind = spec[1];
+    wrap.appendChild(lab); wrap.appendChild(inp);
+    box.appendChild(wrap);
+  });
+}
+
+function hideEditor(){
+  $("#rcpedit").style.display = "none";
+  $("#rcpnewrow").style.display = "";
+  rcpDraft = null;
+}
+
+async function saveRecipe(){
+  if(!rcpDraft) return;
+  rcpDraft.name  = $("#rcpname").value.trim();
+  rcpDraft.notes = $("#rcpnotes").value;
+  /* Minutes on screen, seconds on the wire - the dryer takes seconds and
+     reports minutes, and mixing them up is a 60x error nobody notices. */
+  $$("#rcpfields input").forEach(function(inp){
+    const i = parseInt(inp.dataset.idx,10);
+    let v = parseInt(inp.value,10); if(isNaN(v)) v = 0;
+    rcpDraft.num[i] = inp.dataset.kind === "mins" ? v*60 : v;
+  });
+  const body = "slot="+rcpDraft.slot+"&family="+rcpDraft.family+
+               "&name="+encodeURIComponent(rcpDraft.name)+
+               "&notes="+encodeURIComponent(rcpDraft.notes)+
+               "&num="+encodeURIComponent(rcpDraft.num.join(","));
+  try{
+    const r = await fetch("/api/recipes/save",{method:"POST",body:body});
+    const j = await r.json().catch(function(){return {};});
+    if(!j.ok){ alert("Could not save: " + (j.reason || "unknown error")); return; }
+  }catch(e){ alert("Could not reach the adapter."); return; }
+  hideEditor();
+  refreshRecipes();
+}
+
+async function applySuggestion(r){
+  const num = r.num.slice();
+  num[6] = r.suggest_dry_s;
+  const body = "slot="+r.slot+"&family="+r.family+
+               "&name="+encodeURIComponent(r.name)+
+               "&notes="+encodeURIComponent(r.notes)+
+               "&num="+encodeURIComponent(num.join(","));
+  try{
+    await fetch("/api/recipes/save",{method:"POST",body:body});
+  }catch(e){}
+  refreshRecipes();
+}
+
+async function deleteRecipe(r){
+  pendingAction = {recipe:r, del:true};
+  $("#cftitle").textContent = "Delete " + r.name + "?";
+  $("#cfbody").textContent  = "The recipe and its notes are removed from the " +
+    "adapter. This does not affect the dryer or any batch in progress.";
+  $("#cfyes").textContent = "Delete";
+  $("#cfwrap").style.display = "flex";
+}
+
+function askStartRecipe(r){
+  pendingAction = {recipe:r, start:true};
+  $("#cftitle").textContent = "Start " + r.name + " now?";
+  $("#cfbody").textContent  = "This sends the recipe and begins a batch " +
+    "immediately. The dryer will run for roughly a day. Make sure the trays " +
+    "are loaded and the drain valve is shut before confirming.";
+  $("#cfyes").textContent = "Start batch";
+  $("#cfwrap").style.display = "flex";
+}
+
+async function sendRecipe(r, start){
+  try{
+    const body = "slot="+r.slot+"&start="+(start?"1":"0")+
+                 "&confirm="+(start?"1":"0");
+    const resp = await fetch("/api/recipes/send",{method:"POST",body:body});
+    const j = await resp.json().catch(function(){return {};});
+    if(!j.ok){ alert("Could not send: " + (j.reason || "unknown error")); return; }
+  }catch(e){ alert("Could not reach the adapter."); return; }
+  refreshState();
+}
+
 /* ---- Remote control ----------------------------------------------------
  *
  * Every button here comes from st.actions, which the firmware derives from the
@@ -1711,12 +1973,25 @@ $("#cfwrap").addEventListener("click", e=>{ if(e.target.id==="cfwrap") closeConf
 document.addEventListener("keydown", e=>{
   if(e.key==="Escape" && $("#cfwrap").style.display!=="none") closeConfirm();
 });
-$("#cfyes").addEventListener("click", ()=>{
+$("#cfyes").addEventListener("click", async ()=>{
   if(!pendingAction) return;
   const p = pendingAction;
   closeConfirm();
+  if(p.del){
+    try{ await fetch("/api/recipes/delete",{method:"POST",
+                                            body:"slot="+p.recipe.slot}); }catch(e){}
+    refreshRecipes();
+    return;
+  }
+  if(p.start){ sendRecipe(p.recipe, true); return; }
   sendAction(p.act, p.screen, true);
 });
+
+$("#rcpsave").addEventListener("click", saveRecipe);
+$("#rcpcancel").addEventListener("click", hideEditor);
+$("#rcpnewcandy").addEventListener("click", ()=>newRecipe(FAM_CANDY));
+$("#rcpnewcustom").addEventListener("click", ()=>newRecipe(FAM_CUSTOM));
+refreshRecipes();
 
 /* ---------- trend chart ----------
    Hand-rolled inline SVG. No charting library: the page is served from the
