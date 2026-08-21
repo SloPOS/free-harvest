@@ -204,6 +204,27 @@
   .field input:focus,.field select:focus{outline:2px solid var(--accent); outline-offset:0}
   .hint{font-size:12.5px; color:var(--muted); margin-top:8px; line-height:1.5}
 
+  /* Remote control. Buttons are colour-coded by consequence, not by looks:
+     a destructive action must never be one careless tap from a benign one. */
+  .ctrlgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+            gap:10px; margin-top:4px}
+  .ctrlbtn{font-weight:600}
+  .ctrlbtn.sev1{border-color:var(--accent); color:var(--accent)}
+  .ctrlbtn.sev2{border-color:#e5484d; color:#e5484d}
+  .ctrlbtn:disabled{opacity:.45}
+
+  /* Confirmation dialog. Its own fixed overlay rather than the Settings view
+     machinery, so it behaves identically on phone and desktop. */
+  .cfwrap{position:fixed; inset:0; z-index:60; display:flex; align-items:center;
+          justify-content:center; padding:20px; background:rgba(0,0,0,.55)}
+  .cfcard{background:var(--surface); border:1px solid var(--line);
+          border-radius:18px; padding:22px; max-width:420px; width:100%;
+          box-shadow:0 18px 50px rgba(0,0,0,.35)}
+  .cfcard h2{margin:0 0 10px}
+  .cfrow{display:flex; gap:10px; margin-top:18px}
+  .cfrow button{flex:1}
+  .cfyes{border-color:#e5484d; color:#e5484d; font-weight:700}
+
   /* status pills / notices */
   .pill{display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px;
     font-weight:650; background:var(--surface2); color:var(--muted)}
@@ -386,6 +407,17 @@
                transition:width .4s ease"></div>
         </div>
       </div>
+    </div>
+
+    <!-- Remote control.
+         Rendered entirely from /api/state's action list, which the firmware
+         builds from the screen the dryer is ACTUALLY showing. A screen we have
+         never captured therefore offers nothing at all, rather than buttons
+         guessed from a stale assumption. -->
+    <div class="card" id="ctrlcard" style="display:none">
+      <h2>Controls</h2>
+      <div class="ctrlgrid" id="ctrlbtns"></div>
+      <div class="hint" id="ctrlhint"></div>
     </div>
 
     <!-- temperature/pressure trend for the current run -->
@@ -710,6 +742,20 @@
     </div>
 
     <div class="card">
+      <h2>Remote control</h2>
+      <div class="seg" id="ctrlseg">
+        <button type="button" data-on="0">Off</button>
+        <button type="button" data-on="1">On</button>
+      </div>
+      <div class="hint">
+        Off by default. With this on, the dashboard shows the buttons the dryer
+        is currently offering and can press them. Anything that starts, ends or
+        skips part of a cycle asks first. Monitoring works either way, so leave
+        it off unless you want the adapter able to drive the machine.
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Adapter</h2>
       <div class="metrics">
         <div class="metric"><div class="k">Frames in</div><div class="v" id="d-in">0</div></div>
@@ -725,6 +771,18 @@
 
 <!-- scrolling pressure facts, docked directly above the tab bar -->
 <div class="facts"><div class="track" id="facts"></div></div>
+
+<!-- Confirmation for anything that starts, ends or skips part of a cycle. -->
+<div class="cfwrap" id="cfwrap" style="display:none" role="dialog" aria-modal="true">
+  <div class="cfcard">
+    <h2 id="cftitle">Confirm</h2>
+    <div id="cfbody"></div>
+    <div class="cfrow">
+      <button id="cfno" type="button">Cancel</button>
+      <button id="cfyes" type="button" class="cfyes">Confirm</button>
+    </div>
+  </div>
+</div>
 
 <!-- Backdrop for the desktop Settings modal. -->
 <div id="scrim"></div>
@@ -1057,6 +1115,123 @@ function artFor(phase, tempF){
 }
 
 /* ---------- dashboard (phase-gated) ---------- */
+/* ---- Remote control ----------------------------------------------------
+ *
+ * Every button here comes from st.actions, which the firmware derives from the
+ * screen the dryer is actually showing. The browser never names a button
+ * number, and never decides what is available - if we have not captured a
+ * screen, the list is empty and the card hides itself.
+ */
+var SEV_BENIGN=0, SEV_CONFIRM=1, SEV_DESTRUCTIVE=2;
+var pendingAction=null;
+
+/* Say what will actually happen, with the cost attached. "Are you sure?" gives
+   the reader nothing to reason about; "18h 04m of drying will be lost" does. */
+function consequenceOf(act, st){
+  var elapsed = st.elapsed_s|0;
+  var lost = elapsed>0 ? (" You will lose " + fmtDur(elapsed) +
+                          " of progress on this batch.") : "";
+  if(/_end$/.test(act.name)){
+    return "This ends the batch now and the dryer will begin warming up." + lost +
+           " It cannot be resumed.";
+  }
+  if(/_advance$/.test(act.name)){
+    return "This skips the rest of the current stage and moves the batch " +
+           "straight to the next one. The dryer asked for this stage as part " +
+           "of the recipe, and skipping it can leave food under-processed. " +
+           "It cannot be undone.";
+  }
+  if(/^start_/.test(act.name)){
+    return "This starts a new batch. The dryer will run for roughly a day " +
+           "and the compressor will begin its pre-cool.";
+  }
+  if(act.name==="final_less"){
+    return "This shortens final drying. Stopping short risks moisture left " +
+           "in the food, which affects how long it keeps.";
+  }
+  return "This will press " + act.label + " on the dryer.";
+}
+
+function fmtDur(sec){
+  var h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60);
+  return h>0 ? (h+"h "+String(m).padStart(2,"0")+"m") : (m+"m");
+}
+
+function paintControls(st){
+  var card=$("#ctrlcard"), box=$("#ctrlbtns"), hint=$("#ctrlhint");
+  if(!card) return;
+  /* Keep the Settings toggle showing the DEVICE's state, not the
+     browser's guess - the flag lives in NVS and survives reboots. */
+  $$("#ctrlseg button").forEach(function(b){
+    b.classList.toggle("on", (b.dataset.on==="1")===!!st.control);
+  });
+  var acts = st.actions || [];
+
+  if(!st.control){ card.style.display="none"; return; }
+  if(st.link!=="up" || !st.have_tel){
+    card.style.display="";
+    box.innerHTML="";
+    hint.textContent="Waiting for the dryer. Controls appear once the adapter "+
+                     "can see which screen the machine is on.";
+    return;
+  }
+  if(!acts.length){
+    card.style.display="";
+    box.innerHTML="";
+    hint.textContent="No controls for this screen. The dryer is on a screen "+
+                     "whose buttons have not been mapped, so nothing is offered "+
+                     "rather than guessed.";
+    return;
+  }
+
+  card.style.display="";
+  hint.textContent="";
+  box.innerHTML="";
+  acts.forEach(function(a){
+    var b=document.createElement("button");
+    b.type="button";
+    b.className="ctrlbtn sev"+a.sev;
+    b.textContent=a.label;
+    b.onclick=function(){ askThen(a, st); };
+    box.appendChild(b);
+  });
+}
+
+function askThen(act, st){
+  if(act.sev===SEV_BENIGN){ sendAction(act, st.stat_type, false); return; }
+  pendingAction={act:act, screen:st.stat_type};
+  $("#cftitle").textContent = act.label + "?";
+  $("#cfbody").textContent  = consequenceOf(act, st);
+  $("#cfyes").textContent   = act.label;
+  $("#cfwrap").style.display="flex";
+}
+
+function closeConfirm(){ $("#cfwrap").style.display="none"; pendingAction=null; }
+
+async function sendAction(act, screen, confirmed){
+  try{
+    var body="action="+encodeURIComponent(act.name)+
+             "&screen="+encodeURIComponent(screen)+
+             "&confirm="+(confirmed?"1":"0");
+    var r=await fetch("/api/control",{method:"POST",body:body});
+    var j=await r.json().catch(function(){return {};});
+    if(r.ok && j.ok){
+      $("#ctrlhint").textContent="Sent "+act.label+". Watching for the dryer "+
+                                 "to change screen…";
+      refreshState();
+      return;
+    }
+    /* 409 means the machine moved while the user was deciding. Re-read rather
+       than retrying blind: the button they picked may address something else
+       on the new screen. */
+    $("#ctrlhint").textContent = (j.reason||"Refused")+
+      (j.live_screen!==undefined ? " (dryer is on screen "+j.live_screen+")" : "");
+    refreshState();
+  }catch(e){
+    $("#ctrlhint").textContent="Could not reach the adapter.";
+  }
+}
+
 function paintDash(st){
   const linked = st.link === "up";
   const have   = st.have_tel;
@@ -1291,6 +1466,7 @@ async function refreshState(){
     document.body.style.paddingBottom = done
       ? "" : "calc(76px + env(safe-area-inset-bottom))";
     paintDash(st);
+    paintControls(st);
   }catch(e){}
 }
 
@@ -1515,6 +1691,32 @@ $$("#themeseg button").forEach(b=>b.addEventListener("click",()=>{
   localStorage.setItem("fh-theme", b.dataset.theme);
   applyTheme(b.dataset.theme);
 }));
+
+/* Remote-control master switch. A two-state segmented control rather than a
+   checkbox, so the current state is readable without interpreting a tick and
+   turning it ON is a positive act. */
+$$("#ctrlseg button").forEach(b=>b.addEventListener("click", async ()=>{
+  const on = b.dataset.on === "1";
+  try{
+    await fetch("/api/control/enable",{method:"POST",body:"on="+(on?"1":"0")});
+  }catch(e){}
+  refreshState();
+}));
+
+/* Confirmation dialog. Cancel, the backdrop and Escape all dismiss; only the
+   explicit confirm button sends, and it sends confirm=1 which the firmware
+   requires independently - the dialog is not the only gate. */
+$("#cfno").addEventListener("click", closeConfirm);
+$("#cfwrap").addEventListener("click", e=>{ if(e.target.id==="cfwrap") closeConfirm(); });
+document.addEventListener("keydown", e=>{
+  if(e.key==="Escape" && $("#cfwrap").style.display!=="none") closeConfirm();
+});
+$("#cfyes").addEventListener("click", ()=>{
+  if(!pendingAction) return;
+  const p = pendingAction;
+  closeConfirm();
+  sendAction(p.act, p.screen, true);
+});
 
 /* ---------- trend chart ----------
    Hand-rolled inline SVG. No charting library: the page is served from the

@@ -1,4 +1,5 @@
 #include "hr_capture.h"
+#include "hr_control.h"
 #include "hr_http.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
@@ -10,6 +11,7 @@
 #include "esp_app_desc.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -143,6 +145,10 @@ static const char *reset_reason_str(void)
     }
 }
 
+/* Defined with the rest of the control code further down; /api/state needs
+ * it here to report whether control is switched on. */
+static bool ctrl_enabled(void);
+
 static esp_err_t h_state(httpd_req_t *req)
 {
     char ip[16], ssid[33], serial[64], uid[128];
@@ -167,7 +173,32 @@ static esp_err_t h_state(httpd_req_t *req)
     char mode_esc[32];
     hr_json_escape(s_tel_valid ? s_tel.mode : "", mode_esc, sizeof(mode_esc));
 
-    char body[1000];
+    /*
+     * The actions the machine is offering RIGHT NOW. The UI renders from this
+     * rather than from a hardcoded list, so a screen we have never captured
+     * shows no buttons at all instead of guessed ones.
+     */
+    char acts[384];
+    size_t ai = 0;
+    acts[ai++] = '[';
+    const hr_action_t *av[8];
+    size_t an = hr_control_for_screen(s_tel_valid ? (int)s_tel.type : -1, av, 8);
+    for (size_t i = 0; i < an; i++) {
+        int w = snprintf(acts + ai, sizeof(acts) - ai,
+                         "%s{\"name\":\"%s\",\"label\":\"%s\",\"sev\":%d}",
+                         i ? "," : "", av[i]->name, av[i]->label,
+                         (int)av[i]->sev);
+        if (w < 0 || (size_t)w >= sizeof(acts) - ai) {
+            break;
+        }
+        ai += (size_t)w;
+    }
+    if (ai < sizeof(acts) - 1) {
+        acts[ai++] = ']';
+    }
+    acts[ai] = '\0';
+
+    char body[1500];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
@@ -186,6 +217,7 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"usb_mounted\":%s,\"usb_suspended\":%s,"
                      "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
                      "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
+                     "\"control\":%s,\"actions\":%s,"
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
@@ -207,7 +239,8 @@ static esp_err_t h_state(httpd_req_t *req)
                      hr_usb_suspended() ? "true" : "false",
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      (unsigned long)(esp_timer_get_time() / 1000000),
-                     reset_reason_str());
+                     reset_reason_str(), ctrl_enabled() ? "true" : "false",
+                     acts);
     return send_json(req, body, n);
 }
 
@@ -855,6 +888,194 @@ static esp_err_t h_redirect(httpd_req_t *req)
 }
 
 /* -------------------------------------------------------------------- */
+/* Control                                                               */
+/* -------------------------------------------------------------------- */
+#define CTRL_NVS_NS      "hrctrl"
+
+/*
+ * The trailing CLICK field. Captured as 175300 in every session over three
+ * days, with counters in the 26k, 48k and 49k ranges, so it is a fixed
+ * protocol constant and not a session token.
+ */
+#define HR_CLICK_SESSION 175300u
+
+/*
+ * Where our command counter starts.
+ *
+ * Retries from the real app reuse the same counter, so the dryer most likely
+ * ignores a repeat of the last value rather than requiring strict monotonicity.
+ * But that is inference, not measurement. Starting above every counter ever
+ * observed (max 49060) is safe under BOTH readings: distinct from the last
+ * value, and greater than it. Cheap insurance against a hypothesis we have not
+ * tested.
+ */
+#define HR_SEQ_START     100000u
+
+static bool ctrl_enabled(void)
+{
+    nvs_handle_t nh;
+    if (nvs_open(CTRL_NVS_NS, NVS_READONLY, &nh) != ESP_OK) {
+        return false; /* absent config means OFF, never on */
+    }
+    uint8_t v = 0;
+    nvs_get_u8(nh, "on", &v);
+    nvs_close(nh);
+    return v != 0;
+}
+
+static bool ctrl_set_enabled(bool on)
+{
+    nvs_handle_t nh;
+    if (nvs_open(CTRL_NVS_NS, NVS_READWRITE, &nh) != ESP_OK) {
+        return false;
+    }
+    bool ok = nvs_set_u8(nh, "on", on ? 1 : 0) == ESP_OK &&
+              nvs_commit(nh) == ESP_OK;
+    nvs_close(nh);
+    return ok;
+}
+
+/*
+ * Next counter value, persisted so it does not restart after a reboot and
+ * collide with values the dryer has already seen this power cycle.
+ */
+static uint32_t ctrl_next_seq(void)
+{
+    nvs_handle_t nh;
+    uint32_t seq = HR_SEQ_START;
+    if (nvs_open(CTRL_NVS_NS, NVS_READWRITE, &nh) == ESP_OK) {
+        if (nvs_get_u32(nh, "seq", &seq) != ESP_OK) {
+            seq = HR_SEQ_START;
+        }
+        seq++;
+        nvs_set_u32(nh, "seq", seq);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+    return seq;
+}
+
+/* The screen currently on the panel, or -1 when we genuinely do not know. */
+static int live_screen(void)
+{
+    return s_tel_valid ? (int)s_tel.type : -1;
+}
+
+/*
+ * POST /api/control   action=<name>&screen=<believed>&confirm=<0|1>
+ *
+ * Never takes a button number. The caller names an action and states which
+ * screen it was looking at; hr_control_check() refuses if the machine has moved
+ * on, because button numbers mean different things on different screens - End
+ * Batch is button 4 on Freezing and button 1 on Drying.
+ */
+static esp_err_t h_control(httpd_req_t *req)
+{
+    if (!ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
+
+    char buf[256];
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)sizeof(buf)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
+    }
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+
+    char action[32] = {0}, screen_s[8] = {0}, confirm_s[8] = {0};
+    httpd_query_key_value(buf, "action", action, sizeof(action));
+    httpd_query_key_value(buf, "screen", screen_s, sizeof(screen_s));
+    httpd_query_key_value(buf, "confirm", confirm_s, sizeof(confirm_s));
+    hr_url_decode(action);
+
+    int believed = screen_s[0] ? atoi(screen_s) : -1;
+    bool confirmed = (confirm_s[0] == '1');
+
+    LOCK();
+    int live = live_screen();
+    UNLOCK();
+
+    const hr_action_t *a = NULL;
+    hr_ctrl_result_t r = hr_control_check(action, believed, live, confirmed, &a);
+    if (r != HR_CTRL_OK) {
+        char body[192];
+        int n = snprintf(body, sizeof(body),
+                         "{\"ok\":false,\"reason\":\"%s\",\"live_screen\":%d}",
+                         hr_ctrl_result_str(r), live);
+        /* A stale view or a missing confirmation is the caller's to resolve, so
+         * 409 rather than 400 - it tells the UI to re-read and ask again. */
+        httpd_resp_set_status(req, (r == HR_CTRL_STALE_VIEW ||
+                                    r == HR_CTRL_NEEDS_CONFIRM)
+                                       ? "409 Conflict" : "400 Bad Request");
+        ESP_LOGW(TAG, "control %s refused: %s (believed %d, live %d)",
+                 action, hr_ctrl_result_str(r), believed, live);
+        return send_json(req, body, n);
+    }
+
+    /* One counter per press. Taken once - calling ctrl_next_seq() twice would
+     * burn a value and, worse, send a different number than we logged. */
+    uint32_t seq = ctrl_next_seq();
+
+    LOCK();
+    hr_builder_t b;
+    hr_build_begin(&b, "CLICK");
+    hr_build_int(&b, a->screen);
+    hr_build_int(&b, a->button);
+    hr_build_int(&b, (long)seq);
+    hr_build_int(&b, (long)HR_CLICK_SESSION);
+    bool ok = hr_session_send(s_session, &b);
+    UNLOCK();
+
+    ESP_LOGI(TAG, "control %s -> CLICK %d %d %lu %lu : %s", a->name, a->screen,
+             a->button, (unsigned long)seq, (unsigned long)HR_CLICK_SESSION,
+             ok ? "sent" : "failed");
+
+    char body[160];
+    int n = snprintf(body, sizeof(body),
+                     "{\"ok\":%s,\"action\":\"%s\",\"screen\":%d,\"button\":%d}",
+                     ok ? "true" : "false", a->name, a->screen, a->button);
+    return send_json(req, body, n);
+}
+
+/* POST /api/control/enable   on=<0|1> */
+static esp_err_t h_control_enable(httpd_req_t *req)
+{
+    char buf[64];
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)sizeof(buf)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+    char on_s[8] = {0};
+    httpd_query_key_value(buf, "on", on_s, sizeof(on_s));
+    bool on = (on_s[0] == '1');
+    bool ok = ctrl_set_enabled(on);
+    ESP_LOGW(TAG, "remote control %s", on ? "ENABLED" : "disabled");
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
+}
+
+/* -------------------------------------------------------------------- */
 /* Registration                                                          */
 /* -------------------------------------------------------------------- */
 static void reg(const char *uri, httpd_method_t method,
@@ -911,6 +1132,8 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/", HTTP_GET, h_root);
     reg("/events", HTTP_GET, h_events);
     reg("/api/state", HTTP_GET, h_state);
+    reg("/api/control", HTTP_POST, h_control);
+    reg("/api/control/enable", HTTP_POST, h_control_enable);
     reg("/api/history", HTTP_GET, h_history);
     reg("/api/verbs", HTTP_GET, h_verbs);
     reg("/api/capture", HTTP_GET, h_capture);
