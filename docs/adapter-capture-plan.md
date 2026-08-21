@@ -52,6 +52,35 @@ python tools/interrogate_adapter.py COM12 --listen
 interface rather than CDC, or may not power up without the dryer. That itself is
 a finding — note the VID/PID from Device Manager and move to step 2.
 
+## If you can only reach the OTG connector
+
+That is the connector that matters. **OTG is the adapter's USB *device* port —
+the one that plugs into the dryer** — so a PC standing in as host reaches
+exactly the interface we care about. Step 1 works unmodified.
+
+What the case costs you is only step 2: entering the ROM bootloader normally
+needs the BOOT button held at reset. `flash-id` is still worth one attempt (it
+is read-only and costs a minute), but expect it to fail.
+
+That is a smaller loss than it sounds. The firmware dump was a route to
+understanding the protocol; step 1 observes the protocol **directly**, which is
+better evidence than inferring it from disassembly.
+
+For a unit going back, run everything in one pass:
+
+```
+powershell -ExecutionPolicy Bypass -File tools\capture_stock_adapter.ps1
+```
+
+Every step is read-only — no `write-flash`, no case opening, nothing that leaves
+the device changed. It records USB identity, serial ports, the full protocol
+interrogation, and attempts `flash-id`, into one timestamped folder.
+
+**Capture the USB identity even if the protocol turns out to be
+identity-agnostic.** VID/PID and the descriptor strings are unobtainable once
+the hardware is gone, and if the dryer ever does validate who it is talking to,
+those are the values our firmware would need to present.
+
 ## Step 2 — Dump its firmware
 
 The adapter is an ESP32 (the stock unit uses a YD-ESP32-23 board), so its flash

@@ -94,6 +94,39 @@ class Transcript:
         self.f.close()
 
 
+def describe_device(port, tr):
+    """
+    Record the adapter's USB identity.
+
+    Worth capturing even if the protocol turns out to be identity-agnostic: if
+    the dryer ever DOES validate who it is talking to, these are the values our
+    firmware would have to present, and they are unobtainable once the hardware
+    goes back.
+    """
+    for p in list_ports.comports():
+        if p.device != port:
+            continue
+        tr.note("")
+        tr.note("== USB identity ==")
+        for label, val in [
+            ("vid", f"{p.vid:#06x}" if p.vid else None),
+            ("pid", f"{p.pid:#06x}" if p.pid else None),
+            ("manufacturer", p.manufacturer),
+            ("product", p.product),
+            ("serial_number", p.serial_number),
+            ("description", p.description),
+            ("hwid", p.hwid),
+            ("location", p.location),
+            ("interface", p.interface),
+        ]:
+            tr.note(f"   {label:14} {val}")
+        tr.note("")
+        tr.note("   Ours for comparison: vid 0x303a pid 0x4001 "
+                "(Espressif TinyUSB defaults)")
+        return
+    tr.note(f"   (no port metadata found for {port})")
+
+
 def find_port(explicit):
     if explicit:
         return explicit
@@ -154,6 +187,7 @@ def main():
     tr = Transcript(f"adapter-transcript-{stamp}.txt")
     tr.note(f"# HarvestRight adapter interrogation, port {port}")
     tr.note("# Frames are ASCII, comma-delimited, CR-terminated.")
+    describe_device(port, tr)
 
     try:
         with serial.Serial(port, args.baud, timeout=0.2) as ser:
