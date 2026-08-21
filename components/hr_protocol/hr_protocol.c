@@ -166,7 +166,25 @@ void hr_build_str(hr_builder_t *b, const char *s)
         return;
     }
     build_append(b, " ", 1);
-    build_append(b, s ? s : "", s ? strlen(s) : 0);
+    /*
+     * An EMPTY field must be written as "" - two quote characters - not as
+     * nothing.
+     *
+     * With a space separator, an empty field would otherwise collapse into a
+     * run of spaces and silently vanish, shifting every field after it by one
+     * position. The genuine adapter shows the convention directly:
+     *
+     *     WIFIINFO 1 0 "" 0 HR_3cdc75f95aac 0 0 347
+     *                  ^^ empty SSID, quoted
+     *
+     * This never came up with comma separators, where an empty field is just
+     * two adjacent commas.
+     */
+    if (s == NULL || s[0] == '\0') {
+        build_append(b, "\"\"", 2);
+        return;
+    }
+    build_append(b, s, strlen(s));
 }
 
 void hr_build_int(hr_builder_t *b, long v)

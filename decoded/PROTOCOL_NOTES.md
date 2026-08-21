@@ -54,6 +54,44 @@
 >
 > The dryer probes MSC *first* and waits for it to time out before starting CDC,
 > which is why the link takes as long as it does to come up.
+>
+> ### Live probing results (2026-08-21)
+>
+> Driving the adapter with dryer-side frames settled several more points.
+>
+> **Its inbound parser is COMMA-delimited.** Replying `CFG,1,1,0,0,Auto,v6.4`
+> made it *stop asking* `REQCFG` — 3 requests in 45 s before, 0 after. The same
+> reply space-delimited caused it to **reset** (USB dropped, then `REQCFG`
+> resumed). So the asymmetry is real and strict in both directions:
+> dryer→adapter commas, adapter→dryer spaces.
+>
+> **Empty fields are quoted.** `WIFIINFO 1 0 "" 0 HR_... 0 0 347` — with a space
+> separator an unquoted empty field would collapse into the whitespace and shift
+> every later field by one. hr_build_str() now emits `""`.
+>
+> **It polls on a ~15 s cycle**, repeating `STATE 1 0` / `UNIQUE lH` / `FDNAME` /
+> `REQCFG` until answered. It is reactive otherwise — silent unless spoken to.
+>
+> **`STATUS`** is sent once when the host asserts DTR. Not previously observed.
+>
+> **`UNIQUE lH`** is stable across power cycles, so it is an identifier rather
+> than a nonce or challenge.
+>
+> **`WIFIINFO`'s last field is a counter**, not a channel: 161 in one session,
+> 347 in another. Consistent with seconds since boot.
+>
+> **`FDNAME,<name>` was NOT accepted** — it kept asking. The reply shape for that
+> one is still unknown.
+>
+> ### The MSC volume carries the update payload
+>
+> Its filesystem holds `esp/version.txt` plus the dryer firmware images
+> (`.h6r`, `.b6r`, `.hfs`, `.hft`). So mass storage is how updates physically
+> reach the machine.
+>
+> `esp/version.txt` reads `HR_3cdc75f95aac,v1.1.2,1,0/0` — AP name (matching the
+> `WIFIINFO` field), adapter firmware version, then two unknown fields.
+> Comma-delimited, like everything the dryer reads.
 
 
 

@@ -35,7 +35,7 @@ static void test_acks_reqinfo_with_gotit(void)
     feed(&s, "REQINFO\r", 1000);
 
     CHECK_INT(log.frames, 1);
-    CHECK_STR(log.buf, "GOTIT HRADAPT1 \r");
+    CHECK_STR(log.buf, "GOTIT HRADAPT1 \"\"\r");
 }
 
 static void test_captures_serial_number(void)

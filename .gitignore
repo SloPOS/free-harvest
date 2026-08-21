@@ -40,3 +40,7 @@ Thumbs.db
 # machine's serial number and UID. Force-add deliberately if a capture is worth
 # sharing, after checking what is in it.
 adapter-transcript-*.txt
+
+# Backup of the stock adapter's USB volume: vendor firmware plus device
+# identifiers (MAC). Analysis notes are fine in the repo; this is not.
+/drive backup/

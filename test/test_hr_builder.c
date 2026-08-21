@@ -35,7 +35,7 @@ static void test_builds_trailing_empty_field(void)
     hr_build_str(&b, "");
     hr_build_str(&b, "");
 
-    CHECK_STR(hr_build_finish(&b, NULL), "BATSUM 3  \r");
+    CHECK_STR(hr_build_finish(&b, NULL), "BATSUM 3 \"\" \"\"\r");
 }
 
 static void test_outbound_framing_is_not_inbound_framing(void)
