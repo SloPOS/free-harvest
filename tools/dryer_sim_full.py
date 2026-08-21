@@ -102,6 +102,27 @@ FDNAME_REPLY = [
 FDFILES_ANSWER = []
 
 
+# WIFIINFO field map, worked out by watching fields change against known state.
+#
+#   WIFIINFO <f1> <f2> <ssid> <f4> <ap-name> <f6> <f7> <uptime>
+#
+# f6 flipped 0 -> 1 the moment FDNAME and REQCFG were both satisfied, and stayed
+# there: that is the dryer-connected flag, and the thing the LED reflects.
+# f2/ssid stay 0/"" until the adapter is provisioned to a network.
+# The last field counts up ~1/sec and resets on reboot - seconds since boot.
+def decode_wifiinfo(text):
+    p = text.split(" ")
+    if len(p) < 9:
+        return None
+    return {
+        "wifi_connected": p[2],
+        "ssid": p[3],
+        "ap_name": p[5],
+        "dryer_connected": p[6],
+        "uptime_s": p[8],
+    }
+
+
 class Log:
     def __init__(self, path):
         self.f = open(path, "w", encoding="utf-8")
@@ -166,6 +187,7 @@ def main():
     last_stat = time.time()
     last_reqinfo = 0.0
     last_state = None          # watch for STATE's fields changing
+    last_wifi = None           # watch the dryer-connected / provisioning flags
     deadline = time.time() + args.minutes * 60
 
     while time.time() < deadline:
@@ -194,7 +216,21 @@ def main():
                 text = line.decode("ascii", "replace")
                 verb = text.split(" ")[0].strip()
 
-                if verb == "STATE":
+                if verb == "WIFIINFO":
+                    d = decode_wifiinfo(text)
+                    if d and d != last_wifi:
+                        log(f"<- {text}")
+                        log(f"   dryer_connected={d['dryer_connected']}  "
+                            f"wifi={d['wifi_connected']}  ssid={d['ssid']}  "
+                            f"ap={d['ap_name']}")
+                        if last_wifi and d["dryer_connected"] != last_wifi["dryer_connected"]:
+                            log(f"   *** DRYER-CONNECTED FLAG "
+                                f"{last_wifi['dryer_connected']} -> "
+                                f"{d['dryer_connected']} ***")
+                        if last_wifi and d["ssid"] != last_wifi["ssid"]:
+                            log(f"   *** SSID NOW {d['ssid']!r} - provisioned ***")
+                        last_wifi = d
+                elif verb == "STATE":
                     if text != last_state:
                         if last_state is not None:
                             log(f"<- {text}    *** STATE CHANGED (was "
