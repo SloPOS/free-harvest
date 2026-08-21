@@ -86,7 +86,7 @@ REAL_SNM = "SNM,P-STF 2311-03561 BKC,"
 # STATE/UNIQUE every ~15s, which is what a satisfied adapter looks like.
 ANSWERS = {
     "REQCFG":     "CFG,1,1,0,0,Auto,v6.4",
-    "REQSTAT":    REAL_STAT,
+    # REQSTAT is resolved at send time, not here - see reply_for().
     "REQSYSINF":  "SYSINF,HarvestRight Pro",
     "REQPREF":    "SYSPREF,0",
     "REQBATSUM":  "BATSUM,0,",
@@ -124,14 +124,35 @@ FDFILES_ANSWER = []
 # f2/ssid stay 0/"" until the adapter is provisioned to a network.
 # The last field counts up ~1/sec and resets on reboot - seconds since boot.
 def decode_wifiinfo(text):
+    """
+    WIFIINFO <link> <rssi> <ssid> <registered> <ap> <?> <cloud> <uptime>
+
+    Read off three captures of the SAME adapter at different stages:
+
+      unregistered, no wifi   WIFIINFO 1 0  ""         0 HR_3cdc... 0 0 161
+      registered, no wifi     WIFIINFO 2 0  ""         1 HR_3cdc... 0 0 7
+      registered, online      WIFIINFO 5 81 "Ourplace" 1 HR_3cdc... 0 1 37
+
+    f1 climbs 1->2->5 as association progresses; f2 is signal strength, zero
+    until associated; f4 went 0->1 across registering the unit in the app and
+    stayed there; f7 went 0->1 only once traffic reached the cloud; f8 counts
+    seconds since boot.
+
+    f6 is NOT the dryer-connected flag, whatever an earlier note here said - it
+    read 0 throughout a session in which the adapter was demonstrably talking to
+    a dryer. It has never been observed non-zero, so it stays unlabelled.
+    """
     p = text.split(" ")
     if len(p) < 9:
         return None
     return {
-        "wifi_connected": p[2],
+        "link": p[1],
+        "rssi": p[2],
         "ssid": p[3],
+        "registered": p[4],
         "ap_name": p[5],
-        "dryer_connected": p[6],
+        "f6": p[6],
+        "cloud": p[7],
         "uptime_s": p[8],
     }
 
@@ -148,6 +169,24 @@ class Log:
         print(line, flush=True)
         self.f.write(line + "\n")
         self.f.flush()
+
+
+STATE_KEYS = {"1": "idle", "2": "prep", "3": "freeze", "4": "dry", "5": "final"}
+
+try:
+    import msvcrt
+
+    def poll_key():
+        """Non-blocking single keypress, or None. Windows console."""
+        if msvcrt.kbhit():
+            try:
+                return msvcrt.getch().decode("ascii", "ignore")
+            except Exception:
+                return None
+        return None
+except ImportError:
+    def poll_key():
+        return None
 
 
 def main():
@@ -180,7 +219,12 @@ def main():
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log = Log(f"dryer-sim-{stamp}.txt")
     log(f"# Playing the dryer on {port}. Adapter frames are space-delimited;")
-    log("# ours are comma-delimited. Watch for *** NEW *** lines.")
+    log("# ours are comma-delimited. Watch for >>> NON-ROUTINE <<< lines.")
+    log(f"# Presenting the '{args.state}' screen.")
+    log("#")
+    log("# PRESS 1=idle 2=prep 3=freeze 4=dry 5=final to change the screen the")
+    log("# app sees, then press buttons in the app. Any frame the adapter emits")
+    log("# in response is the control command we are after.")
 
     ser = serial.Serial(port, 115200, timeout=0.2)
     time.sleep(0.4)
@@ -247,13 +291,15 @@ def main():
                     d = decode_wifiinfo(text)
                     if d and d != last_wifi:
                         log(f"<- {text}")
-                        log(f"   dryer_connected={d['dryer_connected']}  "
-                            f"wifi={d['wifi_connected']}  ssid={d['ssid']}  "
-                            f"ap={d['ap_name']}")
-                        if last_wifi and d["dryer_connected"] != last_wifi["dryer_connected"]:
-                            log(f"   *** DRYER-CONNECTED FLAG "
-                                f"{last_wifi['dryer_connected']} -> "
-                                f"{d['dryer_connected']} ***")
+                        log(f"   link={d['link']} rssi={d['rssi']} "
+                            f"ssid={d['ssid']} registered={d['registered']} "
+                            f"cloud={d['cloud']}")
+                        if last_wifi and d["cloud"] != last_wifi["cloud"]:
+                            log(f"   *** CLOUD {last_wifi['cloud']} -> "
+                                f"{d['cloud']} - app can now reach this unit ***")
+                        if last_wifi and d["registered"] != last_wifi["registered"]:
+                            log(f"   *** REGISTERED {last_wifi['registered']} -> "
+                                f"{d['registered']} ***")
                         if last_wifi and d["ssid"] != last_wifi["ssid"]:
                             log(f"   *** SSID NOW {d['ssid']!r} - provisioned ***")
                         last_wifi = d
@@ -281,9 +327,23 @@ def main():
                 elif verb == "FDFILES":
                     pass   # deliberately unanswered - see FDFILES_ANSWER
                 else:
-                    reply = ANSWERS.get(verb)
+                    reply = REAL_STAT if verb == "REQSTAT" else ANSWERS.get(verb)
                     if reply:
                         send(reply, f"answering {verb}")
+
+        # Switch the presented screen live. The app mirrors whatever screen the
+        # machine reports, so stepping through states is how you find out which
+        # command each button emits - press 1..5 here, then look at the app.
+        key = poll_key()
+        if key and key in STATE_KEYS:
+            name = STATE_KEYS[key]
+            REAL_STAT = STATES[name]
+            log("")
+            log(f"  ### now presenting '{name}' -> {REAL_STAT}")
+            log(f"  ### check the app; its buttons should change to match")
+            log("")
+            send(REAL_STAT, f"state switched to {name}")
+            last_stat = time.time()
 
         # Keep the telemetry flowing, or the adapter may decide we are gone.
         if time.time() - last_stat >= args.stat_secs:
