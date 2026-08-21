@@ -41,6 +41,13 @@ Thumbs.db
 # sharing, after checking what is in it.
 adapter-transcript-*.txt
 
+# Dryer-simulator transcripts: same class. They log the UID frame, which
+# carries the machine unique ID HarvestRight binds to an account, plus the
+# user-set machine name. Nine of these accumulated in one afternoon and a
+# single `git add -A` would have published them.
+dryer-sim-*.txt
+screen-map-*.txt
+
 # Backup of the stock adapter's USB volume: vendor firmware plus device
 # identifiers (MAC). Analysis notes are fine in the repo; this is not.
 /drive backup/
