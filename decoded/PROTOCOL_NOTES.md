@@ -754,3 +754,53 @@ demonstrated inert on real hardware should default to excluded.
 - What `session` (175300) is derived from, and whether the dryer validates it.
 - Button IDs for every screen other than Ready. Walking the simulator through
   states 2-5 with the app connected would enumerate them.
+
+## FDRENAME, config-in-files, and a second allow-list gap (2026-08-21)
+
+Renaming the dryer from the app produced:
+
+    ADPT->DRYER   FDRENAME "Freezie McDry"
+    ADPT->DRYER   FDNAME                      (immediately re-read)
+    ADPT->DRYER   FDFILES .dat 1
+
+So `FDRENAME "<name>"` takes a QUOTED argument, space-delimited like everything
+else outbound, and the app re-reads `FDNAME` straight afterwards to confirm.
+
+**FDName.txt holds the machine NAME, not the serial.** Confirmed twice: the real
+dryer answered `FDNAME` with `SNM,Freezie McDry,` in the USB capture, and the
+rename writes that same string. Our simulator had been serving the data-plate
+serial. Fixed.
+
+**Settings live in .dat files.** `FDFILES .dat 1` asks for a listing, and the
+file-transfer verbs (`FDFILELIST` announce, `FDFILEBLOCK` contents) move them.
+That is how the Config screen works, and answering `FDFILES` is the next capture
+worth running - it should reveal the settings file format.
+
+### The exposure, stated correctly
+
+`SETSN` and `FDRENAME` were in the CONFIG allow-list while simultaneously
+appearing on our own "never probe" list. Both are now removed.
+
+I first described them as reachable from `/api/cmd`. **That was wrong.**
+`/api/cmd` gates on `hr_cmd_classify(verb) != HR_CMD_SAFE` and returns 403, so
+CONFIG-class verbs never reach `send_config` over HTTP at all.
+
+The real path is **MQTT**. `hr_mqtt.c` splits the cmd topic payload on a comma
+and calls `hr_session_send_config(verb, args)` **with no gate of its own**,
+relying entirely on that function's class check - which accepts SAFE *and*
+CONFIG. So anyone able to publish to the cmd topic could have sent `SETSN,...`
+or `FDRENAME,...`.
+
+`CLICK` was worse because it was SAFE: reachable over BOTH transports.
+
+This also means CONFIG-class verbs (`SETPREF`, `SETDATE`, `SETBNAME`, `SEND*`)
+are an MQTT-only feature by design - `/api/cmd` cannot reach them. Worth
+knowing before treating an HTTP 403 as a bug.
+
+### Known issue
+
+OTA now reports `reset_reason: "panic"` on the reboot that follows a successful
+update, reproducibly, across two updates. The new image boots and runs
+correctly, so this is cosmetic in effect - but a clean `esp_restart()` should
+report `sw`, and something is crashing on the way down. Only visible because
+reset_reason was added earlier the same day.

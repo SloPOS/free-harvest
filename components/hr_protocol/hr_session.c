@@ -234,7 +234,23 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
      */
     static const char *const config[] = {
         "SENDBATCH", "SENDCANDY", "SENDCUSTOM", "SENDSCIENCE",
-        "SETPREF", "SETDATE", "SETBNAME", "SETSN", "FDNAME", "FDRENAME",
+        "SETPREF", "SETDATE", "SETBNAME", "FDNAME",
+        /*
+         * SETSN and FDRENAME WERE HERE, and both are on our own
+         * never-probe list - SETSN overwrites the serial number,
+         * FDRENAME renames files on the dryer. Listing a verb as too
+         * dangerous to probe while leaving it sendable from /api/cmd is
+         * not a policy, it is a gap.
+         *
+         * SETSN matters more than it looks now that the cloud binding is
+         * understood: HarvestRight ties an adapter to a machine by its
+         * identity, and their own app warns that changing the recorded
+         * code needs a support agent to undo. A stray SETSN is not a
+         * setting, it is a trip to support.
+         *
+         * Found 2026-08-21 while capturing FDRENAME "Freezie McDry" from
+         * the real app - the same week CLICK was found mis-classified.
+         */
     };
     for (size_t i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
         if (strcmp(verb, config[i]) == 0) {

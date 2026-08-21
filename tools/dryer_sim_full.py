@@ -128,7 +128,13 @@ ANSWERS = {
 # inline frame did NOT satisfy the adapter - it kept asking (2-3 times per 40s).
 # Sending the file instead did, and it has not asked since. The dryer ships
 # files with FDFILELIST (announce) then FDFILEBLOCK (contents).
-FD_NAME = "P-STF 2331 03561 BKC"
+# FDName.txt holds the machine NAME, not the serial number. Two independent
+# confirmations: the real dryer answered FDNAME with "SNM,Freezie McDry,"
+# in the USB capture, and the app renames the machine by sending
+#     FDRENAME "Freezie McDry"
+# and immediately re-reading FDNAME. We had been serving the data-plate
+# serial here, which is a different thing entirely.
+FD_NAME = "Freezie McDry"
 FDNAME_REPLY = [
     f"SNM,{FD_NAME},",
     f"FDFILELIST,FDName.txt,0,{len(FD_NAME)}",

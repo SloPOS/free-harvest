@@ -176,7 +176,14 @@ static void test_classify_refuses_dangerous_and_unknown(void)
     /* Config verbs are allowed as CONFIG, but crucially NOT as SAFE, so the
      * verb-only "safe" path can never fire them. */
     CHECK(hr_cmd_classify("SETDATE") != HR_CMD_SAFE);
-    CHECK(hr_cmd_classify("SETSN") != HR_CMD_SAFE);
+    /*
+     * SETSN and FDRENAME must be UNKNOWN, not merely "not SAFE".
+     * The old assertion passed while both sat in the CONFIG list, which
+     * made them fully sendable with arguments from /api/cmd - a test
+     * that cannot fail for the case that matters is not a test.
+     */
+    CHECK_INT(hr_cmd_classify("SETSN"), HR_CMD_UNKNOWN);
+    CHECK_INT(hr_cmd_classify("FDRENAME"), HR_CMD_UNKNOWN);
 }
 
 static void test_send_safe_transmits_only_allowlisted(void)
@@ -201,6 +208,12 @@ static void test_send_safe_refuses_dangerous_sends_nothing(void)
     CHECK(!hr_session_send_safe(&s, "REBOOT"));
     CHECK(!hr_session_send_safe(&s, "DUTY"));
     CHECK(!hr_session_send_safe(&s, "SETSN"));
+    /* With ARGS is the path that actually mattered: /api/cmd routes to
+     * send_config whenever args are present, so these are the calls the
+     * web UI could really have made. */
+    CHECK(!hr_session_send_config(&s, "SETSN", "12345"));
+    CHECK(!hr_session_send_config(&s, "FDRENAME", "whatever"));
+    CHECK(!hr_session_send_config(&s, "CLICK", "1,10,54779,175300"));
     /* nothing was transmitted and no frame counted */
     CHECK_INT(log.frames, 0);
     CHECK_INT(log.len, 0);
