@@ -95,6 +95,11 @@ static const hr_action_t k_actions[] = {
      * this table alone, and backing out is all we can currently offer.
      */
     { "cfg_cancel",     "Cancel",             43, 18, HR_SEV_BENIGN      },
+
+    /* --- Screen 31: Custom recipe configuration --------------------------- */
+    /* Cancel is button 26 here against 18 on screen 43 - the same control,
+     * different number, on two screens that do the same job. */
+    { "custom_cancel",  "Cancel",             31, 26, HR_SEV_BENIGN      },
 };
 
 /*

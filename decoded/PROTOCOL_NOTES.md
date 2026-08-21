@@ -1058,3 +1058,56 @@ Reset, Cancel - and their numbers differ per screen as always.
 
 `SENDCUSTOM` will carry a shorter payload than `SENDCANDY`: three settings
 against eight. Do not reuse the Candy field map for it.
+
+## SENDCUSTOM, and two corrections (2026-08-21)
+
+    SENDCUSTOM "5,-10,31500,150,7200,500,1,100,54000,0,CUSTOM,0," 17633
+                |  |    |    |                          |     |
+                |  |    |    |                          |     +- start flag
+                |  |    |    |                          +------- name
+                |  |    |    +---------------------------------- drying temp F
+                |  |    +--------------------------------------- extra freeze, SECONDS
+                |  +-------------------------------------------- initial freeze temp F
+                +----------------------------------------------- recipe type 5
+
+Type 5 for Custom against 4 for Candy, so the leading field selects the recipe
+family. Setting "-10 F, 8:45, 150 F" produced `-10, 31500, 150`, and 8:45 is
+31500 seconds exactly.
+
+Unidentified and unchanged: 7200 (2h), 500, 1, 100, 54000 (15h), 0.
+
+`CLICK 31 26` is Cancel. Note it is button **26** here and **18** on screen 43 -
+the same control doing the same job on the two configuration screens, with
+different numbers. Nothing may be shared between screens.
+
+### Correction 1: the units rule is general, not per-family
+
+An earlier note here said Candy and Custom "do not share units" and that a
+shared time helper would be wrong. That was wrong. **Both** families carry
+seconds in their SEND* frame and minutes in STAT. The rule is about the
+DIRECTION, not the recipe: STAT reports minutes, SEND* takes seconds.
+
+### Correction 2: the start flag IS the last field
+
+Recorded earlier as unsettled, because Candy's config-screen Start sent `,0,`
+while a home-screen direct start sent `,1,`. Custom's Start sends `,1,`:
+
+    SENDCUSTOM "5,-10,0,120,7200,500,1,100,54000,0,CUSTOM,1," 17637
+
+So two of the three observations agree that the final field means start-now.
+The lone Candy `,0,` is still unexplained - it immediately followed a rename, so
+it may have been a save rather than the start itself. Treat the flag as
+start-now, and treat that one Candy reading as the anomaly to re-check.
+
+### Correction 3: the counter is NOT always reused across retries
+
+Recorded earlier, from the CLICK captures, that retries reuse the counter and it
+is therefore an idempotency key. The SENDCUSTOM retry burst contradicts that:
+
+    ...17634 ...17634 ...17634 ...17634 ...17635 ...17634 ...17635 ...17635
+
+The same payload repeats with the counter varying between two values. So the
+counter is not a stable per-action key, and nothing should be built on the
+assumption that a repeat carries the same number. Our own control path sends one
+value per press and does not retry, which is unaffected - but the earlier note
+overstated what the captures showed.
