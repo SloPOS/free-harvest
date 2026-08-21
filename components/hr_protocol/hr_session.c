@@ -171,18 +171,13 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
         "REQTHST", "REQSCIENCE", "STATUS", "STATE", "SERIAL", "WIFIINFO",
         "MEMSIZE", "FDFILES",
         /*
-         * GETP / GETR - screen readout, added 2026-08-21.
+         * GETP / GETR - tested 2026-08-21 against a real machine and found
+         * INERT: no reply bare or with page/row arguments, and no crash.
+         * Kept allow-listed because they demonstrably do not act, but they
+         * are not the screen-readout mechanism they looked like.
          *
-         * The stock adapter demonstrably mirrors the dryer's SCREEN: the app
-         * offers exactly the options currently displayed, and acting on one
-         * behaves as though a human pressed the panel. Something must READ the
-         * screen for that to be possible, and these are the only candidates in
-         * the command table.
-         *
-         * Classed SAFE on the reasoning that a GET verb reads. That is an
-         * inference, not a verified fact - so they are queries only, and the
-         * verb that would ACT on a screen (ADV, "advance") is deliberately NOT
-         * here.
+         * The actual control verb is ADV, and it is deliberately NOT here -
+         * see the note below.
          */
         "GETP", "GETR",
         /* benign local effects (no state change) */
@@ -193,6 +188,19 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
             return HR_CMD_SAFE;
         }
     }
+    /*
+     * ADV IS NOT SAFE AND IS NOT CONFIG. It is the control verb.
+     *
+     * Verified 2026-08-21: sending ADV to an idle machine moved it from Ready
+     * (STAT type 1) to "Starting batch" (type 2), acknowledged by NTFY,2. It
+     * acts as a press on whatever the panel currently offers, which is how the
+     * stock app "mirrors every screen function".
+     *
+     * It therefore stays out of BOTH lists, so neither the web UI nor MQTT can
+     * reach it. Exposing it needs a deliberate confirmation flow - starting a
+     * 24-hour cycle by mis-tap is not an acceptable failure mode.
+     */
+
     /*
      * Config/data writes: change settings, recipe, date, names. Recoverable
      * and, per firmware disassembly, none of these starts a drying cycle

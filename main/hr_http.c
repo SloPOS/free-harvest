@@ -532,6 +532,55 @@ static esp_err_t h_forget(httpd_req_t *req)
  * (read-only queries + BEEP/CLICK). The allow-list is enforced in the tested
  * session layer; anything else is rejected here with 403.
  */
+/* -------------------------------------------------------------------- */
+/* POST /api/probe -> BENCH ONLY: send a verb bypassing the allow-list     */
+/* -------------------------------------------------------------------- */
+/*
+ * Exists to map which verbs actually DO something, which cannot be learned
+ * from an allow-list that refuses them. Compiled out by default and MUST stay
+ * that way in anything released: it is a deliberate hole in the safety model
+ * that otherwise keeps hardware-control verbs unreachable from the network.
+ *
+ * Enable only for a supervised bench session on an idle machine.
+ */
+#ifndef HR_ENABLE_PROBE
+#define HR_ENABLE_PROBE 0
+#endif
+
+#if HR_ENABLE_PROBE
+static esp_err_t h_probe(httpd_req_t *req)
+{
+    char buf[128];
+    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
+                                                        : (int)sizeof(buf) - 1;
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = 0;
+
+    char verb[HR_MAX_VERB] = {0}, args[64] = {0};
+    httpd_query_key_value(buf, "verb", verb, sizeof(verb));
+    httpd_query_key_value(buf, "args", args, sizeof(args));
+    hr_url_decode(verb);
+    hr_url_decode(args);
+
+    hr_builder_t b;
+    hr_build_begin(&b, verb);
+    if (args[0]) {
+        hr_build_str(&b, args);
+    }
+    bool ok = hr_session_send(s_session, &b);
+    ESP_LOGW(TAG, "PROBE %s %s -> %s", verb, args, ok ? "sent" : "failed");
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
+}
+#endif /* HR_ENABLE_PROBE */
+
 static esp_err_t h_cmd(httpd_req_t *req)
 {
     char buf[96];
@@ -832,6 +881,10 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/wifi", HTTP_POST, h_wifi_post);
     reg("/api/forget", HTTP_POST, h_forget);
     reg("/api/cmd", HTTP_POST, h_cmd);
+#if HR_ENABLE_PROBE
+    reg("/api/probe", HTTP_POST, h_probe);
+    ESP_LOGW(TAG, "PROBE ENDPOINT ENABLED - bench build, do not ship");
+#endif
     reg("/api/ota", HTTP_POST, h_ota);
     reg("/api/mqtt", HTTP_GET, h_mqtt_get);
     reg("/api/mqtt", HTTP_POST, h_mqtt_post);

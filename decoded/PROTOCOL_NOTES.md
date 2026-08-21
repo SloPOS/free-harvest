@@ -1,5 +1,69 @@
 # HarvestRight ↔ WiFi Adapter Protocol — Static-Analysis Notes
 
+> ## ⚠️⚠️ REMOTE CONTROL EXISTS: `ADV` (2026-08-21)
+>
+> **Every earlier statement in this file that remote cycle control is impossible
+> was WRONG.** It was based on no START/CONTINUE/CANCEL verb existing in the
+> command table. That fact is true and the inference from it was not: control is
+> screen-relative, so there is no per-function verb - there is a verb that
+> presses whatever the screen currently offers.
+>
+> Probed against an idle machine:
+>
+> ```
+> ADV   ->  stat_type 1 -> 2   Ready -> Starting batch   reply: NTFY,2,0,,0,
+> ```
+>
+> `ADV` = advance. It acts as a press on the panel's current option. This is the
+> mechanism behind "mirror every screen function": read the screen from STAT,
+> press with ADV.
+>
+> **`ADV` MUST NOT be exposed casually.** It can start a cycle. It belongs behind
+> an explicit confirmation, never on a dashboard button.
+>
+> In this test the machine reached "Starting batch", did not energise the
+> compressor, and returned to Ready on its own. The dryer also rebooted once
+> during the sweep; the cause is not isolated.
+>
+> ### Replies captured from a real machine
+>
+> | Command | Reply |
+> |---|---|
+> | `REQCFG` | `CFG,37C9-355A-3037,HM-4B~04,PSTF231103561BKC,` |
+> | `FDNAME` | `SNM,Freezie McDry,` |
+> | `REQSYSINF` | `SYSINF,2026-08-20_18.34,30,635,158,4` |
+> | `REQPREF` | `SYSPREF,0,18000,90,14400,13,` |
+> | `REQTSUM` | `TESTSUM,0,0,0,0,0,0,0,0,0, ,` |
+> | `REQTHST` | `TESTHST,0,0;` |
+> | `FDFILES` | `FDFILELIST,FactoryTest.log,0,596` |
+> | `FILEREAD` | `FDFILEBLOCK,,0,0,0,00` |
+>
+> **`REQCFG` carries the serial number**: `PSTF231103561BKC` is the data-plate
+> value `P-STF 2311-03561 BKC` with separators stripped. We spent effort reading
+> it off the machine; one command would have done it. `HM-4B~04` looks like a
+> model code and `37C9-355A-3037` like a device ID.
+>
+> **`FDNAME` is answered with `SNM,<name>,`** - the friendly name, here
+> "Freezie McDry". That settles the question the stock-adapter work left open,
+> and confirms the SNM shape guessed there.
+>
+> **`REQPREF` holds the dry-time settings**: 18000s = 5h and 14400s = 4h.
+>
+> ### Verbs that did nothing
+>
+> `ECHO PRINT DIR DIRC DUMP MEMSIZE SERIAL STATE STATUS GOTIT ADD REQSTAT
+> REQBATSUM REQSCIENCE SENDBATCH SENDCANDY SENDCUSTOM SETDATE SETBNAME XWIFI
+> CLICK` produced no reply and no state change when sent without arguments. Most
+> of the SET/SEND family presumably need a payload.
+>
+> ### Not probed, deliberately
+>
+> `DEL RMOLD COPY FDRENAME` (destroy files), `SETSN` (overwrites the serial),
+> `DUTY HCS SPC` (energise heater/shelf/pump), `MEMTEST FUZZY` (may block the
+> firmware), `REBOOT`.
+
+
+
 > ## ⚠️ Corrections from a genuine adapter (2026-08-20)
 >
 > A stock HarvestRight adapter was interrogated over its OTG port. Three things
