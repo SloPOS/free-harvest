@@ -1025,3 +1025,36 @@ needs no stock adapter and touches nothing.
 
 Note the asymmetry this implies: `SENDCUSTOM` will carry a different and
 shorter payload than `SENDCANDY`, not the same csv with a different name.
+
+## Custom recipe config is SCREEN 31 (2026-08-21)
+
+Found by walking the panel with `map_screens.py` - no stock adapter, no risk.
+One of the two candidates, and the capture log held the frame verbatim.
+
+    STAT,31,0,0,0,69,158913,33,0,28,36095,16082,-15,120,125,120,500,900,100,CUSTOM,90,14400,,
+    STAT,31,0,0,0,69,158880,33,0,28,36087,16082,-10,  0,120,120,500,900,100,CUSTOM,90,14400,,
+                                                    ^^^ ^^^ ^^^
+
+Two frames taken either side of editing the panel. Exactly three fields moved,
+and they are exactly the three settings the screen offers, which is what makes
+the mapping safe to assert rather than merely plausible:
+
+    field 12   initial freeze temp, F      -15 -> -10
+    field 13   extra freeze time, MINUTES  120 -> 0
+    field 14   drying temp, F              125 -> 120
+
+Note field 13 is MINUTES here, while SENDCANDY carries its times in SECONDS.
+The two recipe families do not share units, so a shared helper would be wrong.
+
+Unchanged and unidentified in the same frames: field 15 (120), 16 (500),
+17 (900), 18 (100), 20 (90), 21 (14400 - four hours in seconds).
+
+### What is still missing on both config screens
+
+Only Candy's Cancel (`CLICK 43 18`) has been captured. Everything else on 31
+and 43 edits values through SENDCUSTOM / SENDCANDY rather than pressing
+buttons, so the open question is which buttons exist at all - Save, Start,
+Reset, Cancel - and their numbers differ per screen as always.
+
+`SENDCUSTOM` will carry a shorter payload than `SENDCANDY`: three settings
+against eight. Do not reuse the Candy field map for it.

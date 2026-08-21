@@ -46,21 +46,19 @@ KNOWN = {
     7:  "Complete  (btn 1 defrost, 2 +2h dry, 3 no defrost, 5 warm trays)",
     15: "Diagnostics",
     17: "Preparing / pre-cool  (btn 3 advance, 4 end batch)",
-    31: "Recipe settings - seen once, unmapped",
+    31: "CUSTOM recipe config  (values via SENDCUSTOM; buttons unmapped)",
     43: "Candy recipe config  (btn 18 cancel; values go via SENDCANDY)",
     44: "seen once inside final dry, unmapped",
 }
 
-# WANTED: the Custom recipe configuration screen.
+# WANTED: button numbers for screens 31 and 43.
 #
-# It is NOT screen 43 - verified on the machine. Candy and Custom are separate
-# screens, and Custom offers only three settings (initial freeze temp, extra
-# freeze time, drying temp) against Candy's eight. Its id is unknown, and 31
-# and 44 are the two ids we have seen but never identified, so they are the
-# first candidates.
+# Both recipe-configuration screens are identified now, but only Candy's Cancel
+# (CLICK 43 18) has been captured. Everything else on them edits values through
+# SENDCANDY / SENDCUSTOM rather than button presses, so the remaining question
+# is which buttons exist at all - Save, Start, Reset, Cancel.
 #
-# To find it: run this, then press Custom on the panel. The new type is the
-# answer, and the capture log will hold the frame verbatim for the simulator.
+# Screen 44, seen once inside final dry, is still unidentified.
 
 
 def main():

@@ -84,16 +84,24 @@ STATES = {
     "complete": "STAT,7,0,0,0,69,151638,5,0,48,296,11,0,90,Auto,,",
     "candycfg": "STAT,43,0,0,0,69,151701,119,0,40,1023,70,140,150,160,5,120,0,CANDY,,",
 
-    # Custom configuration is NOT here, and the guess that used to sit in this
-    # slot was wrong. It assumed screen 43 was a generic recipe editor whose
-    # trailing field named the recipe, so CANDY -> CUSTOM would produce the
-    # Custom screen. Checked on the real machine: they are different screens
-    # entirely, and Custom offers only three settings - initial freeze temp,
-    # extra freeze time, drying temp - against Candy's eight.
+    # Custom recipe configuration - screen 31, CAPTURED 2026-08-21.
     #
-    # Its screen id is unknown. Walk the panel to Custom and read stat_type
-    # from /api/state, or press it and pull the frame out of the capture log;
-    # then add the real frame here. Do not guess again.
+    # An earlier guess put Custom on screen 43 with the recipe name swapped.
+    # That was wrong: Candy and Custom are separate screens, and Custom offers
+    # three settings against Candy's eight.
+    #
+    # Field map, derived from two frames taken either side of editing the
+    # panel - only three values moved, and they are exactly the three settings
+    # the screen offers:
+    #
+    #     ...,28,36095,16082,-15,120,125,120,500,900,100,CUSTOM,90,14400,,
+    #     ...,28,36087,16082,-10,  0,120,120,500,900,100,CUSTOM,90,14400,,
+    #                             ^^^ ^^^ ^^^
+    #             initial freeze temp F  |   |
+    #             extra freeze time, MINUTES |
+    #                          drying temp F
+    "customcfg": ("STAT,31,0,0,0,69,158913,33,0,28,36095,16082,"
+                  "-15,120,125,120,500,900,100,CUSTOM,90,14400,,"),
 }
 REAL_STAT = STATES["idle"]
 # IDENTITY
@@ -234,7 +242,7 @@ class Log:
 
 STATE_KEYS = {"1": "idle", "2": "prep", "3": "freeze", "4": "dry",
               "5": "final", "6": "starting", "7": "complete",
-              "8": "candycfg"}
+              "8": "candycfg", "9": "customcfg"}
 
 try:
     import msvcrt
@@ -335,7 +343,7 @@ def main():
     log(f"# Presenting the '{args.state}' screen.")
     log("#")
     log("# PRESS 1=idle 2=prep 3=freeze 4=dry 5=final 6=starting")
-    log("#       7=complete 8=candycfg  to change the screen the")
+    log("#       7=complete 8=candycfg 9=customcfg  to change the")
     log("# app sees, then press buttons in the app. Any frame the adapter emits")
     log("# in response is the control command we are after.")
 
