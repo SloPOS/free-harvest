@@ -588,3 +588,63 @@ the proper path satisfies and ADV skips.
 Dispatchers FUN_00076dc0 and FUN_00077078 (up near the entry point) also
 reference command verbs - a probable second/higher-level command path, not yet
 read.
+
+## COMPLETE verb -> command-ID map (G0644170, 2026-08-21)
+
+Extracted mechanically from dispatcher `FUN_00029418` by `HRVerbCodes.java`.
+49 verbs, IDs 0x01-0x34. IDs are assigned in source order, which is why the
+table is near-sequential - and that regularity is itself the check on the
+extraction.
+
+     0x01 MEMTEST     0x02 PRINT       0x03 BEEP        0x04 DIR
+     0x05 MEMSIZE     0x06 RMOLD       0x07 XWIFI       0x08 XW
+     0x09 DUTY        0x0A SERIAL      0x0B FUZZY       0x0C DUMP
+     0x0D COPY        0x0E DEL         0x0F DIRC        0x10 GETR
+     0x11 ADV         0x12 GETP        0x13 ADD         0x14 UNIQUE
+     0x15 FDNAME      0x16 STATUS      0x17 CLICK       0x18 STATE
+     0x19 FDRENAME    0x1A SENDBATCH   0x1B SENDCANDY   0x1C SENDCUSTOM
+     0x1D ECHO        0x1E GOTIT       0x1F SETBNAME    0x20 HCS
+     0x21 SPC         0x22 WIFIINFO    0x23 REQCFG      0x24 REQTSUM
+     0x25 REQTHST     0x26 SETSN       0x27 REQSTAT     0x28 REBOOT
+     0x29 REQSYSINF   0x2A REQBATSUM   0x2B FDFILES     0x2C FILEREAD
+     0x30 REQPREF     0x31 SETPREF     0x32 SETDATE     0x33 SENDSCIENCE
+     0x34 REQSCIENCE
+
+**0x2D, 0x2E and 0x2F have no verb.** Three IDs in the middle of a contiguous
+run, skipped. Either withdrawn commands or IDs reachable only from inside the
+firmware. Worth checking whether the executor handles them - if the panel's own
+START is an ID with no wire verb, this gap is where it lives.
+
+A caveat on one pair: the extractor pairs a verb with the next immediate, and
+GETR/ADV/GETP appear in a different order in the address space than in ID
+space. ADV=0x11 / GETP=0x12 is the reading, but that specific pair is the one
+place the heuristic could have transposed. Everything else is corroborated by
+the sequential run.
+
+### Three structural findings that change how commands must be sent
+
+**1. Matching is SUBSTRING, not equality.** `FUN_0007e108` is a strstr - it
+scans the whole input for the needle. A command matches if the verb appears
+ANYWHERE in the line, so the chain ORDER sets precedence and a payload
+containing another verb as a substring can be misrouted. This is a real hazard
+for `SEND*` payloads carrying free text such as a batch name.
+
+**2. The dispatcher is a MAILBOX, not an executor.** It ends with:
+
+        *DAT_000296dc = uVar15;     /* store the command ID, and return */
+
+It never calls an action. A separate task consumes the ID. This is why tracing
+call edges out of the dispatcher found nothing in July and led to the wrong
+"no remote control" conclusion - the edge is a shared global, not a call.
+
+**3. There is a mode that accepts ONLY adapter housekeeping.** Guarded by
+`(*DAT_000296d0 == 2 && param_1 == 0x1c)`, the dispatcher checks just four
+verbs - UNIQUE, STATE, WIFIINFO, FDNAME - and silently returns 0 for anything
+else. That is exactly our adapter's heartbeat set. If the dryer is in this mode,
+control commands are dropped without a reply, which would look identical to a
+verb being "inert". **This is a candidate explanation for SERIAL appearing dead
+and for GETP/GETR appearing inert** - they may not be inert at all, merely sent
+while the machine was in housekeeping-only mode.
+
+Next target: find what READS `DAT_000296dc`. That reader is the executor, and it
+is where SENDBATCH's payload is consumed.
