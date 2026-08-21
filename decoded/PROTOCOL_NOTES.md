@@ -55,6 +55,30 @@
 > The dryer probes MSC *first* and waits for it to time out before starting CDC,
 > which is why the link takes as long as it does to come up.
 >
+> ### CONFIRMED: commands reach the dryer (2026-08-21)
+>
+> Sending `BEEP` with the corrected space-delimited framing produced a reply
+> from the real machine:
+>
+> ```
+> Thanks for Beeping!
+> ```
+>
+> That is the first command this project has ever landed. It also confirms the
+> asymmetric-framing finding end to end: comma-delimited commands were being
+> discarded silently for the entire life of the firmware, and nothing in the UI
+> could have shown it, because the dryer does not NAK - it just ignores.
+>
+> Note the reply is a bare human-readable string with no comma, so our parser
+> records the whole line as a "verb". Harmless (19 chars against a 24-byte
+> field) but worth knowing when reading the verb table.
+>
+> **Still unanswered:** `SERIAL`, `REQSYSINF`, `REQCFG`, `REQPREF`, `REQBATSUM`
+> and `STATE` produced no reply at all, and some of them REBOOT our adapter.
+> The adapter is otherwise rock stable - five clean uptime samples over 80s
+> with no traffic - so the crash is triggered by sending, and it is our bug.
+> The dryer also sets line coding to **9600 baud**, which no PC capture showed.
+
 > ### Live probing results (2026-08-21)
 >
 > Driving the adapter with dryer-side frames settled several more points.
