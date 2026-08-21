@@ -56,6 +56,16 @@ static const hr_action_t k_actions[] = {
     { "freeze_advance", "Skip to Drying",      4,  3, HR_SEV_DESTRUCTIVE },
     { "freeze_end",     "End Batch",           4,  4, HR_SEV_DESTRUCTIVE },
 
+    /* --- Screen 2: Load trays / Continue ---------------------------------- */
+    /*
+     * This is the screen a remote start stalls on. CONTINUE means "the trays
+     * are in and the valve is shut" - a claim about the physical world that
+     * nobody standing at a phone can actually make. Pressing it from away
+     * commits the machine to a run on whatever is, or is not, inside.
+     */
+    { "load_continue",  "Trays Loaded – Continue", 2, 1, HR_SEV_CONFIRM },
+    { "load_end",       "End Batch",           2,  2, HR_SEV_DESTRUCTIVE },
+
     /* --- Screen 5: Drying ------------------------------------------------ */
     { "dry_end",        "End Batch",           5,  1, HR_SEV_DESTRUCTIVE },
 
@@ -63,6 +73,28 @@ static const hr_action_t k_actions[] = {
     { "final_end",      "End Batch",           6,  1, HR_SEV_DESTRUCTIVE },
     { "final_more",     "More Dry Time",       6,  2, HR_SEV_BENIGN      },
     { "final_less",     "Less Dry Time",       6,  3, HR_SEV_CONFIRM     },
+
+    /* --- Screen 7: Batch complete ---------------------------------------- */
+    /*
+     * The batch is already finished here, so nothing on this screen destroys a
+     * run in progress - the choices are about how to finish. More Dry Time is
+     * the conservative one (it adds two hours and returns to drying), so it is
+     * the only benign entry. The rest each commit the machine to heat or end
+     * the cycle, and all three are easy to regret from a phone.
+     */
+    { "done_defrost",   "Defrost",             7,  1, HR_SEV_CONFIRM     },
+    { "done_more_dry",  "More Dry Time (+2h)", 7,  2, HR_SEV_BENIGN      },
+    { "done_no_defrost","Finish, No Defrost",  7,  3, HR_SEV_CONFIRM     },
+    { "done_warm_trays","Warm Trays",          7,  5, HR_SEV_CONFIRM     },
+
+    /* --- Screen 43: Recipe configuration ---------------------------------- */
+    /*
+     * Only Cancel is a CLICK. Every other control on this screen edits recipe
+     * values and is sent as a SENDCANDY frame carrying the whole recipe, not as
+     * a button press - see PROTOCOL_NOTES. So this screen cannot be operated by
+     * this table alone, and backing out is all we can currently offer.
+     */
+    { "cfg_cancel",     "Cancel",             43, 18, HR_SEV_BENIGN      },
 };
 
 /*

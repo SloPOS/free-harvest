@@ -923,3 +923,79 @@ stayed up and the machine stayed idle through every attempt.
 Next: the block transfer almost certainly mirrors what the dryer itself sends
 for FDNAME - `FDFILELIST` to announce, then `FDFILEBLOCK,<name>,<seq>,<off>,<?>,
 <data>`. Finding the request that triggers a block is the remaining step.
+
+## Recipe configuration is a FRAME, not a file (2026-08-21)
+
+An earlier question here was how the `.dat` files carry settings so we could
+serve them back. They do not. **The `.dat` files are batch HISTORY; recipe
+configuration travels as a `SENDCANDY` frame.** Two separate mechanisms, and
+the file route was the wrong tree.
+
+    SENDCANDY "<recipe csv>" <counter>
+
+Every control on the Candy configuration screen (STAT 43) sends the WHOLE
+recipe, not a delta. Only Cancel is a CLICK.
+
+    SENDCANDY "4,70,140,150,160,300,7200,300,CANDY,0," 35890
+               |  |   |   |   |   |    |    |    |   |
+               |  |   |   |   |   |    |    |    |   +- start-now flag
+               |  |   |   |   |   |    |    |    +----- batch name
+               |  |   |   |   |   |    |    +---------- constant 300, unchanged
+               |  |   |   |   |   |    +--------------- dry time, SECONDS
+               |  |   |   |   |   +-------------------- prewarm time, SECONDS
+               |  |   |   |   +------------------------ constant 160, unchanged
+               |  |   |   +---------------------------- dry temp F
+               |  |   +-------------------------------- prewarm temp F
+               |  +------------------------------------ tray load temp F
+               +--------------------------------------- recipe type
+
+Derived by changing one control at a time and diffing:
+
+    tray load temp -> 90         70 becomes 90
+    prewarm temp -> 175         140 becomes 175
+    dry temp -> 110             150 becomes 110
+    prewarm time -> 0:18        300 becomes 1080   (18 x 60)
+    dry time -> 3:45           7200 becomes 13500  (3.75 x 3600)
+    skip prewarm off/on         300 becomes 0, then back to 300
+    rename to CANDYyy          CANDY becomes CANDYyy
+
+Units cross-check against telemetry: `STAT,43` reports the same recipe with
+times in MINUTES (`5`, `120`) where SENDCANDY uses SECONDS (300, 7200).
+
+**Skip-prewarm is not a flag** - it is prewarm time set to 0. Worth knowing
+before adding a boolean that does not exist.
+
+The final field is a start-now flag, on this evidence: starting a saved Candy
+recipe straight from the home screen sent `...,CANDY,1,` while every edit and
+the config screen's own Start button sent `,0,`. That reading is not settled -
+if the flag alone started a batch, the config screen's Start would presumably
+also carry 1. Do not build a start path on it without testing.
+
+### Our SENDCANDY support is currently wrong
+
+`hr_session_send_config()` splits args on commas and emits each as its own
+space-separated field, so it would put `SENDCANDY 4 70 140 150 ...` on the wire.
+The real frame is a single QUOTED csv followed by a counter, and
+`hr_build_str()` does not quote. Sending a recipe needs a dedicated builder.
+SENDCANDY is CONFIG-class, so this is reachable over MQTT today and would send a
+malformed frame.
+
+### Custom configuration is not reachable
+
+`CLICK 1 9` opens Candy configuration reliably, but the Custom equivalent does
+not open. Possibly Custom needs a saved recipe to exist first, or uses a
+different screen id. Unresolved.
+
+## Screens 2 and 7, mapped
+
+    CLICK 2 1   Continue - trays loaded, valve closed
+    CLICK 2 2   End batch
+    CLICK 7 1   Defrost (runs the heatpad cycle)
+    CLICK 7 2   More dry time (+2h, returns to the drying screen)
+    CLICK 7 3   Finish without defrost (ends the cycle)
+    CLICK 7 5   Warm trays
+    CLICK 43 18 Cancel out of recipe configuration
+
+Screen 2's Continue is the one a remote start stalls on. Note what it asserts:
+that trays are loaded and the valve is shut - a claim about the physical world
+that nobody at a phone can actually make, which is why it is not benign here.

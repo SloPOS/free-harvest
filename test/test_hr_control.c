@@ -87,12 +87,14 @@ static void test_screen_listing(void)
     CHECK_INT((int)hr_control_for_screen(5,  buf, 8), 1);  /* Drying     */
     CHECK_INT((int)hr_control_for_screen(6,  buf, 8), 3);  /* Final dry  */
 
+    CHECK_INT((int)hr_control_for_screen(2,  buf, 8), 2);  /* Load trays */
+    CHECK_INT((int)hr_control_for_screen(7,  buf, 8), 4);  /* Complete   */
+    CHECK_INT((int)hr_control_for_screen(43, buf, 8), 1);  /* Recipe cfg */
+
     /* Screens whose buttons have never been captured must offer NOTHING.
      * An empty toolbar is correct; a guessed one presses unknown controls on
      * a running machine. Screen 2 is "Starting batch", which is exactly where
      * the machine stranded during the ADV probe - do not invent buttons for it. */
-    CHECK_INT((int)hr_control_for_screen(2,  buf, 8), 0);
-    CHECK_INT((int)hr_control_for_screen(7,  buf, 8), 0);
     CHECK_INT((int)hr_control_for_screen(15, buf, 8), 0);
     CHECK_INT((int)hr_control_for_screen(31, buf, 8), 0);
     CHECK_INT((int)hr_control_for_screen(0,  buf, 8), 0);
