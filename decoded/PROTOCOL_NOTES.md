@@ -483,3 +483,57 @@ Renamed to `phase_pct` in the firmware (`freeze_pct` kept as an alias).
 | 31 | Recipe | custom profile parameters |
 
 Still unobserved: extra-dry time, process-complete, defrost.
+
+## Identity frames, and a passive adapter (2026-08-21)
+
+`/api/state` on a live link reported `frames_in:43, frames_out:0` with `serial`
+and `uid` both empty. Our adapter had never transmitted a single frame in its
+entire uptime.
+
+That matters because the roles are not symmetric. `STAT` telemetry arrives
+unprompted - `have_tel` was true and frames kept climbing - but the identity
+frames `UID` and `SNM` do not. The stock adapter drives a handshake (`STATUS`,
+`FDNAME`, `REQCFG`) and heartbeats `STATE`/`UNIQUE`/`WIFIINFO` every ~15s; ours
+only listens, so nothing ever asks the dryer who it is.
+
+`SERIAL` is INERT. Sent to a real machine: `frames_out` 0 -> 1, no reply,
+`unknown_verbs` and `frames_bad` both stayed 0, `serial` stayed empty. The
+`SNM` handler in hr_session.c would have populated it, so this is silence and
+not a parse failure. Add it to the dead list with `GETP` and `GETR`.
+
+This is NOT a transmit bug. `ADV` was verified the same day moving the machine
+from Ready (type 1) to Starting batch (type 2) with an `NTFY,2` ack, so the
+`\r`-terminated space-delimited outbound format reaches the dryer's parser
+intact.
+
+Two consequences worth chasing separately:
+
+  - We never send `WIFIINFO`, so the dryer's own panel cannot show link state,
+    RSSI or SSID while our adapter is attached. Directly checkable on the
+    machine's display.
+
+  - A permanently silent adapter is a candidate explanation for the link going
+    stale, which was previously and wrongly attributed to needing a power
+    cycle. Unconfirmed - telemetry was flowing fine at the time of this
+    reading - but it is the first hypothesis that does not blame the dryer.
+
+### CPU code (cloud-side, not protocol)
+
+Registering while the adapter was attached to the SIMULATOR produced:
+
+    "The given cpu code does not match our records. Changing the cpu code from
+     37C9 355A 3037 to 1 will require the approval of a Harvest Right team
+     member."
+
+So their cloud binds adapter to machine 1:1 by a hardware identity forwarded
+from the dryer, and `37C9 355A 3037` is the real machine's. The `1` is ours -
+the scalar `%d` following the unique ID in
+`UID,%lX-%lX-%lX-%lX,%d,%d.%d.%ld,...`.
+
+This constrains us not at all, since Free Harvest replaces that cloud path
+entirely. It does confirm the dryer exposes a stable hardware ID over serial,
+which is the natural key for deciding "same machine, new adapter" when
+resuming batch history.
+
+It also means the simulator's `REAL_UID` is NOT this user's dryer, despite the
+comment claiming captured values. The server's disagreement is the evidence.
