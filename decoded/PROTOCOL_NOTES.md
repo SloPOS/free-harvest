@@ -648,3 +648,58 @@ while the machine was in housekeeping-only mode.
 
 Next target: find what READS `DAT_000296dc`. That reader is the executor, and it
 is where SENDBATCH's payload is consumed.
+
+## USB wire capture of the real dryer + official adapter (2026-08-21)
+
+A hardware capture (LINKTYPE_USB_2_0, raw PID-level) of the genuine pair, 21
+seconds covering enumeration and handshake. This is measured ground truth and
+it corrects several things we had inferred.
+
+### The identity handshake, verbatim
+
+    ADPT->DRYER  ep2   STATE 2 0
+    ADPT->DRYER  ep2   UNIQUE
+    ADPT->DRYER  ep2   FDNAME
+    DRYER->ADPT  ep2   UID,0-33303337-33353541-33374339,4,6.0.641041,0,5,2,1,51,204,255,
+    ADPT->DRYER  ep2   REQCFG
+    DRYER->ADPT  ep2   SNM,Freezie McDry,
+
+**`UNIQUE`, sent bare with no arguments, is the identity query.** The adapter
+sends it and the dryer answers with its `UID` frame. Not `SERIAL` - which we had
+been probing, and which is a different thing. Our simulator was ignoring
+`UNIQUE` entirely, so the adapter could never learn what machine it was attached
+to, which is the likely reason the app refused to accept commands.
+
+### The unique ID is ASCII text, not a number
+
+    33303337 -> "3037"      33353541 -> "355A"      33374339 -> "37C9"
+
+Each 32-bit word holds four ASCII characters. Read in reverse word order they
+spell **37C9 355A 3037**, exactly the "cpu code" the app displays. So the app
+shows the ID as characters while the wire carries their hex codes, behind a
+leading zero word.
+
+An earlier guess here - that the code mapped directly onto `%lX` words with
+zero-fill, giving `37C9-355A-3037-0` - was wrong in both encoding and word
+order. `tools/dryer_sim_full.py --cpu "37C9 355A 3037"` now reproduces the
+captured frame byte for byte, which is the check that the reading is right.
+
+### SNM is a NAME, not a serial number
+
+The real machine answers `SNM,Freezie McDry,` - a user-set name. We had been
+sending the data-plate serial `P-STF 2311-03561 BKC`. Note our own firmware
+stores this field as `info.serial` and publishes it as `"serial"` in
+`/api/state`; the label is wrong, though the plumbing is fine.
+
+### Other observations
+
+- The dryer reports firmware **6.0.641041** - the OLDER build. The adapter
+  carries `G0644170` on its USB volume, so it ships a newer image than the
+  machine it was attached to is running.
+- The official adapter's MSC inquiry string is `TinyUSB Flash Storage 0.1`, the
+  TinyUSB default. It is a composite CDC+MSC device on the same stack we use.
+- Frames terminate with a single `\r`, confirming our encoder.
+- The protocol runs on **ep2**; ep3 is the mass-storage endpoint.
+- Traffic is overwhelmingly NAKs - 127,283 of 130,976 packets in 21 seconds are
+  the host polling an endpoint with nothing to say. The link is near-idle by
+  design, which is worth remembering before reading anything into quiet periods.

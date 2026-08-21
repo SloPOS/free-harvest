@@ -89,10 +89,19 @@ REAL_STAT = STATES["idle"]
 # THIS DEFAULT IS A PLACEHOLDER AND IS KNOWN WRONG for this user's machine: the
 # server reported the real cpu code as 37C9 355A 3037 while this UID was being
 # presented. Pass --uid (preferred, measured) or --cpu (derived) to correct it.
-PLACEHOLDER_UID = "3A916C02-11D48E77-00000000-00000000"
-REAL_UID = "UID,%s,1,6.4.0,1,0,0,0,0,0,0" % PLACEHOLDER_UID
-# The real serial number, read off the machine's data plate.
-REAL_SNM = "SNM,P-STF 2311-03561 BKC,"
+# MEASURED 2026-08-21 from a USB capture of the real dryer answering the
+# official adapter. Not inferred - these are the bytes on the wire.
+#
+# The unique-ID words are ASCII TEXT, not numbers: 33303337 is "3037",
+# 33353541 is "355A", 33374339 is "37C9". Read in reverse word order that
+# spells 37C9 355A 3037 - exactly the cpu code the app displays. So the
+# app shows the ID as characters while the wire carries their hex codes.
+REAL_UID = "UID,0-33303337-33353541-33374339,4,6.0.641041,0,5,2,1,51,204,255,"
+
+# SNM is a NAME, not a serial number. The real machine answers with its
+# user-set name; we had been sending the data-plate serial, which is a
+# different thing entirely and is not what the adapter expects.
+REAL_SNM = "SNM,Freezie McDry,"
 
 # Answers to what the adapter asks for. CFG is CONFIRMED - replying with this
 # made a real adapter stop asking REQCFG (3 requests in 45s -> 0).
@@ -250,28 +259,21 @@ def main():
             sys.exit("--cpu wants up to 4 hex groups, e.g. '37C9 355A 3037'")
         for w in words:
             int(w, 16)                      # fail loudly on non-hex
-        words += ["0"] * (4 - len(words))   # %lX prints an empty word as "0"
-        REAL_UID = "UID,%s,1,6.4.0,1,0,0,0,0,0,0" % "-".join(words)
+        # The wire carries the ASCII CODES of the displayed characters, in
+        # reverse word order, behind a leading zero word. Verified against a
+        # real capture: "37C9 355A 3037" -> 0-33303337-33353541-33374339.
+        enc = ["".join("%02X" % ord(c) for c in w) for w in reversed(words)]
+        REAL_UID = ("UID,0-%s,4,6.0.641041,0,5,2,1,51,204,255," % "-".join(enc))
     elif args.uid:
-        REAL_UID = "UID,%s,1,6.4.0,1,0,0,0,0,0,0" % args.uid
+        REAL_UID = "UID,%s,4,6.0.641041,0,5,2,1,51,204,255," % args.uid
     if args.serial:
         REAL_SNM = "SNM,%s," % args.serial
-
-    if PLACEHOLDER_UID in REAL_UID:
-        warn = "!! Presenting the PLACEHOLDER uid - the app will refuse commands and offer to register the unit."
-        print(warn, file=sys.stderr)
-        print("!! Pass --uid (measured) or --cpu (derived). See --help.",
-              file=sys.stderr)
 
     if args.dry_run:
         print("identity frames this run would present:")
         print("  " + REAL_UID)
         print("  " + REAL_SNM)
         print("  " + REAL_STAT)
-        if PLACEHOLDER_UID in REAL_UID:
-            print("")
-            print("  the UID above is the PLACEHOLDER and is known wrong for")
-            print("  this machine - the app will refuse commands.")
         return 0
 
     port = args.port
@@ -394,7 +396,14 @@ def main():
                 elif verb == "FDFILES":
                     pass   # deliberately unanswered - see FDFILES_ANSWER
                 else:
-                    reply = REAL_STAT if verb == "REQSTAT" else ANSWERS.get(verb)
+                    if verb == "REQSTAT":
+                        reply = REAL_STAT
+                    elif verb == "UNIQUE":
+                        # THE identity query. Captured: adapter sends a bare
+                        # UNIQUE, dryer answers with its UID frame.
+                        reply = REAL_UID
+                    else:
+                        reply = ANSWERS.get(verb)
                     if reply:
                         send(reply, f"answering {verb}")
 
