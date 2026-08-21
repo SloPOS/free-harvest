@@ -39,7 +39,7 @@ import urllib.request
 # Screens already identified, from cycle captures and the ADV probe.
 KNOWN = {
     1:  "Idle / Ready",
-    2:  "Starting batch (ADV from Ready reaches this)",
+    2:  "Starting batch (ADV from Ready reaches this - CAN STRAND, see notes)",
     4:  "Freezing",
     5:  "Drying",
     6:  "Final dry",
@@ -84,6 +84,19 @@ def main():
                 continue
 
             t = d.get("stat_type")
+
+            # "type 0" is NOT a screen - it is our own null state, reported when
+            # the adapter has no telemetry (link down, or the dryer rebooting).
+            # A screen walk that logs it as an unknown screen sends you looking
+            # for a panel that does not exist.
+            if not d.get("have_tel") or d.get("link") != "up":
+                if last is not None:
+                    emit(f"{time.time()-t0:7.1f}s   (no telemetry - dryer link "
+                         f"down or rebooting; not a screen)")
+                    last = None
+                time.sleep(args.poll)
+                continue
+
             if t is not None and t != last:
                 tag = KNOWN.get(t, "*** UNKNOWN - note what is on screen NOW ***")
                 emit(f"{time.time()-t0:7.1f}s   type {t:<4} {tag}")

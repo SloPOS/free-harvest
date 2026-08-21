@@ -499,6 +499,38 @@ static void test_new_phase_labels(void)
     CHECK_STR(hr_phase_label(HR_PHASE_COMPLETE), "Batch complete");
 }
 
+static void test_unconfirmed_types_do_not_invent_a_mode(void)
+{
+    /*
+     * STAT is multiplexed on the type discriminator, and field [11] means
+     * different things per screen. A panel walk showed the old code
+     * reporting mode as "5" on type 2, "-15" on type 31 and "5" on type 15,
+     * because it fell back to the type-1 layout for anything unrecognised.
+     *
+     * For an unconfirmed type the mode must be EMPTY. Showing a number as a
+     * mode is worse than showing nothing.
+     */
+    TEST_CASE("unconfirmed STAT types report no mode");
+    hr_frame_t f;
+    hr_telemetry_t t;
+
+    /* Type 31 (recipe settings): [11] held -15, previously shown as mode. */
+    CHECK(hr_frame_parse("STAT,31,0,0,0,69,10000,0,0,38,1,-15,x,,", &f));
+    CHECK(hr_telemetry_from_stat(&f, &t));
+    CHECK_INT(t.type, 31);
+    CHECK_STR(t.mode, "");
+
+    /* Type 1 still decodes normally - the confirmed layout is untouched. */
+    CHECK(hr_frame_parse("STAT,1,0,0,0,69,151637,0,0,38,1,1,Auto,v6.4,,", &f));
+    CHECK(hr_telemetry_from_stat(&f, &t));
+    CHECK_STR(t.mode, "Auto");
+
+    /* Type 17 keeps mode at [9]. */
+    CHECK(hr_frame_parse("STAT,17,0,0,0,64,10000,36,0,42,Auto,1,1,0,0,5,0,864,0,", &f));
+    CHECK(hr_telemetry_from_stat(&f, &t));
+    CHECK_STR(t.mode, "Auto");
+}
+
 int main(void)
 {
     test_type6_is_final_dry();
@@ -538,5 +570,6 @@ int main(void)
     test_rejects_non_stat();
     test_rejects_short_frame();
     test_json_output();
+    test_unconfirmed_types_do_not_invent_a_mode();
     return TEST_REPORT();
 }

@@ -92,11 +92,25 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
             out->freeze_pct = out->phase_pct; /* compat alias */
         }
         copy_field(out->mode, sizeof(out->mode), f, 9);
-    } else {
-        /* Normal (type 1 and friends): mode at [11], version at [12]. */
+    } else if (out->type == 1) {
+        /* Idle frame: mode at [11], version at [12]. */
         copy_field(out->mode, sizeof(out->mode), f, 11);
         copy_field(out->version, sizeof(out->version), f, 12);
     }
+    /*
+     * Any OTHER type: layout unconfirmed, so decode nothing beyond the
+     * shared header.
+     *
+     * This used to fall through to the type-1 layout, which produced
+     * nonsense: a screen walk showed mode reported as "5" on type 2,
+     * "-15" on type 31 and "5" on type 15, because field [11] means
+     * something different on each of those screens. STAT is multiplexed on
+     * the type discriminator and only types 1, 4-7 and 17 have been
+     * confirmed against real captures.
+     *
+     * Leaving the field empty is honest; showing a number as if it were a
+     * mode is not.
+     */
 
     out->valid = true;
     return true;

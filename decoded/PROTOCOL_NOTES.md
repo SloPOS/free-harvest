@@ -25,6 +25,35 @@
 > compressor, and returned to Ready on its own. The dryer also rebooted once
 > during the sweep; the cause is not isolated.
 >
+> ### ADV CAN STRAND THE MACHINE (2026-08-21)
+>
+> After `ADV` reached "Starting batch" (type 2), the dryer became stuck there
+> and needed a **hard power reset** to recover. The compressor never engaged,
+> so nothing was damaged - but a screen-press verb can leave the machine in a
+> state it will not leave on its own.
+>
+> This is the strongest argument for keeping `ADV` behind a confirmation and
+> out of any allow-list reachable from the network.
+
+> ### STAT layout varies by type - do not decode unconfirmed types
+>
+> The mode string is at index **9** for types 4-7 and 17, but index **11** for
+> type 1. Our decoder used to fall back to the type-1 layout for anything
+> unrecognised, which a panel walk exposed as nonsense:
+>
+> | screen | reported "mode" | reality |
+> |---|---|---|
+> | type 2 (starting batch) | `5` | field [11] means something else |
+> | type 31 (recipe settings) | `-15` | likely a temperature setting |
+> | type 15 (diagnostics) | `5` | unknown |
+>
+> Confirmed layouts: **1, 4, 5, 6, 7, 17**. Everything else now decodes only
+> the shared header, and reports an empty mode rather than a misleading
+> number.
+>
+> Note also that `phase=0 / type 0` is NOT a screen - it is the adapter's own
+> "no telemetry" state during a link drop or dryer reboot.
+
 > ### Replies captured from a real machine
 >
 > | Command | Reply |
