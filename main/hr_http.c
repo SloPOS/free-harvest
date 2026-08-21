@@ -8,6 +8,8 @@
 #include "hr_wifi.h"
 
 #include "esp_app_desc.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -115,6 +117,32 @@ static const char *wifi_status_str(void)
     }
 }
 
+/*
+ * Why the chip last started.
+ *
+ * A restart is invisible over WiFi unless you happen to catch a counter going
+ * backwards, which is exactly how the STATUS crash on 2026-08-21 was found -
+ * frames_in fell 49 -> 6 between two curls. Uptime and reset reason turn that
+ * from a lucky observation into a reading, and the reason separates a firmware
+ * panic from a brownout on the dryer's USB rail, which need opposite fixes.
+ */
+static const char *reset_reason_str(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "poweron";
+    case ESP_RST_EXT:      return "external";
+    case ESP_RST_SW:       return "sw";        /* esp_restart(), e.g. after OTA */
+    case ESP_RST_PANIC:    return "panic";     /* crashed - look for a coredump */
+    case ESP_RST_INT_WDT:  return "int_wdt";
+    case ESP_RST_TASK_WDT: return "task_wdt";
+    case ESP_RST_WDT:      return "wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT: return "brownout";  /* USB rail sagged */
+    case ESP_RST_SDIO:     return "sdio";
+    default:               return "unknown";
+    }
+}
+
 static esp_err_t h_state(httpd_req_t *req)
 {
     char ip[16], ssid[33], serial[64], uid[128];
@@ -139,7 +167,7 @@ static esp_err_t h_state(httpd_req_t *req)
     char mode_esc[32];
     hr_json_escape(s_tel_valid ? s_tel.mode : "", mode_esc, sizeof(mode_esc));
 
-    char body[900];
+    char body[1000];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
@@ -157,6 +185,7 @@ static esp_err_t h_state(httpd_req_t *req)
                       * console is not. See hr_usb.h for how to read them. */
                      "\"usb_mounted\":%s,\"usb_suspended\":%s,"
                      "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
+                     "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
@@ -176,7 +205,9 @@ static esp_err_t h_state(httpd_req_t *req)
                      (s_tel_valid && s_tel.pressure_valid) ? "true" : "false",
                      hr_usb_mounted() ? "true" : "false",
                      hr_usb_suspended() ? "true" : "false",
-                     hr_usb_mount_events(), hr_usb_rx_bytes());
+                     hr_usb_mount_events(), hr_usb_rx_bytes(),
+                     (unsigned long)(esp_timer_get_time() / 1000000),
+                     reset_reason_str());
     return send_json(req, body, n);
 }
 
