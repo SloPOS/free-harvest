@@ -2,14 +2,15 @@
 <img src="docs/img/leaf.svg" width="28" align="top" alt=""> Free Harvest
 </h1>
 
-**Open-source Wi-Fi monitoring for Harvest Right freeze dryers, running entirely on a $10 ESP32-S3.**
+**Open-source Wi-Fi monitoring _and control_ for Harvest Right freeze dryers, running entirely on a $10 ESP32-S3.**
 
 Free Harvest replaces the proprietary Harvest Right Wi-Fi adapter with hardware you
 own and firmware you can read. It plugs into the freeze dryer's USB port, decodes the
 machine's telemetry, and serves a mobile-friendly web app — with optional MQTT so the
 dryer appears in Home Assistant automatically.
 
-No cloud account. No vendor lock-in. Runs standalone or on your own network.
+Start a batch, configure a recipe, end a run, add drying time — from your phone, over
+your own network. No cloud account. No vendor lock-in.
 
 ![Dashboard while a batch runs](docs/img/dashboard-running.png)
 
@@ -18,7 +19,7 @@ No cloud account. No vendor lock-in. Runs standalone or on your own network.
 ## Contents
 
 - [What it does](#what-it-does)
-- [What it can't do (read this)](#what-it-cant-do-read-this)
+- [Remote control, and its limits](#remote-control-and-its-limits)
 - [Hardware](#hardware)
 - [Install the firmware](#install-the-firmware)
 - [First-time setup](#first-time-setup)
@@ -37,6 +38,9 @@ No cloud account. No vendor lock-in. Runs standalone or on your own network.
 
 | | |
 |---|---|
+| 🎛️ **Remote control** | Start, end, skip a stage, add drying time, defrost — the buttons the dryer is offering right now |
+| 🧪 **Recipe editor** | The dryer's own Candy and Custom setup screens, with sliders, replicated in the app |
+| 💾 **Saved recipes** | Store recipes with notes and a run count; the adapter suggests extra drying time when a batch needed it |
 | 📊 **Live dashboard** | Cycle phase, temperature, vacuum (microns), batch + phase timers, countdowns |
 | 🧭 **Phase-aware guidance** | Shows only the options valid right now, using the owner's-manual wording |
 | 🏠 **Home Assistant** | MQTT auto-discovery — sensors appear automatically, no YAML |
@@ -56,23 +60,60 @@ Two ways to run it:
 
 ---
 
-## What it can't do (read this)
+## Remote control, and its limits
 
-**Free Harvest cannot start, stop, or control a freeze-drying cycle.** This is a
-hard limit of the dryer, not an unfinished feature.
+**Free Harvest can start, configure and end a cycle.** Earlier versions of this
+README said that was impossible. It was wrong, and the correction is worth
+explaining because the mistake is an instructive one.
 
-The dryer's own firmware was disassembled to check. Its serial protocol accepts ~50
-commands — all of them read data or change settings. There is **no** `START`,
-`CONTINUE`, `DEFROST`, `MORE DRY TIME`, `END BATCH`, or equivalent. The touchscreen
-drives the machine through an internal path the serial link cannot reach. This looks
-deliberate: a freeze dryer runs vacuum pumps and heaters unattended for 24+ hours.
+The dryer's firmware was disassembled and its serial protocol found to accept ~50
+verbs, none of them `START`, `CONTINUE` or `END BATCH`. That fact is true. The
+inference drawn from it — that control was therefore not exposed — was not. Control
+is **screen-relative**: a single verb, `CLICK`, presses whatever the panel is
+currently showing.
 
-So the app shows you **what's happening and what to press next** — you press it on the
-machine. Every option in the UI is tagged `on dryer` for exactly this reason.
+    CLICK <screen> <button> <counter> <session>
+    CLICK 1 10 54779 175300      <- Start, on the Ready screen
 
-What it *can* write: batch name, preferences, date/time, recipe push. Hardware-control
-verbs (`DUTY`, `HCS`, `SPC`, `REBOOT`) are blocked in firmware and cannot be sent from
-the app or MQTT, by design.
+So there is no per-function verb to find, and searching for one finds nothing. The
+mechanism only became visible by watching the genuine app drive a simulated dryer.
+Every button in this app was captured that way, not guessed.
+
+### What that means in practice
+
+| | |
+|---|---|
+| **Start a batch** | Auto, or a Candy/Custom recipe you configured in the app |
+| **During a run** | End the batch, skip the current stage |
+| **Final dry** | Add or remove drying time |
+| **When complete** | Defrost, finish without defrost, warm trays, add two more hours |
+| **Recipes** | Full Candy and Custom editors, saved with notes on the adapter |
+
+### The safety model
+
+Control is **off by default**, behind a switch in Settings. Monitoring is useful to
+people who never want remote control, and the default should not be the option that
+can start a day-long cycle.
+
+Button numbers are screen-relative, which makes a **stale view** the real hazard —
+End Batch is button 4 on Freezing and button 1 on Drying, so a phone still showing
+the old screen would not mis-fire, it would press something else. The app therefore
+never sends a button number. It sends an action name plus the screen it *believed*
+it was showing, and the firmware refuses if telemetry disagrees.
+
+Screens whose buttons have never been captured offer **nothing at all** rather than
+guesses. Anything that starts, ends or skips part of a cycle asks first, and names
+the cost: *"You will lose 18h 04m of progress on this batch."*
+
+Some things stay blocked in firmware and cannot be reached from the app or MQTT:
+`DUTY`, `HCS`, `SPC` (hardware duty cycles), `REBOOT`, `SETSN` (overwrites the
+serial number) and `FDRENAME`. The dryer's own settings/diagnostics page is also not
+offered — opening it stops the machine servicing USB, so it is the one control that
+would destroy the connection it was sent over.
+
+**This is still a vacuum pump and a heater running unattended for 24 hours.** Remote
+control does not change that. Nothing here removes the need to load the trays and
+shut the drain valve by hand.
 
 ---
 
@@ -174,16 +215,50 @@ green and readings appear.
 Browse to the adapter's address from any device on your network. The dashboard shows
 whatever the dryer is doing right now.
 
-| Idle | Freezing | Drying | Final dry |
+| Idle | Freezing | Drying | Complete |
 |---|---|---|---|
-| ![Idle](docs/img/dashboard-idle.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Drying](docs/img/dashboard-drying.png) | ![Final dry](docs/img/dashboard-finaldry.png) |
-| Press **START** on the machine | % frozen + estimated time to 100% | Live vacuum in microns, phase timer | The long stage — 12h+ is normal, vacuum at its deepest |
+| ![Idle](docs/img/dashboard-controls.png) | ![Freezing](docs/img/dashboard-freezing.png) | ![Drying](docs/img/dashboard-drying.png) | ![Complete](docs/img/dashboard-complete.png) |
+| Start a batch, or open a recipe | % frozen + estimated time to 100% | Live vacuum in microns, phase timer, End Batch | Defrost, warm trays, or add two more hours |
+
+### Batch setup
+
+Pressing **Candy Setup** or **Custom Setup** moves the dryer to its configuration
+screen, and the app replicates that screen with sliders:
+
+| Candy | Custom |
+|---|---|
+| ![Candy setup](docs/img/setup-candy.png) | ![Custom setup](docs/img/setup-custom.png) |
+| Tray load, prewarm, dry temperatures and times | Initial freeze temperature, extra freeze time, dry temperature |
+
+Values are read from the machine, so you are editing what is genuinely loaded rather
+than a remembered default.
+
+**Submit, then Start.** Moving a slider changes nothing on the dryer. *Submit
+settings* sends the whole recipe; only then does *Start batch* unlock. Change
+anything afterwards and Start greys out until the new values are submitted — so the
+dryer never holds a half-finished set of edits, and Start always runs something that
+was explicitly confirmed. With nothing changed the roles invert: Submit is the greyed
+one, and Start simply runs what the machine already holds.
+
+### Saved recipes
+
+Recipes are stored on the adapter, not in your browser, so they survive reboots and
+read the same on every device. Each carries free-text notes and a run count.
+
+If a batch needed extra drying, the adapter notices — it watches for the screen
+returning from Complete to Drying, so it counts presses made by hand on the panel too
+— and offers to fold that time into the recipe.
+
+One quirk worth knowing: recipe names are checked against the protocol. The dryer
+matches verbs by substring and tests `ADD`, `DIR` and `DEL` *before* `SENDCANDY`, so a
+recipe called `ADDED SUGAR` would be routed to a different command entirely. Those
+names are refused. Lower case is fine — the dryer's comparison is case-sensitive.
 
 The **phase card** below the dial always tells you what's happening and what comes
 next, quoting the owner's manual — including the drain-valve steps that are easy to
 get wrong.
 
-Two actions are available from the app itself:
+Also available regardless of the control setting:
 
 - **🔄 Refresh now** — asks the dryer for an immediate status update
 - **🔔 Beep** — makes the dryer beep (handy for confirming the link end-to-end)
@@ -236,6 +311,8 @@ hrdryer/<id>/config/set   → set batch name
 | Section | Contains |
 |---|---|
 | **Batch** | Name the current batch |
+| **Recipes** | Save, edit, send and delete Candy and Custom recipes |
+| **Remote control** | Master switch for control. Off by default |
 | **Wi-Fi** | Network status, change network, forget network |
 | **Home Assistant / MQTT** | Broker host, port, credentials, connection status |
 | **Live data feed** | Verbs seen, live frame log, download capture |
@@ -389,9 +466,16 @@ every known verb, and which fields are confirmed vs. inferred.
   but cooling is exponential (Newton's law of cooling), so it under-estimates the
   final few degrees — which are the slowest. A curve-fitting estimator that learns
   from past cycles is in progress; the trend graph is its first piece.
-- **No remote cycle control exists, and none is possible.** The dryer's serial
-  protocol has no START/CONTINUE/DEFROST/CANCEL verb — this was established by
-  disassembling its firmware, not by guessing. All flow control is panel-only.
+- **Screens 15 (Diagnostics) and 44 are unmapped**, so the app offers no buttons on
+  them. Screen 2's Continue, and every other screen, is mapped.
+- **`SENDCANDY`/`SENDCUSTOM` sent through the raw command box or MQTT are
+  malformed.** Those paths use the generic field builder, which takes the quoted
+  recipe payload apart. The recipe editor builds them correctly.
+- **`reset_reason` reports `panic` after an OTA reboot** where a clean restart should
+  report `sw`. The new image boots and runs correctly and the filesystem is
+  unmounted cleanly first, but the cause is unfound.
+- **Several `SENDCANDY`/`SENDCUSTOM` fields are carried but not understood.** They
+  are passed through untouched rather than exposed for editing.
 - **Field meanings marked "inferred"** in the protocol notes need confirmation.
 
 Captures are very welcome — see below.

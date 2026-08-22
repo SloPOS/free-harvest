@@ -223,7 +223,18 @@
   .rcpfield{display:flex; justify-content:space-between; gap:10px;
             align-items:center; margin:6px 0}
   .rcpfield label{font-size:13px; color:var(--muted)}
-  .rcpfield input{width:120px}
+  /* Inherit the form styling rather than the browser default. Field theming
+     was scoped to .field, so these rendered as white boxes on the dark theme -
+     visible in a screenshot, and the sort of thing that only shows up when
+     someone photographs the page. */
+  .rcpfield input,.rcpfield textarea,.rcpfield select{
+    background:var(--bg); color:var(--fg); border:1px solid var(--line);
+    border-radius:12px; padding:8px 12px; font-size:15px;
+    font-family:inherit}
+  .rcpfield input:focus,.rcpfield textarea:focus{
+    outline:2px solid var(--accent); outline-offset:0}
+  .rcpfield input{width:140px; min-height:var(--tap)}
+  .rcpfield textarea{width:100%; margin-top:6px}
   .suggest{border:1px solid var(--accent); border-radius:12px; padding:10px;
            margin-bottom:10px; font-size:13px}
 
@@ -1874,7 +1885,10 @@ function paintDash(st){
                               : ("drying · " + st.temp_f + "°F"))
     : done    ? "Venting — open the drain valve on the dryer"
     : running ? "Running for " + hhmmss(st.elapsed_s)
-    : have    ? "Press START on the dryer when you're ready"
+    /* With control switched on the app can start a batch itself, so telling
+       the reader to walk to the machine is simply wrong. */
+    : have    ? (st.control ? "Choose a batch below, or start one on the dryer"
+                            : "Press START on the dryer when you're ready")
               : "Waiting for the first status frame";
 
   const ring=$("#ring");
@@ -1961,13 +1975,17 @@ function paintDash(st){
   const def = PHASE[phase] || PHASE[0];
   card.style.display="";
   $("#phasehead").textContent = def.head;
+  /* With control switched on these actions ARE reachable from the app, and
+     a card that says "on dryer" directly under a Controls card offering
+     the same button reads as a contradiction. */
+  const ctrlOn = !!(lastState && lastState.control);
   $("#phasebody").innerHTML = def.body;
   $("#phaseopts").innerHTML = (def.opts||[]).map(o=>
     `<div class="item" style="cursor:default">
        <span>${o.danger?"⛔":"▶️"}</span>
        <div class="t"><b style="${o.danger?'color:var(--bad)':''}">${o.k}</b>
          <span>${o.d}</span></div>
-       <span class="pill">on dryer</span>
+       <span class="pill">${ctrlOn ? "in app or on dryer" : "on dryer"}</span>
      </div>`).join("");
   /* Show the completion guidance while a batch is running, since we cannot
      detect the PROCESS COMPLETE phase from the wire yet. */
