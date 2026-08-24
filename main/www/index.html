@@ -973,6 +973,14 @@ function show(id){
     /* Scroll the modal itself, not the page behind it. */
     if(document.body.classList.contains("modal")) el.scrollTop=0;
     else window.scrollTo(0,0);
+
+    /* Settings-only data, fetched when Settings is opened rather than on every
+       dashboard load. Two browsers polling the dashboard already sit close to
+       the adapter's seven socket slots; these would push it over. */
+    if(el.id === "v-set"){
+      refreshLogbook();
+      refreshPin();
+    }
   }
   /* Keep the tab highlight in step however the view changed - X, backdrop,
      Escape and back-buttons all route through here, not just tab taps. */
@@ -2502,10 +2510,16 @@ $("#lbclear").addEventListener("click", async ()=>{
 $("#pinsave").addEventListener("click", ()=>savePin(false));
 $("#pinclear").addEventListener("click", ()=>savePin(true));
 
+/*
+ * The clock is posted once on load - it is tiny, and the adapter cannot
+ * timestamp anything until it happens.
+ *
+ * The logbook and PIN are NOT fetched here. They live in Settings, and firing
+ * them on every dashboard load took the page from ~5 concurrent requests to
+ * ~8; with two browsers open against seven socket slots that is enough to lock
+ * a second device out. They load when Settings is actually opened.
+ */
 postTime();
-refreshLogbook();
-refreshPin();
-setInterval(refreshLogbook, 60000);
 
 $("#setname").addEventListener("input", ()=>{
   setName = $("#setname").value.trim();

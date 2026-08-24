@@ -306,9 +306,19 @@ void hr_capture_mount_now(void)
     esp_vfs_spiffs_conf_t conf = {
         .base_path = MOUNT,
         .partition_label = "capture",
-        /* The frame writer, the trend save, stat() and an HTTP download can
-           all want a descriptor at once; 2 was too few and starved writes. */
-        .max_files = 6,
+        /*
+         * Descriptors, and why this keeps growing.
+         *
+         * 2 starved the frame writer. 6 was enough until the logbook arrived,
+         * which added an append path AND a reader that holds a descriptor open
+         * for the whole streamed response - so two browsers each fetching
+         * /api/batches, plus the frame writer and a trend save, exceeded it and
+         * the trend save started failing with EIO.
+         *
+         * The failure mode is quiet: writes fail, reads still work, and nothing
+         * is obviously broken until a graph is missing. Budget generously.
+         */
+        .max_files = 12,
         .format_if_mount_failed = true,
     };
     esp_err_t err = esp_vfs_spiffs_register(&conf);
