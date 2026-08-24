@@ -134,7 +134,7 @@ the rest of the protocol core:
 - No filesystem or network dependencies, so it is testable without hardware
 
 **`main/hr_batchstore.[ch]`** — the device-side half: SPIFFS append, the 256 KB
-reserve, oldest-record eviction, and the NVS in-progress record.
+reserve, segment rotation, and the NVS in-progress record.
 
 **`main/hr_http.c`** — `GET /api/batches` (streamed, never buffered),
 `GET /api/batches.csv` (both segments concatenated), `POST /api/time`.
