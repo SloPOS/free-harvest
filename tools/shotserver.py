@@ -39,7 +39,7 @@ BASE = {
     "phase_pct": 0, "phase_s": 0, "vacuum_um": 0, "vacuum_ok": False,
     "usb_mounted": True, "usb_suspended": False, "usb_mounts": 1,
     "usb_rx_bytes": 184320, "uptime_s": 74210, "reset_reason": "poweron",
-    "control": True, "actions": [], "last_stat": "", "version": "0.3.9",
+    "control": True, "actions": [], "last_stat": "", "version": "1.0.0",
 }
 
 READY_ACTIONS = [
@@ -141,6 +141,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         scen = q.get("s", ["idle"])[0]
+        theme = q.get("theme", [""])[0]
 
         if u.path in ("/", "/index.html"):
             html = open(WWW, encoding="utf-8").read()
@@ -152,6 +153,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                           lambda m: 'fetch("%s?s=%s"' % (m.group(1), scen), html)
             html = re.sub(r'urlopen\("(/api/[a-z/]+)"',
                           lambda m: 'urlopen("%s?s=%s"' % (m.group(1), scen), html)
+            # Force a theme for the screenshot. The app reads fh-theme from
+            # localStorage on load, so seeding it before the page script runs
+            # is enough - no clicking, and the page is otherwise untouched.
+            if theme in ("light", "dark"):
+                inject = ("<script>try{localStorage.setItem('fh-theme','%s');"
+                          "document.documentElement.setAttribute("
+                          "'data-theme','%s');}catch(e){}</script>"
+                          % (theme, theme))
+                html = html.replace("<script", inject + "<script", 1)
             return self._send(html, "text/html; charset=utf-8")
 
         if u.path == "/api/state":

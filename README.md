@@ -41,6 +41,8 @@ version 6, regrettably it will not send the signals appropriate for Free Harvest
 
 | | |
 |---|---|
+| 📒 **Batch logbook** | Every run recorded: duration, coldest point, deepest vacuum, pull-down time, extra drying |
+| 🔑 **Control PIN** | Optional PIN on anything that changes the dryer; monitoring stays open |
 | 🎛️ **Remote control** | Start, end, skip a stage, add drying time, defrost — the buttons the dryer is offering right now |
 | 🧪 **Recipe editor** | The dryer's own Candy and Custom setup screens, with sliders, replicated in the app |
 | 💾 **Saved recipes** | Store recipes with notes and a run count; the adapter suggests extra drying time when a batch needed it |
@@ -107,6 +109,15 @@ it was showing, and the firmware refuses if telemetry disagrees.
 Screens whose buttons have never been captured offer **nothing at all** rather than
 guesses. Anything that starts, ends or skips part of a cycle asks first, and names
 the cost: *"You will lose 18h 04m of progress on this batch."*
+
+**A PIN is available** and gates every endpoint that can change the machine —
+control, recipes, raw commands, firmware updates. Monitoring stays completely
+open. Five wrong attempts lock control for a minute, which turns guessing a
+four-digit PIN from seconds into weeks.
+
+It is not a login system, and the UI says so: no accounts, no sessions. The
+threat it addresses is a housemate or a guest tapping Start, not a determined
+attacker. Note there is **no recovery** — a forgotten PIN means reflashing.
 
 Some things stay blocked in firmware and cannot be reached from the app or MQTT:
 `DUTY`, `HCS`, `SPC` (hardware duty cycles), `REBOOT`, `SETSN` (overwrites the
@@ -268,6 +279,39 @@ Also available regardless of the control setting:
 
 ---
 
+### Batch logbook
+
+Every completed run is recorded on the adapter — name, date, duration, the
+coldest temperature reached, the deepest vacuum, how long the pump took to pull
+down, and how much extra drying was needed. Download it as CSV for a
+spreadsheet.
+
+It stores the **extremes**, not the last reading, because "how cold did it
+actually get" is the question worth answering. Runs that were ended early or
+interrupted by a power cut are recorded too, flagged as such — a batch that died
+at hour 18 is worth knowing about when tuning a recipe.
+
+The adapter has no clock and does not use SNTP, so it learns the time from your
+browser when you open the app. Records written before that ever happens say
+"date not recorded" rather than claiming 1970.
+
+### Light and dark, phone and desktop
+
+The interface follows your system theme, or you can pin it in Settings.
+
+| Dark | Light |
+|---|---|
+| ![Dark](docs/img/dashboard-running.png) | ![Light](docs/img/dashboard-light.png) |
+
+On a wide screen the layout goes two-column and Settings becomes a modal over
+the dashboard rather than a separate page:
+
+| Desktop, dark | Desktop, light |
+|---|---|
+| ![Desktop dark](docs/img/desktop-dark.png) | ![Desktop light](docs/img/desktop-light.png) |
+
+---
+
 ## Home Assistant / MQTT
 
 <img src="docs/img/settings-mqtt.png" width="330" align="right" alt="MQTT settings">
@@ -315,6 +359,8 @@ hrdryer/<id>/config/set   → set batch name
 |---|---|
 | **Batch** | Name the current batch |
 | **Recipes** | Save, edit, send and delete Candy and Custom recipes |
+| **Logbook** | Past batches, CSV download, clear |
+| **Control PIN** | Set, change or remove the PIN |
 | **Remote control** | Master switch for control. Off by default |
 | **Wi-Fi** | Network status, change network, forget network |
 | **Home Assistant / MQTT** | Broker host, port, credentials, connection status |
@@ -469,8 +515,14 @@ every known verb, and which fields are confirmed vs. inferred.
   but cooling is exponential (Newton's law of cooling), so it under-estimates the
   final few degrees — which are the slowest. A curve-fitting estimator that learns
   from past cycles is in progress; the trend graph is its first piece.
+- **Alerts and a learning time estimator are designed but not shipped.** Both
+  are specified in `docs/superpowers/specs/`; the estimator needs a body of real
+  batches before it can be validated, which is exactly what the logbook is now
+  collecting.
 - **Screens 15 (Diagnostics) and 44 are unmapped**, so the app offers no buttons on
   them. Screen 2's Continue, and every other screen, is mapped.
+- **Defrost has never been captured.** It can now be triggered (`CLICK 7 1`), so
+  this is one run away from being closed.
 - **`SENDCANDY`/`SENDCUSTOM` sent through the raw command box or MQTT are
   malformed.** Those paths use the generic field builder, which takes the quoted
   recipe payload apart. The recipe editor builds them correctly.
