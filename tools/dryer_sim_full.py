@@ -260,6 +260,87 @@ except ImportError:
         return None
 
 
+
+# ---------------------------------------------------------------------------
+# Scripted batch, for testing the adapter's logbook without running the dryer.
+#
+# A real freeze-drying run takes about a day. This walks the same phase
+# sequence in a couple of minutes so the batch tracker sees a genuine start,
+# a full set of phases, and a proper ending - which is the only way to exercise
+# the record-writing path without committing someone's machine to a 24-hour
+# cycle for a test.
+#
+# Field positions match the decoder: STAT,<type>,_,_,_,<tempF>,<pressure>,
+# <elapsed_s>,... so temperature, vacuum and elapsed all land where the adapter
+# expects them.
+# ---------------------------------------------------------------------------
+
+# phase, seconds to spend, elapsed at start, elapsed at end,
+# temp at start, temp at end, pressure at start, pressure at end
+BATCH_SCRIPT = [
+    ("prep",     17, 12,     0,   900,  69,  64, 10000, 10000),
+    ("starting",  2,  8,   900,  1200,  64,  40, 10000, 10000),
+    ("freezing",  4, 20,  1200,  7200,  40, -34, 10000, 10000),
+    ("drying",    5, 30,  7200, 40000, -34,  20,  1400,   288),
+    ("finaldry",  6, 20, 40000, 80000,  20,  41,   288,   400),
+    ("complete",  7, 10, 80000, 93600,  41,  69,   400,   400),
+]
+
+
+def stat_frame(kind, elapsed, temp, press):
+    """Build a STAT frame for a phase, keeping each type's real tail."""
+    tails = {
+        17: "0,42,Auto,1,1,0,0,5,0,900,0,",
+        2:  "0,43,Auto,1,1,0,0,5,2,120,0,0,,",
+        4:  "0,45,Auto,1,1,0,0,5,0,0,,",
+        5:  "0,46,Auto,1,34,0,0,5,0,0,0,",
+        6:  "0,68,CANDY,4,49,0,0,7,57,3619,0,,",
+        7:  "0,48,296,11,0,90,Auto,,",
+        1:  "0,38,1,1,Auto,v6.4,,",
+    }
+    return "STAT,%d,0,0,0,%d,%d,%d,%s" % (
+        kind, int(temp), int(press), int(elapsed), tails[kind])
+
+
+def run_batch(send, log, poll, stat_secs=2.0):
+    """
+    Walk a whole batch. `send` posts a frame, `poll` services inbound traffic
+    for a given number of seconds so the adapter's requests still get answers
+    while the script runs.
+    """
+    log("")
+    log("### SCRIPTED BATCH: walking a full run in about two minutes")
+    log("")
+
+    # Idle first, with the previous batch's elapsed still showing. This is the
+    # case that must NOT be mistaken for a running batch.
+    for _ in range(3):
+        send(stat_frame(1, 93600, 69, 151637), "idle (stale elapsed)")
+        poll(stat_secs)
+
+    names = {"prep": 17, "starting": 2, "freezing": 4,
+             "drying": 5, "finaldry": 6, "complete": 7}
+    for label, kind, secs, e0, e1, t0, t1, p0, p1 in BATCH_SCRIPT:
+        steps = max(2, int(secs / stat_secs))
+        log("  -> %s (screen %d)" % (label, kind))
+        for i in range(steps):
+            f = i / float(steps - 1)
+            send(stat_frame(kind,
+                            e0 + (e1 - e0) * f,
+                            t0 + (t1 - t0) * f,
+                            p0 + (p1 - p0) * f), label)
+            poll(stat_secs)
+
+    # Back to idle: the run is over and the dryer keeps the final elapsed.
+    for _ in range(3):
+        send(stat_frame(1, 93600, 69, 151637), "idle (batch finished)")
+        poll(stat_secs)
+
+    log("")
+    log("### BATCH COMPLETE - check /api/batches on the adapter")
+    log("")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -282,6 +363,10 @@ def main():
                          "rest. A DERIVED value - --uid is the measured one.")
     ap.add_argument("--serial", default=None,
                     help="override the serial number sent in SNM")
+    ap.add_argument("--run-batch", action="store_true",
+                    help="walk a whole freeze-drying run in about two minutes, "
+                         "to exercise the adapter's batch logbook without "
+                         "committing a real machine to a 24-hour cycle")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the identity frames that WOULD be sent, then "
                          "exit without opening the serial port")
@@ -372,6 +457,38 @@ def main():
     last_reqinfo = 0.0
     last_state = None          # watch for STATE's fields changing
     last_wifi = None           # watch the dryer-connected / provisioning flags
+    if args.run_batch:
+        # Service inbound traffic between scripted frames, so the adapter's own
+        # requests are still seen and logged while the run plays out.
+        def poll(secs):
+            nonlocal buf
+            end = time.time() + secs
+            while time.time() < end:
+                try:
+                    chunk = ser.read(128)
+                except Exception:
+                    return
+                if chunk:
+                    buf += chunk
+                    while CR in buf:
+                        line, buf = buf.split(CR, 1)
+                        t = line.decode("ascii", "replace").strip()
+                        if t:
+                            log("<- " + t)
+                            verb = t.split(" ")[0].split(",")[0]
+                            reply = ANSWERS.get(verb)
+                            if verb == "UNIQUE":
+                                reply = REAL_UID
+                            elif verb == "REQSTAT":
+                                reply = REAL_STAT
+                            if reply:
+                                send(reply, "answering " + verb)
+                time.sleep(0.05)
+
+        run_batch(send, log, poll, stat_secs=1.5)
+        log("transcript: " + log.path)
+        return 0
+
     deadline = time.time() + args.minutes * 60
 
     while time.time() < deadline:

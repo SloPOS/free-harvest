@@ -117,12 +117,17 @@ void hr_batch_tracker_reset(hr_batch_tracker_t *t);
  * phase is the STAT screen type; elapsed_s, temp_f and vacuum_um come from the
  * same frame. vacuum_um may be <= 0 when the dryer is not reporting one.
  *
+ * `mode` is the dryer's own label for the run - Auto, CANDY, CUSTOM. It names
+ * the record, because a logbook whose entries are all blank answers none of the
+ * questions it exists for. It is taken on every sample rather than only at the
+ * start: the mode field is not always populated on the first frame of a run.
+ *
  * Returns HR_BATCH_FINISHED and fills `out` on the sample that ends a run.
  */
 hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
                                   int32_t elapsed_s, int32_t temp_f,
-                                  int32_t vacuum_um, uint32_t now_epoch,
-                                  hr_batch_t *out);
+                                  int32_t vacuum_um, const char *mode,
+                                  uint32_t now_epoch, hr_batch_t *out);
 
 /*
  * Close an open run without a telemetry sample - used on boot when a batch was

@@ -1772,6 +1772,24 @@ static esp_err_t h_batches(httpd_req_t *req)
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
+/*
+ * POST /api/storage/format - last-resort recovery.
+ *
+ * For the state where SPIFFS reports free space and refuses every write. Wipes
+ * the capture log, the trend and the logbook, then re-mounts and re-initialises
+ * both stores so recording resumes without a reboot.
+ */
+static esp_err_t h_storage_format(httpd_req_t *req)
+{
+    bool ok = hr_capture_format();
+    if (ok) {
+        hr_batchstore_init();
+    }
+    ESP_LOGW(TAG, "storage format requested -> %s", ok ? "ok" : "FAILED");
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
+}
+
 /* POST /api/batches/clear */
 static esp_err_t h_batches_clear(httpd_req_t *req)
 {
@@ -1853,6 +1871,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/batches", HTTP_GET, h_batches);
     reg("/api/batches.csv", HTTP_GET, h_batches_csv);
     reg("/api/batches/clear", HTTP_POST, h_batches_clear);
+    reg("/api/storage/format", HTTP_POST, h_storage_format);
     reg("/api/pin", HTTP_GET, h_pin_state);
     reg("/api/pin", HTTP_POST, h_pin_set);
     reg("/api/control/enable", HTTP_POST, h_control_enable);

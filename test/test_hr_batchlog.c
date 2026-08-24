@@ -119,24 +119,24 @@ static void test_a_whole_run(void)
 
     /* Idle, with the PREVIOUS batch's elapsed still showing. This is the trap
      * the UI comment warns about: elapsed > 0 does not mean running. */
-    CHECK_INT(hr_batch_observe(&t, IDLE, 93600, 69, 0, 100, &rec),
+    CHECK_INT(hr_batch_observe(&t, IDLE, 93600, 69, 0, "Auto", 100, &rec),
               HR_BATCH_NOTHING);
     CHECK(!t.active);
 
-    CHECK_INT(hr_batch_observe(&t, PREP, 0, 68, 0, 200, &rec),
+    CHECK_INT(hr_batch_observe(&t, PREP, 0, 68, 0, "Auto", 200, &rec),
               HR_BATCH_STARTED);
     CHECK(t.active);
 
-    hr_batch_observe(&t, START,  600, 40, 0, 300, &rec);
-    hr_batch_observe(&t, FREEZE, 3600, -20, 0, 400, &rec);
-    hr_batch_observe(&t, FREEZE, 7200, -34, 0, 500, &rec);   /* coldest */
-    hr_batch_observe(&t, DRY,   10800, -30, 1400, 600, &rec);
-    hr_batch_observe(&t, DRY,   12640, -10, 480, 700, &rec); /* pulled down */
-    hr_batch_observe(&t, DRY,   40000, 20, 288, 800, &rec);  /* deepest */
-    hr_batch_observe(&t, FINAL, 80000, 41, 400, 900, &rec);
+    hr_batch_observe(&t, START,  600, 40, 0, "Auto", 300, &rec);
+    hr_batch_observe(&t, FREEZE, 3600, -20, 0, "Auto", 400, &rec);
+    hr_batch_observe(&t, FREEZE, 7200, -34, 0, "Auto", 500, &rec);   /* coldest */
+    hr_batch_observe(&t, DRY,   10800, -30, 1400, "Auto", 600, &rec);
+    hr_batch_observe(&t, DRY,   12640, -10, 480, "Auto", 700, &rec); /* pulled down */
+    hr_batch_observe(&t, DRY,   40000, 20, 288, "Auto", 800, &rec);  /* deepest */
+    hr_batch_observe(&t, FINAL, 80000, 41, 400, "Auto", 900, &rec);
 
     hr_batch_set_extra_dry(&t, 7200);
-    CHECK_INT(hr_batch_observe(&t, DONE, 93600, 69, 0, 1000, &rec),
+    CHECK_INT(hr_batch_observe(&t, DONE, 93600, 69, 0, "Auto", 1000, &rec),
               HR_BATCH_FINISHED);
 
     CHECK_INT(rec.outcome, HR_OUTCOME_COMPLETE);
@@ -146,7 +146,37 @@ static void test_a_whole_run(void)
     CHECK_INT((int)rec.best_vacuum_um, 288); /* deepest, not last */
     CHECK_INT((int)rec.pulldown_s, 12640 - 10800);
     CHECK_INT((int)rec.extra_dry_s, 7200);
+    /* The run must be NAMED. An unnamed record answers none of the questions
+     * the logbook exists for, and the first device run produced exactly that
+     * because nothing was feeding the mode through. */
+    CHECK_STR(rec.name, "Auto");
     CHECK(!t.active);
+}
+
+static void test_mode_names_the_run(void)
+{
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+
+    /* A mode that only appears after the run starts must still name it - the
+     * field is not reliably populated on the first frame. */
+    hr_batch_tracker_reset(&t);
+    hr_batch_observe(&t, PREP, 0, 68, 0, "", 100, &rec);
+    hr_batch_observe(&t, FREEZE, 600, 10, 0, "CANDY", 200, &rec);
+    hr_batch_observe(&t, DONE, 900, 60, 0, "CANDY", 300, &rec);
+    CHECK_STR(rec.name, "CANDY");
+
+    /* A missing mode throughout leaves it empty rather than inventing one. */
+    hr_batch_tracker_reset(&t);
+    hr_batch_observe(&t, PREP, 0, 68, 0, NULL, 100, &rec);
+    hr_batch_observe(&t, DONE, 900, 60, 0, NULL, 200, &rec);
+    CHECK_STR(rec.name, "");
+
+    /* A mode carrying a comma must not shift the record's fields. */
+    hr_batch_tracker_reset(&t);
+    hr_batch_observe(&t, PREP, 0, 68, 0, "od,d", 100, &rec);
+    hr_batch_observe(&t, DONE, 900, 60, 0, "od,d", 200, &rec);
+    CHECK(strchr(rec.name, ',') == NULL);
 }
 
 static void test_ended_early(void)
@@ -155,10 +185,10 @@ static void test_ended_early(void)
     hr_batch_t rec;
     hr_batch_tracker_reset(&t);
 
-    hr_batch_observe(&t, PREP, 0, 68, 0, 100, &rec);
-    hr_batch_observe(&t, FREEZE, 3600, -10, 0, 200, &rec);
+    hr_batch_observe(&t, PREP, 0, 68, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FREEZE, 3600, -10, 0, "Auto", 200, &rec);
     /* Straight back to idle without passing Complete: somebody pressed End. */
-    CHECK_INT(hr_batch_observe(&t, IDLE, 3700, 20, 0, 300, &rec),
+    CHECK_INT(hr_batch_observe(&t, IDLE, 3700, 20, 0, "Auto", 300, &rec),
               HR_BATCH_FINISHED);
     CHECK_INT(rec.outcome, HR_OUTCOME_ENDED_EARLY);
 }
@@ -169,12 +199,12 @@ static void test_elapsed_going_backwards_interrupts(void)
     hr_batch_t rec;
     hr_batch_tracker_reset(&t);
 
-    hr_batch_observe(&t, PREP, 0, 68, 0, 100, &rec);
-    hr_batch_observe(&t, FREEZE, 7200, -20, 0, 200, &rec);
+    hr_batch_observe(&t, PREP, 0, 68, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FREEZE, 7200, -20, 0, "Auto", 200, &rec);
 
     /* The dryer restarted a run while we were not looking. The open batch
      * never got an ending, and must not be silently folded into the new one. */
-    CHECK_INT(hr_batch_observe(&t, FREEZE, 60, -5, 0, 300, &rec),
+    CHECK_INT(hr_batch_observe(&t, FREEZE, 60, -5, 0, "Auto", 300, &rec),
               HR_BATCH_FINISHED);
     CHECK_INT(rec.outcome, HR_OUTCOME_INTERRUPTED);
     CHECK_INT((int)rec.duration_s, 7200);
@@ -188,7 +218,7 @@ static void test_abandon(void)
 
     CHECK(!hr_batch_abandon(&t, &rec));      /* nothing open */
 
-    hr_batch_observe(&t, DRY, 5000, 10, 700, 100, &rec);
+    hr_batch_observe(&t, DRY, 5000, 10, 700, "Auto", 100, &rec);
     CHECK(t.active);
     CHECK(hr_batch_abandon(&t, &rec));
     CHECK_INT(rec.outcome, HR_OUTCOME_INTERRUPTED);
@@ -203,8 +233,8 @@ static void test_unknown_date_stays_unknown(void)
     hr_batch_tracker_t t;
     hr_batch_t rec, back;
     hr_batch_tracker_reset(&t);
-    hr_batch_observe(&t, PREP, 0, 68, 0, 0, &rec);
-    hr_batch_observe(&t, DONE, 100, 69, 0, 0, &rec);
+    hr_batch_observe(&t, PREP, 0, 68, 0, "Auto", 0, &rec);
+    hr_batch_observe(&t, DONE, 100, 69, 0, "Auto", 0, &rec);
     CHECK_INT((int)rec.start_epoch, 0);
 
     char line[HR_BATCH_LINE_MAX];
@@ -220,9 +250,9 @@ static void test_no_vacuum_reported(void)
     hr_batch_tracker_t t;
     hr_batch_t rec;
     hr_batch_tracker_reset(&t);
-    hr_batch_observe(&t, PREP, 0, 68, 0, 100, &rec);
-    hr_batch_observe(&t, DRY, 3600, 10, 0, 200, &rec);
-    hr_batch_observe(&t, DONE, 7200, 60, 0, 300, &rec);
+    hr_batch_observe(&t, PREP, 0, 68, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, DRY, 3600, 10, 0, "Auto", 200, &rec);
+    hr_batch_observe(&t, DONE, 7200, 60, 0, "Auto", 300, &rec);
     CHECK_INT((int)rec.best_vacuum_um, 0);
     CHECK_INT((int)rec.pulldown_s, 0);
 }
@@ -234,6 +264,7 @@ int main(void)
     test_name_cannot_break_the_record();
     test_short_buffer_writes_nothing();
     test_a_whole_run();
+    test_mode_names_the_run();
     test_ended_early();
     test_elapsed_going_backwards_interrupts();
     test_abandon();

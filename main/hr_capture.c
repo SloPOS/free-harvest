@@ -411,6 +411,43 @@ void hr_capture_shutdown(void)
     ESP_LOGI(TAG, "capture filesystem unmounted cleanly");
 }
 
+/*
+ * Reformat the capture partition.
+ *
+ * SPIFFS can reach a state where it reports plenty of free space and still
+ * refuses every write with EIO - reads keep working, so nothing looks broken
+ * until you notice the trend graph and the logbook have both quietly stopped
+ * recording. This partition has already been corrupted once by an unclean
+ * reboot, so a way back is not hypothetical.
+ *
+ * Destructive: the capture log, the trend and the logbook all go. That is the
+ * point - the alternative is a device that silently never records again.
+ */
+bool hr_capture_format(void)
+{
+    ESP_LOGW(TAG, "reformatting the capture partition; stored data is lost");
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, pdMS_TO_TICKS(2000));
+    }
+    s_ready = false;
+    esp_vfs_spiffs_unregister("capture");
+    esp_err_t err = esp_spiffs_format("capture");
+    if (s_lock != NULL) {
+        xSemaphoreGive(s_lock);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "format failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    /*
+     * Re-mount directly rather than via hr_capture_init(), which SPAWNS the
+     * writer and mount tasks - calling it twice would leave duplicates running
+     * against the same queue.
+     */
+    hr_capture_mount_now();
+    return true;
+}
+
 void *hr_capture_open(void)
 {
     if (!s_ready) {

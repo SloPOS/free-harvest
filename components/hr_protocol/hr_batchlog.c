@@ -218,8 +218,8 @@ static void finish(hr_batch_tracker_t *t, hr_outcome_t why, hr_batch_t *out)
 
 hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
                                   int32_t elapsed_s, int32_t temp_f,
-                                  int32_t vacuum_um, uint32_t now_epoch,
-                                  hr_batch_t *out)
+                                  int32_t vacuum_um, const char *mode,
+                                  uint32_t now_epoch, hr_batch_t *out)
 {
     if (t == NULL) {
         return HR_BATCH_NOTHING;
@@ -245,6 +245,13 @@ hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
 
     if (t->active) {
         t->cur.duration_s = (uint32_t)(elapsed_s > 0 ? elapsed_s : 0);
+        /* Name the run from the dryer's own mode label. Refreshed on every
+         * sample because the field is not reliably populated on the first
+         * frame, and an unnamed record answers none of the questions the
+         * logbook exists for. */
+        if (mode != NULL && mode[0] != '\0' && t->cur.name[0] == '\0') {
+            sanitise(t->cur.name, sizeof(t->cur.name), mode);
+        }
         if (temp_f < t->cur.min_temp_f) {
             t->cur.min_temp_f = (int16_t)temp_f;
         }

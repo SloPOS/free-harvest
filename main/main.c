@@ -174,7 +174,8 @@ static void on_inbound(const hr_frame_t *f, void *user)
                              (int32_t)tel.temperature_f,
                              tel.pressure_valid
                                  ? (int32_t)tel.pressure_microns : 0,
-                             hr_time_now(), &finished) == HR_BATCH_FINISHED) {
+                             tel.mode, hr_time_now(),
+                             &finished) == HR_BATCH_FINISHED) {
             if (!s_batch_done_pending) {
                 finished.extra_dry_s = hr_http_extra_dry_s();
                 s_batch_done = finished;

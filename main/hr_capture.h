@@ -67,6 +67,11 @@ bool hr_capture_clear(void);
  * inconsistent. After this the capture APIs are inert. */
 void hr_capture_shutdown(void);
 
+/* Reformat the partition. Destroys the capture log, the trend and the
+ * logbook - the recovery path when SPIFFS refuses writes with EIO while
+ * still reporting free space. */
+bool hr_capture_format(void);
+
 void *hr_capture_open(void);
 int hr_capture_read(void *handle, char *buf, size_t cap);
 void hr_capture_close(void *handle);
