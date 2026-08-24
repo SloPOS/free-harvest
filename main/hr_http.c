@@ -1,6 +1,7 @@
 #include "hr_capture.h"
 #include "hr_control.h"
 #include "hr_recipe.h"
+#include "hr_batchstore.h"
 #include "hr_http.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
@@ -59,6 +60,11 @@ static hr_trend_t *s_trend;
 
 /* Learns how often drying had to be extended - see hr_recipe.h. */
 static hr_dry_tracker_t s_dry = {-1, 0};
+
+int32_t hr_http_extra_dry_s(void)
+{
+    return hr_dry_extra_s(&s_dry);
+}
 
 void hr_http_set_telemetry(const hr_telemetry_t *t)
 {
@@ -155,6 +161,11 @@ static const char *reset_reason_str(void)
 /* Defined with the rest of the control code further down; /api/state needs
  * it here to report whether control is switched on. */
 static bool ctrl_enabled(void);
+static bool pin_is_set(char *out, size_t cap);
+/* Defined with the PIN code below; the control endpoints above need it.
+ * Returns true when the request may proceed, and has already sent the
+ * refusal when it returns false. */
+static bool pin_guard(httpd_req_t *req, const char *body);
 
 static esp_err_t h_state(httpd_req_t *req)
 {
@@ -163,6 +174,7 @@ static esp_err_t h_state(httpd_req_t *req)
     hr_wifi_current_ssid(ssid, sizeof(ssid));
 
     char laststat[HR_MAX_FRAME * 2];
+    char pinbuf[16];
     LOCK();
     hr_json_escape(s_session->info.last_stat, laststat, sizeof(laststat));
     hr_json_escape(s_session->info.serial, serial, sizeof(serial));
@@ -226,7 +238,7 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"usb_mounted\":%s,\"usb_suspended\":%s,"
                      "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
                      "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
-                     "\"control\":%s,\"actions\":%s,"
+                     "\"control\":%s,\"actions\":%s,\"pin\":%s,"
                      /* Raw frame: the config screens carry the live
                       * recipe in fields we do not decode here, and the
                       * editor seeds itself from what is on the panel
@@ -254,7 +266,8 @@ static esp_err_t h_state(httpd_req_t *req)
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      (unsigned long)(esp_timer_get_time() / 1000000),
                      reset_reason_str(), ctrl_enabled() ? "true" : "false",
-                     acts, laststat);
+                     acts, pin_is_set(pinbuf, sizeof(pinbuf))
+                         ? "true" : "false", laststat);
     return send_json(req, body, n);
 }
 
@@ -697,6 +710,10 @@ static esp_err_t h_cmd(httpd_req_t *req)
     }
     buf[got] = '\0';
 
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
     char verb[HR_MAX_VERB] = {0};
     httpd_query_key_value(buf, "verb", verb, sizeof(verb));
     hr_url_decode(verb);
@@ -1023,6 +1040,10 @@ static esp_err_t h_control(httpd_req_t *req)
     }
     buf[got] = '\0';
 
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
     char action[32] = {0}, screen_s[8] = {0}, confirm_s[8] = {0};
     httpd_query_key_value(buf, "action", action, sizeof(action));
     httpd_query_key_value(buf, "screen", screen_s, sizeof(screen_s));
@@ -1300,6 +1321,9 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false}");
     }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
     char slot_s[8] = {0}, start_s[8] = {0}, conf_s[8] = {0};
     httpd_query_key_value(buf, "slot", slot_s, sizeof(slot_s));
     httpd_query_key_value(buf, "start", start_s, sizeof(start_s));
@@ -1370,6 +1394,9 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
     }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
     char fam_s[8] = {0}, nums[256] = {0}, start_s[8] = {0}, conf_s[8] = {0};
     hr_recipe_t r;
     memset(&r, 0, sizeof(r));
@@ -1428,6 +1455,328 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
                      "{\"ok\":%s,\"started\":%s}",
                      ok ? "true" : "false", start ? "true" : "false");
     return send_json(req, out, n);
+}
+
+/* -------------------------------------------------------------------- */
+/* Control PIN                                                           */
+/* -------------------------------------------------------------------- */
+
+/*
+ * A PIN on the endpoints that can change the machine. Monitoring stays open.
+ *
+ * The decision that network security was sufficient was made when this adapter
+ * was READ-ONLY. It can now start and end 24-hour cycles, and anything on the
+ * LAN can post to /api/control. That is a different risk, so it gets a
+ * different answer.
+ *
+ * This is deliberately not a login system - no accounts, no cookies, no
+ * sessions. The threat being addressed is "someone else on the network taps
+ * Start", not a determined attacker, and the UI says so rather than implying
+ * the device is secured.
+ */
+#define PIN_NVS_NS   "hrpin"
+#define PIN_MAX      9
+#define PIN_TRIES    5
+#define PIN_LOCK_MS  60000u
+
+static uint8_t  s_pin_fails;
+static uint32_t s_pin_locked_until;
+
+static bool pin_is_set(char *out, size_t cap)
+{
+    nvs_handle_t nh;
+    if (nvs_open(PIN_NVS_NS, NVS_READONLY, &nh) != ESP_OK) {
+        return false;
+    }
+    size_t len = cap;
+    bool ok = nvs_get_str(nh, "pin", out, &len) == ESP_OK && out[0] != '\0';
+    nvs_close(nh);
+    return ok;
+}
+
+static uint32_t ms_now(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/*
+ * Compare without an early exit.
+ *
+ * Timing analysis of a 4-digit PIN over HTTP is not a realistic attack, but a
+ * length-independent compare costs one line and removes the question.
+ */
+static bool pin_equal(const char *a, const char *b)
+{
+    size_t la = strlen(a), lb = strlen(b);
+    unsigned diff = (unsigned)(la ^ lb);
+    for (size_t i = 0; i < la && i < lb; i++) {
+        diff |= (unsigned)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+typedef enum {
+    PIN_OK = 0,
+    PIN_WRONG,
+    PIN_LOCKED,
+} pin_result_t;
+
+static pin_result_t pin_check(const char *supplied)
+{
+    char want[PIN_MAX + 1] = {0};
+    if (!pin_is_set(want, sizeof(want))) {
+        return PIN_OK;              /* no PIN configured: nothing to enforce */
+    }
+    if (s_pin_locked_until != 0 && ms_now() < s_pin_locked_until) {
+        return PIN_LOCKED;
+    }
+    if (supplied != NULL && supplied[0] && pin_equal(supplied, want)) {
+        s_pin_fails = 0;
+        return PIN_OK;
+    }
+    /*
+     * Lock out after a handful of wrong answers. A 4-digit PIN is 10,000
+     * guesses; unthrottled that is seconds over a LAN, and at five tries a
+     * minute it is weeks.
+     */
+    if (++s_pin_fails >= PIN_TRIES) {
+        s_pin_fails = 0;
+        s_pin_locked_until = ms_now() + PIN_LOCK_MS;
+        ESP_LOGW(TAG, "too many wrong PINs; control locked for %us",
+                 (unsigned)(PIN_LOCK_MS / 1000));
+        return PIN_LOCKED;
+    }
+    return PIN_WRONG;
+}
+
+/*
+ * Guard for a control endpoint. Returns true when the request may proceed;
+ * otherwise it has already sent the refusal.
+ */
+static bool pin_guard(httpd_req_t *req, const char *body)
+{
+    char supplied[PIN_MAX + 1] = {0};
+    if (body != NULL) {
+        httpd_query_key_value(body, "pin", supplied, sizeof(supplied));
+    }
+    switch (pin_check(supplied)) {
+    case PIN_OK:
+        return true;
+    case PIN_LOCKED:
+        httpd_resp_set_status(req, "429 Too Many Requests");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"reason\":\"too many wrong PINs - wait a minute\","
+            "\"pin\":true}");
+        return false;
+    default:
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_sendstr(req,
+            "{\"ok\":false,\"reason\":\"PIN required\",\"pin\":true}");
+        return false;
+    }
+}
+
+/* GET /api/pin -> whether one is set. Never returns the PIN itself. */
+static esp_err_t h_pin_state(httpd_req_t *req)
+{
+    char cur[PIN_MAX + 1] = {0};
+    bool set = pin_is_set(cur, sizeof(cur));
+    char out[64];
+    int n = snprintf(out, sizeof(out), "{\"set\":%s}", set ? "true" : "false");
+    return send_json(req, out, n);
+}
+
+/*
+ * POST /api/pin   new=<digits>&pin=<current>
+ *
+ * Changing or clearing an existing PIN requires the current one, or anyone on
+ * the network could simply replace it.
+ */
+static esp_err_t h_pin_set(httpd_req_t *req)
+{
+    char buf[128];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
+    char fresh[PIN_MAX + 1] = {0};
+    httpd_query_key_value(buf, "new", fresh, sizeof(fresh));
+
+    size_t len = strlen(fresh);
+    if (len != 0 && (len < 4 || len > 8)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+            "{\"ok\":false,\"reason\":\"PIN must be 4 to 8 digits\"}");
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (fresh[i] < '0' || fresh[i] > '9') {
+            httpd_resp_set_status(req, "400 Bad Request");
+            return httpd_resp_sendstr(req,
+                "{\"ok\":false,\"reason\":\"digits only\"}");
+        }
+    }
+
+    nvs_handle_t nh;
+    if (nvs_open(PIN_NVS_NS, NVS_READWRITE, &nh) != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    bool ok = nvs_set_str(nh, "pin", fresh) == ESP_OK &&
+              nvs_commit(nh) == ESP_OK;
+    nvs_close(nh);
+    ESP_LOGW(TAG, "control PIN %s", len ? "changed" : "removed");
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
+}
+
+/* -------------------------------------------------------------------- */
+/* Logbook and clock                                                     */
+/* -------------------------------------------------------------------- */
+
+/*
+ * POST /api/time   epoch=<unix seconds>
+ *
+ * The adapter has no RTC and deliberately does not use SNTP, so the browser
+ * tells it the time - the same arrangement SETDATE already uses for the dryer.
+ * Posted on every page load, so the clock is right as soon as anyone looks at
+ * the app, and drift between visits does not matter at logbook resolution.
+ */
+static esp_err_t h_time(httpd_req_t *req)
+{
+    char buf[64];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    char e[16] = {0};
+    httpd_query_key_value(buf, "epoch", e, sizeof(e));
+    uint32_t epoch = (uint32_t)strtoul(e, NULL, 10);
+    /* Report whether THIS value was accepted, not merely whether a clock has
+     * ever been set - otherwise posting nonsense returns ok while being
+     * silently discarded. */
+    bool accepted = hr_time_set(epoch);
+
+    char out[128];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":%s,\"now\":%lu,\"clock\":%s}",
+                     accepted ? "true" : "false",
+                     (unsigned long)hr_time_now(),
+                     hr_time_known() ? "true" : "false");
+    if (!accepted) {
+        httpd_resp_set_status(req, "400 Bad Request");
+    }
+    return send_json(req, out, n);
+}
+
+/* GET /api/batches.csv - both segments, streamed, oldest first. */
+static esp_err_t h_batches_csv(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=batches.csv");
+    void *h = hr_batchstore_open();
+    if (h == NULL) {
+        return httpd_resp_sendstr(req, "");
+    }
+    static char buf[512];
+    int n;
+    while ((n = hr_batchstore_read(h, buf, sizeof(buf))) > 0) {
+        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
+            hr_batchstore_close(h);
+            return ESP_FAIL;
+        }
+    }
+    hr_batchstore_close(h);
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
+/*
+ * GET /api/batches - the logbook as JSON, newest first.
+ *
+ * Streamed a record at a time. With no PSRAM there is no holding a thousand
+ * batches in memory to sort them, so the file is read once into a bounded
+ * ring of the most recent entries and only those are rendered.
+ */
+#define BATCH_SHOW 40
+
+static esp_err_t h_batches(httpd_req_t *req)
+{
+    static hr_batch_t ring[BATCH_SHOW];
+    size_t have = 0, next = 0;
+
+    void *h = hr_batchstore_open();
+    if (h != NULL) {
+        char chunk[512];
+        char line[HR_BATCH_LINE_MAX];
+        size_t at = 0;
+        int n;
+        while ((n = hr_batchstore_read(h, chunk, sizeof(chunk))) > 0) {
+            for (int i = 0; i < n; i++) {
+                char c = chunk[i];
+                if (c == '\n' || at + 1 >= sizeof(line)) {
+                    line[at] = '\0';
+                    hr_batch_t b;
+                    if (at > 0 && hr_batch_decode(line, &b)) {
+                        ring[next] = b;
+                        next = (next + 1) % BATCH_SHOW;
+                        if (have < BATCH_SHOW) {
+                            have++;
+                        }
+                    }
+                    at = 0;
+                } else if (c != '\r') {
+                    line[at++] = c;
+                }
+            }
+        }
+        hr_batchstore_close(h);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    char head[128];
+    int hn = snprintf(head, sizeof(head),
+                      "{\"clock\":%s,\"now\":%lu,\"bytes\":%u,\"batches\":[",
+                      hr_time_known() ? "true" : "false",
+                      (unsigned long)hr_time_now(),
+                      (unsigned)hr_batchstore_bytes());
+    httpd_resp_send_chunk(req, head, hn);
+
+    /* Newest first: walk the ring backwards from the most recent write. */
+    for (size_t k = 0; k < have; k++) {
+        size_t idx = (next + BATCH_SHOW - 1 - k) % BATCH_SHOW;
+        const hr_batch_t *b = &ring[idx];
+        char nm[64];
+        hr_json_escape(b->name, nm, sizeof(nm));
+        char row[352];
+        int rn = snprintf(row, sizeof(row),
+                          "%s{\"start\":%lu,\"duration_s\":%lu,\"name\":\"%s\","
+                          "\"family\":%u,\"extra_dry_s\":%ld,\"min_f\":%d,"
+                          "\"max_f\":%d,\"vacuum_um\":%ld,\"pulldown_s\":%lu,"
+                          "\"outcome\":\"%s\"}",
+                          k ? "," : "",
+                          (unsigned long)b->start_epoch,
+                          (unsigned long)b->duration_s, nm,
+                          (unsigned)b->family, (long)b->extra_dry_s,
+                          (int)b->min_temp_f, (int)b->max_temp_f,
+                          (long)b->best_vacuum_um,
+                          (unsigned long)b->pulldown_s,
+                          hr_outcome_str(b->outcome));
+        if (rn > 0 && httpd_resp_send_chunk(req, row, rn) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    httpd_resp_send_chunk(req, "]}", 2);
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
+/* POST /api/batches/clear */
+static esp_err_t h_batches_clear(httpd_req_t *req)
+{
+    bool ok = hr_batchstore_clear();
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
 }
 
 /* -------------------------------------------------------------------- */
@@ -1500,6 +1849,12 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/recipes/delete", HTTP_POST, h_recipe_delete);
     reg("/api/recipes/send", HTTP_POST, h_recipe_send);
     reg("/api/recipes/apply", HTTP_POST, h_recipe_apply);
+    reg("/api/time", HTTP_POST, h_time);
+    reg("/api/batches", HTTP_GET, h_batches);
+    reg("/api/batches.csv", HTTP_GET, h_batches_csv);
+    reg("/api/batches/clear", HTTP_POST, h_batches_clear);
+    reg("/api/pin", HTTP_GET, h_pin_state);
+    reg("/api/pin", HTTP_POST, h_pin_set);
     reg("/api/control/enable", HTTP_POST, h_control_enable);
     reg("/api/history", HTTP_GET, h_history);
     reg("/api/verbs", HTTP_GET, h_verbs);

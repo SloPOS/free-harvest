@@ -10,6 +10,7 @@
  * confirmed - see README and decoded/PROTOCOL_NOTES.md.
  */
 #include "hr_capture.h"
+#include "hr_batchstore.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
@@ -47,6 +48,23 @@ static hr_phase_tracker_t s_tracker;
 static hr_trend_t s_trend;
 /* Last batch-elapsed seen, to notice a new batch and start a fresh series. */
 static long s_last_batch_elapsed = -1;
+
+/*
+ * Batch logbook.
+ *
+ * The tracker is fed from the USB RX callback because that is where telemetry
+ * arrives, but it only ever computes - no flash, no NVS. A finished record is
+ * parked here and written by the main loop instead, for the same reason
+ * hr_capture_append() queues rather than writing: this callback runs on the
+ * TinyUSB task, and flash work on that stack is what panicked the chip once
+ * already.
+ */
+static hr_batch_tracker_t s_batch;
+static hr_batch_t         s_batch_done;
+static volatile bool      s_batch_done_pending;
+static bool               s_batch_boot_checked;
+static uint32_t           s_batch_saved_ms;
+static bool               s_batch_store_inited;
 /* Graph points already written to flash, so the loop only persists new ones. */
 static size_t s_trend_persisted;
 /* The resume decision runs once, after the capture log mounts and the dryer
@@ -145,6 +163,24 @@ static void on_inbound(const hr_frame_t *f, void *user)
         hr_trend_add(&s_trend, now_ms(), (int)tel.temperature_f,
                      (uint32_t)tel.pressure_microns, tel.pressure_valid);
         xSemaphoreGive(s_hist_lock);
+
+        /*
+         * Watch for batch boundaries. Pure computation - a finished record is
+         * handed to the main loop to write, never written from here.
+         */
+        hr_batch_t finished;
+        if (hr_batch_observe(&s_batch, (int)tel.type,
+                             (int32_t)tel.batch_elapsed_s,
+                             (int32_t)tel.temperature_f,
+                             tel.pressure_valid
+                                 ? (int32_t)tel.pressure_microns : 0,
+                             hr_time_now(), &finished) == HR_BATCH_FINISHED) {
+            if (!s_batch_done_pending) {
+                finished.extra_dry_s = hr_http_extra_dry_s();
+                s_batch_done = finished;
+                s_batch_done_pending = true;
+            }
+        }
     }
 
 #if CONFIG_HR_HTTP_LOG_TO_UART
@@ -189,6 +225,10 @@ void app_main(void)
      * rather than as an out-of-memory condition anywhere in the log.
      */
     hr_capture_init();
+    /* hr_batchstore_init() is NOT called here: the capture partition mounts on
+     * a deferred task and is not available yet. The main loop initialises the
+     * store once hr_capture_ready() reports the filesystem is up. */
+    hr_batch_tracker_reset(&s_batch);
 
     hr_wifi_start();
 
@@ -284,6 +324,45 @@ void app_main(void)
                 }
             }
             xSemaphoreGive(s_hist_lock);
+        }
+
+        /* ---- batch logbook. All flash work happens on THIS task. ------- */
+        if (!s_batch_store_inited && hr_capture_ready()) {
+            s_batch_store_inited = true;
+            hr_batchstore_init();
+        }
+        if (hr_batchstore_ready()) {
+            /*
+             * Once, after mount: a record left open in NVS means the adapter
+             * went down mid-batch. Close it as interrupted rather than let it
+             * silently merge into whatever runs next.
+             */
+            if (!s_batch_boot_checked) {
+                s_batch_boot_checked = true;
+                hr_batch_t open;
+                if (hr_batchstore_load_open(&open)) {
+                    open.outcome = HR_OUTCOME_INTERRUPTED;
+                    hr_batchstore_append(&open);
+                    hr_batchstore_clear_open();
+                    ESP_LOGW(TAG, "recovered an interrupted batch: %s, %us",
+                             open.name, (unsigned)open.duration_s);
+                }
+            }
+
+            if (s_batch_done_pending) {
+                s_batch_done_pending = false;
+                hr_batchstore_append(&s_batch_done);
+                hr_batchstore_clear_open();
+            } else if (s_batch.active &&
+                       (uint32_t)now_ms() - s_batch_saved_ms > 60000u) {
+                /*
+                 * Checkpoint the open batch once a minute: often enough that a
+                 * power cut costs at most a minute of a 24-hour run, rare
+                 * enough not to wear out the NVS partition.
+                 */
+                s_batch_saved_ms = (uint32_t)now_ms();
+                hr_batchstore_save_open(&s_batch.cur);
+            }
         }
 
         /*

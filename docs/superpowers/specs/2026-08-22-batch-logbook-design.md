@@ -38,7 +38,7 @@ storage shape available rather than the most compact one.
 
 ### Storage: append-only CSV
 
-Batch records go in `/cap/batches.0.csv` and `/cap/batches.1.csv`, one line per batch,
+Batch records go in `/capture/batches.0.csv` and `/capture/batches.1.csv`, one line per batch,
 appended and never rewritten.
 
 **Append-only is the point.** The trend file uses a whole-file `"wb"` rewrite;

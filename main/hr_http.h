@@ -26,7 +26,7 @@
 
 /* Free Harvest release version, shown in Settings so users can report it.
  * Keep this in step with the git tag when cutting a release. */
-#define FREEHARVEST_VERSION "0.3.9"
+#define FREEHARVEST_VERSION "0.4.0"
 
 /*
  * Provide the mutex that guards the shared history object. MUST be called
@@ -52,6 +52,15 @@ void hr_http_notify(uint32_t seq);
  * phase and live readings. Called from the frame observer.
  */
 void hr_http_set_telemetry(const hr_telemetry_t *t);
+
+/*
+ * Seconds of extra drying observed during the current run.
+ *
+ * The tracker that counts them lives here because it is fed from telemetry,
+ * but the batch record is assembled in main.c - hence the accessor rather than
+ * a shared global.
+ */
+int32_t hr_http_extra_dry_s(void);
 
 /*
  * Publish the running/idle tracker so /api/state can distinguish "batch

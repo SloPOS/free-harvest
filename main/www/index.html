@@ -806,6 +806,38 @@
     </div>
 
     <div class="card">
+      <h2>Logbook</h2>
+      <div id="logbook"></div>
+      <div class="rcprow" style="margin-top:12px">
+        <button type="button" id="lbcsv">Download CSV</button>
+        <button type="button" id="lbclear">Clear</button>
+      </div>
+      <div class="hint" id="lbhint"></div>
+    </div>
+
+    <div class="card">
+      <h2>Control PIN</h2>
+      <div id="pinstate" class="hint"></div>
+      <div class="rcpfield" style="margin-top:10px">
+        <label for="pinnew">New PIN</label>
+        <input id="pinnew" inputmode="numeric" maxlength="8" placeholder="4-8 digits">
+      </div>
+      <div class="rcprow">
+        <button type="button" id="pinsave">Set PIN</button>
+        <button type="button" id="pinclear">Remove</button>
+      </div>
+      <div class="hint">
+        Required for anything that changes the dryer. Monitoring stays open to
+        everyone on the network. This keeps a housemate or a guest from tapping
+        Start &mdash; it is not a login, and it does not make the adapter secure
+        against someone who is actually trying.
+        <br><br>
+        <b>There is no recovery.</b> Forgetting the PIN means reflashing to
+        clear it.
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Recipes</h2>
       <div id="rcpsuggest"></div>
       <div id="rcplist"></div>
@@ -1210,6 +1242,116 @@ function artFor(phase, tempF){
 }
 
 /* ---------- dashboard (phase-gated) ---------- */
+/* ---- Control PIN --------------------------------------------------------
+ *
+ * Held in sessionStorage, not localStorage: it should not outlive the browser
+ * session on a shared or family device, which is much of the point of having
+ * one.
+ */
+function pinGet(){ try{ return sessionStorage.getItem("fh_pin") || ""; }catch(e){ return ""; } }
+function pinPut(v){ try{ v ? sessionStorage.setItem("fh_pin", v)
+                          : sessionStorage.removeItem("fh_pin"); }catch(e){} }
+
+/*
+ * POST to a control endpoint, attaching the PIN and asking for it once if the
+ * adapter says it is needed. One retry only - repeated prompting on a wrong
+ * PIN would walk straight into the lockout.
+ */
+async function ctrlPost(url, body){
+  const withPin = b => pinGet() ? b + "&pin=" + encodeURIComponent(pinGet()) : b;
+  let r = await fetch(url, {method:"POST", body: withPin(body)});
+  let j = await r.json().catch(()=>({}));
+  if(!j.ok && j.pin){
+    const entered = prompt("Control PIN");
+    if(!entered) return j;
+    pinPut(entered);
+    r = await fetch(url, {method:"POST", body: withPin(body)});
+    j = await r.json().catch(()=>({}));
+    if(!j.ok && j.pin) pinPut("");     /* wrong: do not keep it */
+  }
+  return j;
+}
+
+async function refreshPin(){
+  try{
+    const j = await (await fetch("/api/pin")).json();
+    $("#pinstate").textContent = j.set
+      ? "A PIN is set. Control actions ask for it once per browser session."
+      : "No PIN set. Anyone on this network can control the dryer.";
+  }catch(e){}
+}
+
+async function savePin(clear){
+  const v = clear ? "" : $("#pinnew").value.trim();
+  const j = await ctrlPost("/api/pin", "new=" + encodeURIComponent(v));
+  if(!j.ok){ alert("Could not change the PIN: " + (j.reason || "unknown")); }
+  else { pinPut(clear ? "" : v); $("#pinnew").value = ""; }
+  refreshPin();
+}
+
+/* ---- Logbook ------------------------------------------------------------ */
+
+function fmtDur2(sec){
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+  return h ? (h + "h " + String(m).padStart(2,"0") + "m") : (m + "m");
+}
+
+async function refreshLogbook(){
+  const box = $("#logbook");
+  if(!box) return;
+  let d;
+  try{ d = await (await fetch("/api/batches")).json(); }catch(e){ return; }
+
+  $("#lbhint").textContent = d.clock
+    ? Math.round((d.bytes||0)/1024) + " KB stored"
+    : "The adapter does not know the date yet, so recent batches may show " +
+      "no date. It learns the time when this page loads.";
+
+  if(!d.batches || !d.batches.length){
+    box.innerHTML = '<div class="hint">No batches recorded yet. The first one ' +
+                    'appears here when a run finishes.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  d.batches.forEach(function(b){
+    const el = document.createElement("div");
+    el.className = "rcp";
+    /* start === 0 means the clock was never set. Say so rather than
+       rendering a 1970 date that looks like a real one. */
+    const when = b.start
+      ? new Date(b.start*1000).toLocaleString()
+      : "date not recorded";
+    const bits = [fmtDur2(b.duration_s)];
+    if(b.min_f !== undefined) bits.push("min " + b.min_f + "\u00b0F");
+    if(b.vacuum_um) bits.push(b.vacuum_um + " \u00b5m");
+    if(b.pulldown_s) bits.push("pulldown " + fmtDur2(b.pulldown_s));
+    if(b.extra_dry_s) bits.push("+" + fmtDur2(b.extra_dry_s) + " drying");
+
+    el.innerHTML = "<h3></h3><div class='meta'></div><div class='meta'></div>";
+    el.querySelector("h3").textContent = b.name || "(unnamed)";
+    el.querySelectorAll(".meta")[0].textContent =
+      when + " \u00b7 " + b.outcome;
+    el.querySelectorAll(".meta")[1].textContent = bits.join("  \u00b7  ");
+    if(b.outcome !== "complete"){
+      el.style.borderColor = "#e5484d";
+    }
+    box.appendChild(el);
+  });
+}
+
+/*
+ * Tell the adapter the time.
+ *
+ * It has no RTC and deliberately does not use SNTP, so this is how it learns
+ * the date at all - the same arrangement SETDATE already uses for the dryer.
+ */
+async function postTime(){
+  try{
+    await fetch("/api/time",
+                {method:"POST", body:"epoch=" + Math.floor(Date.now()/1000)});
+  }catch(e){}
+}
+
 /* ---- Batch setup panel --------------------------------------------------
  *
  * Replicates the dryer's Candy and Custom configuration screens.
@@ -1462,8 +1604,7 @@ async function submitSetup(start){
                "&num="+encodeURIComponent(setNumsForWire())+
                "&start="+(start?"1":"0")+"&confirm="+(start?"1":"0");
   try{
-    const r = await fetch("/api/recipes/apply",{method:"POST",body:body});
-    const j = await r.json().catch(function(){return {};});
+    const j = await ctrlPost("/api/recipes/apply", body);
     if(!j.ok){
       $("#sethint").textContent = "Refused: " + (j.reason || "unknown error");
       return;
@@ -1493,8 +1634,8 @@ async function submitSetup(start){
 async function cancelSetup(){
   const action = setFam === 4 ? "cfg_cancel" : "custom_cancel";
   try{
-    await fetch("/api/control",{method:"POST",
-      body:"action="+action+"&screen="+setScreen+"&confirm=1"});
+    await ctrlPost("/api/control",
+      "action="+action+"&screen="+setScreen+"&confirm=1");
   }catch(e){}
   refreshState();
 }
@@ -1720,8 +1861,7 @@ async function sendRecipe(r, start){
   try{
     const body = "slot="+r.slot+"&start="+(start?"1":"0")+
                  "&confirm="+(start?"1":"0");
-    const resp = await fetch("/api/recipes/send",{method:"POST",body:body});
-    const j = await resp.json().catch(function(){return {};});
+    const j = await ctrlPost("/api/recipes/send", body);
     if(!j.ok){ alert("Could not send: " + (j.reason || "unknown error")); return; }
   }catch(e){ alert("Could not reach the adapter."); return; }
   refreshState();
@@ -1831,9 +1971,8 @@ async function sendAction(act, screen, confirmed){
     var body="action="+encodeURIComponent(act.name)+
              "&screen="+encodeURIComponent(screen)+
              "&confirm="+(confirmed?"1":"0");
-    var r=await fetch("/api/control",{method:"POST",body:body});
-    var j=await r.json().catch(function(){return {};});
-    if(r.ok && j.ok){
+    var j=await ctrlPost("/api/control", body);
+    if(j.ok){
       $("#ctrlhint").textContent="Sent "+act.label+". Watching for the dryer "+
                                  "to change screen…";
       refreshState();
@@ -2351,6 +2490,22 @@ $("#cfyes").addEventListener("click", async ()=>{
   if(p.start){ sendRecipe(p.recipe, true); return; }
   sendAction(p.act, p.screen, true);
 });
+
+$("#lbcsv").addEventListener("click", ()=>{
+  window.location = "/api/batches.csv";
+});
+$("#lbclear").addEventListener("click", async ()=>{
+  if(!confirm("Delete every batch record? This cannot be undone.")) return;
+  try{ await fetch("/api/batches/clear",{method:"POST"}); }catch(e){}
+  refreshLogbook();
+});
+$("#pinsave").addEventListener("click", ()=>savePin(false));
+$("#pinclear").addEventListener("click", ()=>savePin(true));
+
+postTime();
+refreshLogbook();
+refreshPin();
+setInterval(refreshLogbook, 60000);
 
 $("#setname").addEventListener("input", ()=>{
   setName = $("#setname").value.trim();
