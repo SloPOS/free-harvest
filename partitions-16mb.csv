@@ -1,0 +1,13 @@
+# Name,     Type, SubType,  Offset,   Size,   Flags
+# 16MB variant, for modules such as ESP32-S3-DevKitC-1-N16R8.
+#
+# Same 2MB OTA slots as the 8MB layout - the app is 1.3MB and there is no
+# reason to make the slots bigger just because the flash is. Everything else
+# goes to the capture partition, which is what actually benefits: ~11.9MB holds
+# something like 800 hours of frames instead of 200.
+nvs,         data, nvs,      0x9000,   0x6000,
+otadata,     data, ota,      0xf000,   0x2000,
+phy_init,    data, phy,      0x11000,  0x1000,
+ota_0,       app,  ota_0,    0x20000,  0x200000,
+ota_1,       app,  ota_1,    0x220000, 0x200000,
+capture,     data, spiffs,   0x420000, 0xBE0000,
