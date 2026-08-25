@@ -135,7 +135,7 @@ shut the drain valve by hand.
 
 | Item | Notes |
 |---|---|
-| **ESP32-S3 board** | Must be **S3** (or S2) — needs native USB. An ESP32-S3-DevKitC-1 works best: https://amzn.to/4hGcVpa. ~$10. |
+| **ESP32-S3 board** | Must be **S3** (or S2) — needs native USB. An ESP32-S3 N16R8 DevKitC-1 works best: [https://amzn.to/4hGcVpa](https://amzn.to/4zDtFEi). ~$12. |
 | **USB-C to USB-A cable** | From the board's **USB** port to the freeze dryer's USB-A port. |
 | Freeze dryer | Harvest Right, firmware v6.x (developed against v6.4 / build 641041). |
 
