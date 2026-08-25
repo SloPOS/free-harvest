@@ -1800,11 +1800,29 @@ static esp_err_t h_batches_clear(httpd_req_t *req)
 /* -------------------------------------------------------------------- */
 /* Registration                                                          */
 /* -------------------------------------------------------------------- */
+/*
+ * Register a route, and SAY SO when it fails.
+ *
+ * This has now silently overflowed max_uri_handlers twice. Both times the only
+ * evidence was one buried httpd warning, and the visible symptom was a handful
+ * of routes 404ing for no apparent reason - the second time taking the captive
+ * portal endpoints with them, which is how a phone finds the setup hotspot.
+ *
+ * A route that fails to register is a broken build, not a warning, so it is
+ * logged at ERROR with its own name and the running count.
+ */
+static int s_routes;
+
 static void reg(const char *uri, httpd_method_t method,
                 esp_err_t (*fn)(httpd_req_t *))
 {
     httpd_uri_t u = {.uri = uri, .method = method, .handler = fn};
-    httpd_register_uri_handler(s_httpd, &u);
+    esp_err_t err = httpd_register_uri_handler(s_httpd, &u);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ROUTE LOST: %s (#%d) - %s. Raise max_uri_handlers.",
+                 uri, s_routes + 1, esp_err_to_name(err));
+    }
+    s_routes++;
 }
 
 void hr_http_use_lock(void *mutex)
@@ -1828,7 +1846,13 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
      * 404ed. Adding the two control routes is what pushed it over, but the
      * margin had already gone.
      */
-    cfg.max_uri_handlers = 32;
+    /*
+     * MUST exceed the number of reg() calls below - there are 37, and this has
+     * been overrun twice already. 64 is not extravagance: each slot is a few
+     * bytes of a table, while an overrun silently deletes whichever routes
+     * happen to be registered last.
+     */
+    cfg.max_uri_handlers = 64;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     /*
