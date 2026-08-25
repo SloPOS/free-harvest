@@ -35,17 +35,56 @@ static bool verb_is_known(const char *verb)
     return false;
 }
 
-static void send_gotit(hr_session_t *s)
+/*
+ * Answer REQINFO with WIFIINFO, the way the genuine adapter does.
+ *
+ * Captured from a real HarvestRight adapter over USB:
+ *
+ *     ->  REQINFO,
+ *     <-  WIFIINFO 2 0 "" 1 HR_aabbccddeeff 0 0 7
+ *     <-  WIFIINFO 5 81 "MyNetwork" 1 HR_aabbccddeeff 0 1 37
+ *
+ * Fields: link, rssi, ssid, registered, ap name, unknown, cloud, uptime.
+ *
+ * We used to answer with GOTIT and a payload this file admitted was invented.
+ * One dryer tolerated that and sent telemetry anyway; another did not, and sat
+ * re-asking REQINFO every two seconds indefinitely - 1,300 frames received and
+ * not one STAT among them. GOTIT is the DRYER's acknowledgement of a CLICK, so
+ * sending it here was answering a question with someone else's answer.
+ *
+ * The SSID is quoted and the AP name is not, matching the capture. That is not
+ * a stylistic choice: an SSID may contain spaces, and these frames are
+ * space-delimited.
+ */
+static void send_wifiinfo(hr_session_t *s)
 {
-    /*
-     * UNVERIFIED: the genuine adapter's GOTIT payload is unknown. The frame
-     * shape "GOTIT,%s," comes from the firmware; the contents do not.
-     */
     hr_builder_t b;
-    hr_build_begin(&b, "GOTIT");
-    hr_build_str(&b, s->ack_payload);
-    hr_build_str(&b, "");
+    hr_build_begin(&b, "WIFIINFO");
+    hr_build_int(&b, s->wifi.link);
+    hr_build_int(&b, s->wifi.rssi);
+
+    char quoted[35];
+    snprintf(quoted, sizeof(quoted), "\"%s\"", s->wifi.ssid);
+    hr_build_str(&b, quoted);
+
+    hr_build_int(&b, s->wifi.registered ? 1 : 0);
+    hr_build_str(&b, s->wifi.ap_name[0] ? s->wifi.ap_name : "HR");
+    hr_build_int(&b, 0);
+    hr_build_int(&b, s->wifi.cloud ? 1 : 0);
+    hr_build_int(&b, (long)(s->now_ms / 1000));
     hr_session_send(s, &b);
+}
+
+void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
+                         const char *ssid, const char *ap_name)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->wifi.link = link;
+    s->wifi.rssi = rssi;
+    copy_str(s->wifi.ssid, sizeof(s->wifi.ssid), ssid);
+    copy_str(s->wifi.ap_name, sizeof(s->wifi.ap_name), ap_name);
 }
 
 static void on_frame(const hr_frame_t *f, void *user)
@@ -61,7 +100,7 @@ static void on_frame(const hr_frame_t *f, void *user)
     }
 
     if (strcmp(f->verb, "REQINFO") == 0) {
-        send_gotit(s);
+        send_wifiinfo(s);
     } else if (strcmp(f->verb, "SNM") == 0) {
         copy_str(s->info.serial, sizeof(s->info.serial), hr_frame_field(f, 0));
     } else if (strcmp(f->verb, "UID") == 0) {
@@ -263,7 +302,7 @@ hr_cmd_class_t hr_cmd_classify(const char *verb)
          * code needs a support agent to undo. A stray SETSN is not a
          * setting, it is a trip to support.
          *
-         * Found 2026-08-21 while capturing FDRENAME "Freezie McDry" from
+         * Found 2026-08-21 while capturing FDRENAME "My Freeze Dryer" from
          * the real app - the same week CLICK was found mis-classified.
          */
     };

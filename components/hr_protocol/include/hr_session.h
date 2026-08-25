@@ -73,12 +73,39 @@ typedef struct {
      * identity string; override with hr_session_set_ack_payload().
      */
     char ack_payload[48];
+
+    /*
+     * What we tell the dryer about our network, when it asks with REQINFO.
+     *
+     * This is not cosmetic. Some dryer firmware will not proceed to send
+     * telemetry until it gets a WIFIINFO it accepts - it just re-asks REQINFO
+     * every two seconds forever, which is exactly what a user on a slightly
+     * different firmware version saw: 1,300 frames in, every one of them
+     * REQINFO, and never a single STAT.
+     */
+    struct {
+        int  link;              /* association state, 1..5; 5 = connected    */
+        int  rssi;              /* signal, 0 when not associated            */
+        char ssid[33];
+        char ap_name[33];       /* our own soft-AP name                     */
+        bool registered;        /* claimed by a vendor account; always false */
+        bool cloud;             /* vendor cloud reachable; always false      */
+    } wifi;
 } hr_session_t;
 
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user);
 
 /* Register an observer for inbound frames (may be NULL). */
 void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user);
+
+/*
+ * Tell the session what to report in WIFIINFO.
+ *
+ * Call whenever the network state changes. `uptime_s` is not stored - the
+ * frame carries seconds since boot, which the caller supplies at send time.
+ */
+void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
+                         const char *ssid, const char *ap_name);
 
 /* Override the GOTIT ack payload. */
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload);

@@ -149,7 +149,7 @@ void hr_build_begin(hr_builder_t *b, const char *verb)
  *
  *     STATE 1 0
  *     UNIQUE lH
- *     WIFIINFO 1 0 "" 0 HR_3cdc75f95aac 0 0 161
+ *     WIFIINFO 1 0 "" 0 HR_aabbccddeeff 0 0 161
  *
  * while the dryer's own frames TO us remain comma-delimited (STAT,1,0,0,...),
  * which is what hr_frame_parse() still splits on.
@@ -174,7 +174,7 @@ void hr_build_str(hr_builder_t *b, const char *s)
      * run of spaces and silently vanish, shifting every field after it by one
      * position. The genuine adapter shows the convention directly:
      *
-     *     WIFIINFO 1 0 "" 0 HR_3cdc75f95aac 0 0 347
+     *     WIFIINFO 1 0 "" 0 HR_aabbccddeeff 0 0 347
      *                  ^^ empty SSID, quoted
      *
      * This never came up with comma separators, where an empty field is just

@@ -30,10 +30,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WWW = os.path.join(HERE, "..", "main", "www", "index.html")
 
 BASE = {
-    "link": "up", "serial": "Freezie McDry", "uid": "0-33303337-33353541-33374339",
+    "link": "up", "serial": "My Freeze Dryer", "uid": "0-31323334-35363738-39414243",
     "frames_in": 4213, "frames_out": 38, "unknown_verbs": 0, "frames_bad": 0,
     "latest_seq": 4213, "wifi": "connected", "ip": "192.168.1.42",
-    "ssid": "Ourplace", "phase": 1, "phase_label": "Ready", "have_tel": True,
+    "ssid": "MyNetwork", "phase": 1, "phase_label": "Ready", "have_tel": True,
     "temp_f": 69, "pressure": 151637, "elapsed_s": 0, "prep_s": 0,
     "mode": "Auto", "stat_type": 1, "freeze_pct": 0, "freeze_eta_s": -1,
     "phase_pct": 0, "phase_s": 0, "vacuum_um": 0, "vacuum_ok": False,

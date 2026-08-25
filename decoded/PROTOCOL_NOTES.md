@@ -79,8 +79,8 @@
 >
 > | Command | Reply |
 > |---|---|
-> | `REQCFG` | `CFG,37C9-355A-3037,HM-4B~04,PSTF231103561BKC,` |
-> | `FDNAME` | `SNM,Freezie McDry,` |
+> | `REQCFG` | `CFG,9ABC-5678-1234,HM-4B~04,PSTF231103561BKC,` |
+> | `FDNAME` | `SNM,My Freeze Dryer,` |
 > | `REQSYSINF` | `SYSINF,2026-08-20_18.34,30,635,158,4` |
 > | `REQPREF` | `SYSPREF,0,18000,90,14400,13,` |
 > | `REQTSUM` | `TESTSUM,0,0,0,0,0,0,0,0,0, ,` |
@@ -89,12 +89,12 @@
 > | `FILEREAD` | `FDFILEBLOCK,,0,0,0,00` |
 >
 > **`REQCFG` carries the serial number**: `PSTF231103561BKC` is the data-plate
-> value `P-STF 2311-03561 BKC` with separators stripped. We spent effort reading
+> value `P-STF 0000-00000 XXX` with separators stripped. We spent effort reading
 > it off the machine; one command would have done it. `HM-4B~04` looks like a
-> model code and `37C9-355A-3037` like a device ID.
+> model code and `9ABC-5678-1234` like a device ID.
 >
 > **`FDNAME` is answered with `SNM,<name>,`** - the friendly name, here
-> "Freezie McDry". That settles the question the stock-adapter work left open,
+> "My Freeze Dryer". That settles the question the stock-adapter work left open,
 > and confirms the SNM shape guessed there.
 >
 > **`REQPREF` holds the dry-time settings**: 18000s = 5h and 14400s = 4h.
@@ -130,7 +130,7 @@
 > UNIQUE lH
 > FDNAME
 > REQCFG
-> WIFIINFO 1 0 "" 0 HR_3cdc75f95aac 0 0 161
+> WIFIINFO 1 0 "" 0 HR_aabbccddeeff 0 0 161
 > ```
 >
 > If the dryer tokenised on commas, `STATE 1 0` could never match the verb
@@ -258,7 +258,7 @@
 > (`.h6r`, `.b6r`, `.hfs`, `.hft`). So mass storage is how updates physically
 > reach the machine.
 >
-> `esp/version.txt` reads `HR_3cdc75f95aac,v1.1.2,1,0/0` — AP name (matching the
+> `esp/version.txt` reads `HR_aabbccddeeff,v1.1.2,1,0/0` — AP name (matching the
 > `WIFIINFO` field), adapter firmware version, then two unknown fields.
 > Comma-delimited, like everything the dryer reads.
 
@@ -522,11 +522,11 @@ Two consequences worth chasing separately:
 Registering while the adapter was attached to the SIMULATOR produced:
 
     "The given cpu code does not match our records. Changing the cpu code from
-     37C9 355A 3037 to 1 will require the approval of a Harvest Right team
+     9ABC 5678 1234 to 1 will require the approval of a Harvest Right team
      member."
 
 So their cloud binds adapter to machine 1:1 by a hardware identity forwarded
-from the dryer, and `37C9 355A 3037` is the real machine's. The `1` is ours -
+from the dryer, and `9ABC 5678 1234` is the real machine's. The `1` is ours -
 the scalar `%d` following the unique ID in
 `UID,%lX-%lX-%lX-%lX,%d,%d.%d.%ld,...`.
 
@@ -660,9 +660,9 @@ it corrects several things we had inferred.
     ADPT->DRYER  ep2   STATE 2 0
     ADPT->DRYER  ep2   UNIQUE
     ADPT->DRYER  ep2   FDNAME
-    DRYER->ADPT  ep2   UID,0-33303337-33353541-33374339,4,6.0.641041,0,5,2,1,51,204,255,
+    DRYER->ADPT  ep2   UID,0-31323334-35363738-39414243,4,6.0.641041,0,5,2,1,51,204,255,
     ADPT->DRYER  ep2   REQCFG
-    DRYER->ADPT  ep2   SNM,Freezie McDry,
+    DRYER->ADPT  ep2   SNM,My Freeze Dryer,
 
 **`UNIQUE`, sent bare with no arguments, is the identity query.** The adapter
 sends it and the dryer answers with its `UID` frame. Not `SERIAL` - which we had
@@ -672,22 +672,22 @@ to, which is the likely reason the app refused to accept commands.
 
 ### The unique ID is ASCII text, not a number
 
-    33303337 -> "3037"      33353541 -> "355A"      33374339 -> "37C9"
+    31323334 -> "1234"      35363738 -> "5678"      39414243 -> "9ABC"
 
 Each 32-bit word holds four ASCII characters. Read in reverse word order they
-spell **37C9 355A 3037**, exactly the "cpu code" the app displays. So the app
+spell **9ABC 5678 1234**, exactly the "cpu code" the app displays. So the app
 shows the ID as characters while the wire carries their hex codes, behind a
 leading zero word.
 
 An earlier guess here - that the code mapped directly onto `%lX` words with
-zero-fill, giving `37C9-355A-3037-0` - was wrong in both encoding and word
-order. `tools/dryer_sim_full.py --cpu "37C9 355A 3037"` now reproduces the
+zero-fill, giving `9ABC-5678-1234-0` - was wrong in both encoding and word
+order. `tools/dryer_sim_full.py --cpu "9ABC 5678 1234"` now reproduces the
 captured frame byte for byte, which is the check that the reading is right.
 
 ### SNM is a NAME, not a serial number
 
-The real machine answers `SNM,Freezie McDry,` - a user-set name. We had been
-sending the data-plate serial `P-STF 2311-03561 BKC`. Note our own firmware
+The real machine answers `SNM,My Freeze Dryer,` - a user-set name. We had been
+sending the data-plate serial `P-STF 0000-00000 XXX`. Note our own firmware
 stores this field as `info.serial` and publishes it as `"serial"` in
 `/api/state`; the label is wrong, though the plumbing is fine.
 
@@ -759,7 +759,7 @@ demonstrated inert on real hardware should default to excluded.
 
 Renaming the dryer from the app produced:
 
-    ADPT->DRYER   FDRENAME "Freezie McDry"
+    ADPT->DRYER   FDRENAME "My Freeze Dryer"
     ADPT->DRYER   FDNAME                      (immediately re-read)
     ADPT->DRYER   FDFILES .dat 1
 
@@ -767,7 +767,7 @@ So `FDRENAME "<name>"` takes a QUOTED argument, space-delimited like everything
 else outbound, and the app re-reads `FDNAME` straight afterwards to confirm.
 
 **FDName.txt holds the machine NAME, not the serial.** Confirmed twice: the real
-dryer answered `FDNAME` with `SNM,Freezie McDry,` in the USB capture, and the
+dryer answered `FDNAME` with `SNM,My Freeze Dryer,` in the USB capture, and the
 rename writes that same string. Our simulator had been serving the data-plate
 serial. Fixed.
 
@@ -838,7 +838,7 @@ not a session token or a nonce, and can be sent as a literal.
 
 ### Non-CLICK commands the app uses
 
-    Rename machine        FDRENAME "Freezie McDry"
+    Rename machine        FDRENAME "My Freeze Dryer"
     Set machine colour    SPC 255 76 80 49060        <- RGB red, + counter
     Reboot after update   REBOOT 6000                <- takes a delay argument
     End-batch options     REQPREF

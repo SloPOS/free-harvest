@@ -26,16 +26,49 @@ static void feed(hr_session_t *s, const char *frame, unsigned long t_ms)
 
 static void test_acks_reqinfo_with_gotit(void)
 {
-    TEST_CASE("acks REQINFO with GOTIT");
+    /*
+     * The genuine adapter answers REQINFO with WIFIINFO. Captured over USB:
+     *
+     *     WIFIINFO 5 81 "MyNetwork" 1 HR_aabbccddeeff 0 1 37
+     *
+     * We used to answer GOTIT, with a payload this project admitted was
+     * invented. One dryer tolerated it and sent telemetry anyway; another
+     * never sent any, re-asking REQINFO every two seconds indefinitely -
+     * 1,300 frames received and not one STAT among them.
+     *
+     * Pinned to the captured shape rather than to our idea of it, so the
+     * regression cannot come back quietly.
+     */
+    TEST_CASE("answers REQINFO with WIFIINFO");
     tx_log_t log = {0};
     hr_session_t s;
     hr_session_init(&s, tx_capture, &log);
-    hr_session_set_ack_payload(&s, "HRADAPT1");
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    feed(&s, "REQINFO\r", 37000);
+
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
+}
+
+static void test_reqinfo_before_wifi_is_up(void)
+{
+    /*
+     * Asked before the network is up, the answer must still be a
+     * well-formed WIFIINFO. An empty SSID is quoted as an empty pair
+     * rather than vanishing - in a space-delimited frame a field that
+     * disappears shifts every field after it.
+     */
+    TEST_CASE("WIFIINFO is well formed with no network");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
 
     feed(&s, "REQINFO\r", 1000);
 
     CHECK_INT(log.frames, 1);
-    CHECK_STR(log.buf, "GOTIT HRADAPT1 \"\"\r");
+    CHECK_STR(log.buf, "WIFIINFO 0 0 \"\" 0 HR 0 0 1\r");
 }
 
 static void test_captures_serial_number(void)
@@ -328,6 +361,7 @@ int main(void)
     test_send_safe_transmits_only_allowlisted();
     test_send_safe_refuses_dangerous_sends_nothing();
     test_acks_reqinfo_with_gotit();
+    test_reqinfo_before_wifi_is_up();
     test_captures_serial_number();
     test_captures_uid();
     test_records_latest_stat();

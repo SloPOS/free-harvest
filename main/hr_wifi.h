@@ -34,6 +34,11 @@ void hr_wifi_ip(char *out, size_t cap);
 /* The SSID we are connected to or configured for ("" if none). */
 void hr_wifi_current_ssid(char *out, size_t cap);
 
+/* Signal strength as a 0-100 percentage, 0 when not associated.
+ * Reported to the dryer in WIFIINFO, which is what its own panel
+ * shows. */
+int hr_wifi_rssi_pct(void);
+
 /* Store new credentials, then reconnect. Returns false on bad input. */
 bool hr_wifi_set_credentials(const char *ssid, const char *password);
 

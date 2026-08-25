@@ -47,6 +47,8 @@ adapter-transcript-*.txt
 # single `git add -A` would have published them.
 dryer-sim-*.txt
 screen-map-*.txt
+tools/dryer-sim-*.txt
+tools/screen-map-*.txt
 
 # Backup of the stock adapter's USB volume: vendor firmware plus device
 # identifiers (MAC). Analysis notes are fine in the repo; this is not.

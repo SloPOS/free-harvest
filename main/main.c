@@ -327,6 +327,23 @@ void app_main(void)
             xSemaphoreGive(s_hist_lock);
         }
 
+        /*
+         * Keep the session's idea of the network current, so REQINFO can be
+         * answered with a WIFIINFO that reflects reality.
+         *
+         * The dryer's own panel shows this, and at least one firmware version
+         * refuses to send telemetry at all until it gets an answer it accepts.
+         * Refreshed here rather than on every WiFi event because the frame is
+         * only sent when asked, every couple of seconds at most.
+         */
+        {
+            char ssid[33];
+            hr_wifi_current_ssid(ssid, sizeof(ssid));
+            bool up = (hr_wifi_status() == HR_WIFI_CONNECTED);
+            hr_session_set_wifi(&s_session, up ? 5 : 1,
+                                hr_wifi_rssi_pct(), ssid, CONFIG_HR_AP_SSID);
+        }
+
         /* ---- batch logbook. All flash work happens on THIS task. ------- */
         if (!s_batch_store_inited && hr_capture_ready()) {
             s_batch_store_inited = true;

@@ -387,6 +387,30 @@ void hr_wifi_ip(char *out, size_t cap)
     snprintf(out, cap, IPSTR, IP2STR(&ip.ip));
 }
 
+/*
+ * RSSI as a percentage.
+ *
+ * The captured adapter reports 0 when unassociated and values in the 40-90
+ * range when connected, which is a percentage rather than dBm. Mapping -90dBm
+ * to 0 and -30dBm to 100 puts a normal home signal in that same band.
+ */
+int hr_wifi_rssi_pct(void)
+{
+    wifi_ap_record_t ap;
+    if (s_status != HR_WIFI_CONNECTED ||
+        esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return 0;
+    }
+    int pct = (ap.rssi + 90) * 100 / 60;
+    if (pct < 0) {
+        pct = 0;
+    }
+    if (pct > 100) {
+        pct = 100;
+    }
+    return pct;
+}
+
 void hr_wifi_current_ssid(char *out, size_t cap)
 {
     snprintf(out, cap, "%s", s_ssid);

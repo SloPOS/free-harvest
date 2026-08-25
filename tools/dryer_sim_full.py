@@ -117,25 +117,36 @@ REAL_STAT = STATES["idle"]
 #          \________ 128-bit MCU unique ID ________/
 #
 # %lX drops leading zeros, so a word of 0 prints as a bare "0" - which is why a
-# 12-hex-digit cpu code like "37C9 355A 3037" can correspond to a four-word UID
+# 12-hex-digit cpu code like "9ABC 5678 1234" can correspond to a four-word UID
 # whose last word is zero. --cpu builds the frame that way.
 #
 # THIS DEFAULT IS A PLACEHOLDER AND IS KNOWN WRONG for this user's machine: the
-# server reported the real cpu code as 37C9 355A 3037 while this UID was being
+# server reported the real cpu code as 9ABC 5678 1234 while this UID was being
 # presented. Pass --uid (preferred, measured) or --cpu (derived) to correct it.
 # MEASURED 2026-08-21 from a USB capture of the real dryer answering the
 # official adapter. Not inferred - these are the bytes on the wire.
 #
-# The unique-ID words are ASCII TEXT, not numbers: 33303337 is "3037",
-# 33353541 is "355A", 33374339 is "37C9". Read in reverse word order that
-# spells 37C9 355A 3037 - exactly the cpu code the app displays. So the
+# The unique-ID words are ASCII TEXT, not numbers: 31323334 is "1234",
+# 35363738 is "5678", 39414243 is "9ABC". Read in reverse word order that
+# spells 9ABC 5678 1234 - exactly the cpu code the app displays. So the
 # app shows the ID as characters while the wire carries their hex codes.
-REAL_UID = "UID,0-33303337-33353541-33374339,4,6.0.641041,0,5,2,1,51,204,255,"
+# PLACEHOLDER, and deliberately not anyone's real machine.
+#
+# The words are ASCII codes - 31323334 is "1234", 35363738 is "5678",
+# 39414243 is "9ABC" - so the encoding this demonstrates is intact while
+# the identity is not real. Reversed, they spell the cpu code 9ABC 5678
+# 1234 that the app would display.
+#
+# The app will refuse commands against this and offer to register the
+# unit. Pass --uid (read from your own dryer via /api/state) or --cpu
+# (the code the app shows) to present your actual machine.
+PLACEHOLDER_UID = "0-31323334-35363738-39414243"
+REAL_UID = "UID,%s,4,6.0.641041,0,5,2,1,51,204,255," % PLACEHOLDER_UID
 
 # SNM is a NAME, not a serial number. The real machine answers with its
 # user-set name; we had been sending the data-plate serial, which is a
 # different thing entirely and is not what the adapter expects.
-REAL_SNM = "SNM,Freezie McDry,"
+REAL_SNM = "SNM,My Freeze Dryer,"
 
 # Answers to what the adapter asks for. CFG is CONFIRMED - replying with this
 # made a real adapter stop asking REQCFG (3 requests in 45s -> 0).
@@ -163,12 +174,12 @@ ANSWERS = {
 # Sending the file instead did, and it has not asked since. The dryer ships
 # files with FDFILELIST (announce) then FDFILEBLOCK (contents).
 # FDName.txt holds the machine NAME, not the serial number. Two independent
-# confirmations: the real dryer answered FDNAME with "SNM,Freezie McDry,"
+# confirmations: the real dryer answered FDNAME with "SNM,My Freeze Dryer,"
 # in the USB capture, and the app renames the machine by sending
-#     FDRENAME "Freezie McDry"
+#     FDRENAME "My Freeze Dryer"
 # and immediately re-reading FDNAME. We had been serving the data-plate
 # serial here, which is a different thing entirely.
-FD_NAME = "Freezie McDry"
+FD_NAME = "My Freeze Dryer"
 FDNAME_REPLY = [
     f"SNM,{FD_NAME},",
     f"FDFILELIST,FDName.txt,0,{len(FD_NAME)}",
@@ -200,7 +211,7 @@ def decode_wifiinfo(text):
 
       unregistered, no wifi   WIFIINFO 1 0  ""         0 HR_3cdc... 0 0 161
       registered, no wifi     WIFIINFO 2 0  ""         1 HR_3cdc... 0 0 7
-      registered, online      WIFIINFO 5 81 "Ourplace" 1 HR_3cdc... 0 1 37
+      registered, online      WIFIINFO 5 81 "MyNetwork" 1 HR_3cdc... 0 1 37
 
     f1 climbs 1->2->5 as association progresses; f2 is signal strength, zero
     until associated; f4 went 0->1 across registering the unit in the app and
@@ -353,12 +364,12 @@ def main():
                     help="how often to poll REQINFO, as the real dryer does")
     ap.add_argument("--uid", default=None,
                     help="the dryer's real 128-bit MCU unique ID as it appears "
-                         "in its own UID frame, e.g. 37C9-355A-3037-0. Read it "
+                         "in its own UID frame, e.g. 9ABC-5678-1234-0. Read it "
                          "off the machine with our adapter (/api/state 'uid') "
                          "rather than guessing.")
     ap.add_argument("--cpu", default=None,
                     help="the cpu code as the APP displays it, e.g. "
-                         "'37C9 355A 3037'. Converted into a UID frame by "
+                         "'9ABC 5678 1234'. Converted into a UID frame by "
                          "treating each group as one word and zero-filling the "
                          "rest. A DERIVED value - --uid is the measured one.")
     ap.add_argument("--serial", default=None,
@@ -392,18 +403,24 @@ def main():
     if args.cpu:
         words = args.cpu.replace("-", " ").split()
         if not words or len(words) > 4:
-            sys.exit("--cpu wants up to 4 hex groups, e.g. '37C9 355A 3037'")
+            sys.exit("--cpu wants up to 4 hex groups, e.g. '9ABC 5678 1234'")
         for w in words:
             int(w, 16)                      # fail loudly on non-hex
         # The wire carries the ASCII CODES of the displayed characters, in
         # reverse word order, behind a leading zero word. Verified against a
-        # real capture: "37C9 355A 3037" -> 0-33303337-33353541-33374339.
+        # real capture: "9ABC 5678 1234" -> 0-31323334-35363738-39414243.
         enc = ["".join("%02X" % ord(c) for c in w) for w in reversed(words)]
         REAL_UID = ("UID,0-%s,4,6.0.641041,0,5,2,1,51,204,255," % "-".join(enc))
     elif args.uid:
         REAL_UID = "UID,%s,4,6.0.641041,0,5,2,1,51,204,255," % args.uid
     if args.serial:
         REAL_SNM = "SNM,%s," % args.serial
+
+    if PLACEHOLDER_UID in REAL_UID:
+        print("!! Presenting a PLACEHOLDER identity - not a real machine.",
+              file=sys.stderr)
+        print("!! The app will refuse commands. Pass --uid or --cpu.",
+              file=sys.stderr)
 
     if args.dry_run:
         print("identity frames this run would present:")

@@ -1,2 +1,0 @@
-    0.00  # Playing the dryer on COM3. Adapter frames are space-delimited;
-    0.00  # ours are comma-delimited. Watch for *** NEW *** lines.

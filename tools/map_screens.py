@@ -64,7 +64,7 @@ KNOWN = {
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="192.168.86.79")
+    ap.add_argument("--host", default="192.168.1.42")
     ap.add_argument("--poll", type=float, default=1.0)
     args = ap.parse_args()
 

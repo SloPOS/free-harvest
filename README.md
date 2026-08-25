@@ -208,7 +208,7 @@ tap **Connect**.
 > shows you the address to use.
 
 **4. Note the address.** When connected it displays something like
-`http://192.168.86.79/`. Bookmark it. (Or set a DHCP reservation in your router so
+`http://192.168.1.42/`. Bookmark it. (Or set a DHCP reservation in your router so
 it never changes.)
 
 **5. Plug into the dryer.** Connect the board's **USB** port to the freeze dryer's
@@ -555,3 +555,20 @@ MIT — see [LICENSE](LICENSE).
 Not affiliated with, endorsed by, or supported by Harvest Right. "Harvest Right" is a
 trademark of its respective owner. Use at your own risk; this software does not control
 your freeze dryer and cannot make it unsafe, but you are responsible for your machine.
+
+---
+
+## Before making this repository public
+
+Git history contains simulator transcripts with a real dryer serial number and
+a home Wi-Fi SSID. They were removed from the working tree in v1.0.1, but
+untracking a file does not remove it from earlier commits.
+
+Rewrite history first:
+
+```bash
+git filter-repo --path-glob 'dryer-sim-*.txt' --path-glob 'tools/dryer-sim-*.txt' --path-glob 'screen-map-*.txt' --invert-paths
+```
+
+Then force-push and rotate anything that was exposed. Check the result with
+`git log --all --oneline -- 'dryer-sim-*'` — it should return nothing.
