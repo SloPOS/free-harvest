@@ -44,7 +44,22 @@ typedef void (*hr_observer_fn)(const hr_frame_t *f, void *user);
 
 /* Everything we have learned about the attached dryer. */
 typedef struct {
-    char serial[32];   /* from SNM */
+    /*
+     * NOT a serial number. SNM carries the user-set machine NAME - the
+     * development dryer answers "Freezie McDry". The field keeps its name
+     * because /api/state and the MQTT topics have published it as "serial"
+     * since the beginning and renaming it would break consumers; the UI label
+     * was the thing that was wrong.
+     */
+    char serial[32];   /* from SNM - a NAME, see above */
+
+    /*
+     * The actual serial, from CFG field 2: PSTF231103561BKC on the
+     * development machine, which matches the data-plate form "P-STF ...".
+     * Inferred from that pattern rather than confirmed against the vendor
+     * app, so it is reported alongside the name rather than replacing it.
+     */
+    char dryer_sn[32]; /* from CFG field 2 */
     char uid[64];      /* from UID field 0 */
     char fw_version[24]; /* from UID - UNVERIFIED field index */
     bool have_stat;

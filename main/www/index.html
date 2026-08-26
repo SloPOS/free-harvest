@@ -2158,7 +2158,11 @@ async function refreshState(){
     if(st.version){
       $("#ver").textContent = st.version;
       $("#set-ver-sub").textContent = "Free Harvest v"+st.version;
-      $("#abouthw").textContent = "Dryer serial "+(st.serial||"—")+
+      /* st.serial carries the SNM frame, which is the user-set machine NAME,
+         not a serial number - "Freezie McDry" on the development dryer. The
+         real serial arrives in CFG and is reported separately as st.dryer_sn. */
+      $("#abouthw").textContent = "Dryer name "+(st.serial||"—")+
+        (st.dryer_sn ? " · serial "+st.dryer_sn : "")+
         " · adapter IP "+(st.ip||"—");
     }
 
