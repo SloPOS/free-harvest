@@ -1085,7 +1085,7 @@ const PHASE = {
       {k:"START",   d:"Automatic mode — best for most foods"},
       {k:"CUSTOM",  d:"Set your own freeze/dry temperatures"},
       {k:"CANDY",   d:"Candy mode with pre-warming"}],
-    note:"You can name the batch from Settings → Batch before starting." },
+    note:"You can name the batch when you start it, or from Settings → Batch." },
   2:{ /* PREPARING */
     head:"Preparing the freeze dryer",
     body:"The chamber is pre-cooling. <b>Now is the time to load your trays</b> — "+
@@ -1959,7 +1959,37 @@ function paintControls(st){
      mirrored button list for those screens would just be a stray Cancel next
      to a full editor. Every other screen still shows its buttons. */
   if(st.stat_type === 43 || st.stat_type === 31){
-    card.style.display="none"; return;
+    /*
+     * BACK TO HOME.
+     *
+     * This branch used to hide the card outright, which left a dryer parked on
+     * a recipe-configuration screen showing no controls at all - including the
+     * Cancel that gets it back. The setup panel is the right editor for these
+     * screens, but "no way out" is not the right answer when the machine is
+     * sitting on one and the user is not standing next to it.
+     *
+     * Only ever offers a button we have MEASURED: Cancel is 18 on screen 43
+     * and 26 on screen 31, captured from the genuine app. Screens without a
+     * captured way back - 15, 44, the Wi-Fi panel - still offer nothing,
+     * because a guessed button number on a settings screen is how someone
+     * ends up pressing RESET WIFI from another room.
+     */
+    var back = acts.filter(function(a){
+      return a.name==="cfg_cancel" || a.name==="custom_cancel";
+    })[0];
+    if(!back){ card.style.display="none"; return; }
+    card.style.display="";
+    box.innerHTML="";
+    var hb=document.createElement("button");
+    hb.type="button";
+    hb.className="ctrlbtn sev0";
+    hb.textContent="Back to home screen";
+    hb.onclick=function(){ sendAction(back, st.stat_type, false); };
+    box.appendChild(hb);
+    hint.textContent="The dryer is on a configuration screen. Use the setup "+
+                     "panel to edit the recipe, or send it back to the home "+
+                     "screen - nothing in progress is affected.";
+    return;
   }
   if(st.link!=="up" || !st.have_tel){
     card.style.display="";
