@@ -536,6 +536,58 @@ void hr_capture_mount_now(void)
         s_used = seg_total_used();
     }
 
+    /*
+     * ENFORCE THE TOTAL BUDGET.
+     *
+     * Four segments at s_seg_max fit the partition by construction. A segment
+     * can still arrive OVERSIZED - a migrated pre-rotation frames.log is
+     * bigger than any single segment - and one of those breaks the invariant:
+     * on this partition an oversized segment plus three full ones comes to
+     * 3,045,533 bytes against a 2,884,241 capacity.
+     *
+     * That overflow is silent. SPIFFS starts refusing writes and emit() has no
+     * way to report it, so frames would simply stop appearing - the exact
+     * failure this rotation work exists to remove.
+     *
+     * Checking only the ACTIVE segment is not enough: a rotation moves off an
+     * oversized segment while leaving it in the set, so it survives as history
+     * and the overflow arrives later, on a boot that looks healthy.
+     *
+     * So: project the set at its EVENTUAL largest. Every segment reaches
+     * s_seg_max before the rotation comes round to delete it, and an oversized
+     * one stays oversized - so each contributes max(current, s_seg_max), not
+     * its size today. Projecting only the active segment's growth is what
+     * makes an overflow look safe right up until it happens: with one 980KB
+     * segment and three empty ones the set looks fine, and only becomes an
+     * overflow once the empty ones fill.
+     *
+     * While that projection exceeds the budget, drop the biggest non-active
+     * segment. Only acts when there is a real risk, and says what it dropped.
+     */
+    while (s_seg_max) {
+        size_t projected = 0;
+        int    biggest = -1;
+        size_t biggest_sz = 0;
+        for (unsigned i = 0; i < CAP_SEGMENTS; i++) {
+            size_t sz = seg_size(i);
+            projected += (sz > s_seg_max) ? sz : s_seg_max;
+            if (i != s_seg && sz > biggest_sz) {
+                biggest_sz = sz;
+                biggest = (int)i;
+            }
+        }
+        if (projected <= s_total - RESERVE_BYTES || biggest < 0 ||
+            biggest_sz == 0) {
+            break;
+        }
+        remove(k_seg[biggest]);
+        ESP_LOGW(TAG, "seg%d dropped (%u bytes): the set projected to %u over "
+                      "a %u budget - an oversized segment cannot be kept",
+                 biggest, (unsigned)biggest_sz, (unsigned)projected,
+                 (unsigned)(s_total - RESERVE_BYTES));
+        s_used = seg_total_used();
+    }
+
     s_ready = true;
     ESP_LOGI(TAG, "capture log ready: %u bytes used of %u, seg%u active, "
                   "%u per segment",

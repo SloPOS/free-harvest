@@ -155,6 +155,9 @@ static void on_frame(const hr_frame_t *f, void *user)
         send_wifiinfo(s);
     } else if (strcmp(f->verb, "SNM") == 0) {
         copy_str(s->info.serial, sizeof(s->info.serial), hr_frame_field(f, 0));
+    } else if (strcmp(f->verb, "CFG") == 0) {
+        copy_str(s->info.dryer_sn, sizeof(s->info.dryer_sn),
+                 hr_frame_field(f, 2));
     } else if (strcmp(f->verb, "UID") == 0) {
         copy_str(s->info.uid, sizeof(s->info.uid), hr_frame_field(f, 0));
         /* UNVERIFIED: field 2 looks like "maj.min.build". */

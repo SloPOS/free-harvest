@@ -179,6 +179,8 @@ static esp_err_t h_state(httpd_req_t *req)
     hr_json_escape(s_session->info.last_stat, laststat, sizeof(laststat));
     hr_json_escape(s_session->info.serial, serial, sizeof(serial));
     hr_json_escape(s_session->info.uid, uid, sizeof(uid));
+    char dryer_sn[64];
+    hr_json_escape(s_session->info.dryer_sn, dryer_sn, sizeof(dryer_sn));
     unsigned long fin = s_session->frames_in, fout = s_session->frames_out;
     unsigned long unk = s_session->unknown_verbs;
     unsigned long bad = s_session->stream.frames_bad;
@@ -222,6 +224,7 @@ static esp_err_t h_state(httpd_req_t *req)
     char body[2048];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
+                     "\"dryer_sn\":\"%s\","
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
                      "\"unknown_verbs\":%lu,\"frames_bad\":%lu,"
                      "\"latest_seq\":%" PRIu32 ",\"wifi\":\"%s\",\"ip\":\"%s\","
@@ -245,7 +248,7 @@ static esp_err_t h_state(httpd_req_t *req)
                       * rather than from a remembered default. */
                      "\"last_stat\":\"%s\","
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
-                     link, serial, uid, fin, fout, unk, bad, latest,
+                     link, serial, uid, dryer_sn, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
                      (int)ph, hr_phase_label(ph), s_tel_valid ? "true" : "false",
                      s_tel_valid ? s_tel.temperature_f : 0,
