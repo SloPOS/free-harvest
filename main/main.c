@@ -69,11 +69,21 @@ static bool               s_batch_store_inited;
 
 /*
  * Introducing ourselves once per link, and a STATE heartbeat after that.
- * s_hello_done resets whenever the link drops, so a re-enumeration
- * re-introduces rather than leaving the dryer waiting for an adapter it has
- * already forgotten about.
+ *
+ * The handshake is PACED - one frame per main-loop pass, 250ms apart - rather
+ * than emitted as a burst. The captured genuine adapter waits for the dryer's
+ * UID before sending its last frame, and a 6.0.644170 machine answered only
+ * the second frame of our 15ms burst, ignoring the two behind it.
+ *
+ * It also restarts on a USB RE-ENUMERATION, not only when the protocol link
+ * drops. Those are different events: after a detach/attach the dryer has a
+ * fresh CDC session, but REQINFO keeps arriving throughout, so s_session.link
+ * never goes down and the old code never re-introduced itself. The comment
+ * here used to claim it did.
  */
-static bool     s_hello_done;
+static uint8_t  s_hello_step;      /* frames sent so far, 0..HR_HELLO_STEPS */
+static uint32_t s_hello_ms;        /* when the last one went out */
+static unsigned s_hello_mounts;    /* USB mount count the handshake belongs to */
 static uint32_t s_heartbeat_ms;
 /* Graph points already written to flash, so the loop only persists new ones. */
 static size_t s_trend_persisted;
@@ -347,13 +357,26 @@ void app_main(void)
          */
         {
             bool up = (s_session.link == HR_LINK_UP);
+            unsigned mounts = hr_usb_mount_events();
+            if (mounts != s_hello_mounts) {
+                /* Fresh CDC session: the dryer has forgotten us. */
+                s_hello_mounts = mounts;
+                s_hello_step = 0;
+            }
             if (!up) {
-                s_hello_done = false;
-            } else if (!s_hello_done) {
-                s_hello_done = true;
-                s_heartbeat_ms = (uint32_t)now_ms();
-                ESP_LOGI(TAG, "link up: introducing ourselves to the dryer");
-                hr_session_hello(&s_session);
+                s_hello_step = 0;
+            } else if (s_hello_step < HR_HELLO_STEPS) {
+                if (s_hello_step == 0 ||
+                    (uint32_t)now_ms() - s_hello_ms >= 250u) {
+                    if (s_hello_step == 0) {
+                        ESP_LOGI(TAG,
+                                 "link up: introducing ourselves to the dryer");
+                    }
+                    hr_session_hello_step(&s_session, s_hello_step);
+                    s_hello_step++;
+                    s_hello_ms = (uint32_t)now_ms();
+                    s_heartbeat_ms = s_hello_ms;
+                }
             } else if ((uint32_t)now_ms() - s_heartbeat_ms > 15000u) {
                 s_heartbeat_ms = (uint32_t)now_ms();
                 hr_session_heartbeat(&s_session);

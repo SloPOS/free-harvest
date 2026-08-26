@@ -137,6 +137,27 @@ void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user);
  */
 void hr_session_hello(hr_session_t *s);
 
+/* Number of frames in the opening handshake. */
+#define HR_HELLO_STEPS 4
+
+/*
+ * Send ONE frame of the handshake, 0..HR_HELLO_STEPS-1, so the caller can
+ * space them out.
+ *
+ * hr_session_hello() emits all four back to back, which one dryer accepts and
+ * another does not. On a 6.0.644170 machine the burst went out inside 15ms and
+ * only the SECOND frame was ever answered - UNIQUE returned its UID while
+ * FDNAME and REQCFG drew nothing at all, repeatably. That is what a receive
+ * path looks like when it takes a frame or two and discards the rest of what
+ * arrived with them.
+ *
+ * The captured genuine adapter does not burst. It sends STATE, UNIQUE and
+ * FDNAME, WAITS for the dryer's UID, and only then sends REQCFG. Pacing costs
+ * a second of startup on a machine that never needed it, and is the difference
+ * between working and not on one that does.
+ */
+void hr_session_hello_step(hr_session_t *s, unsigned step);
+
 /*
  * Periodic STATE, which the genuine adapter emits roughly every 15 seconds.
  * The dryer's own panel shows link state and signal from these.

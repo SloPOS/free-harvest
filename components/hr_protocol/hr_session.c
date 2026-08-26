@@ -91,6 +91,20 @@ void hr_session_heartbeat(hr_session_t *s)
     }
 }
 
+void hr_session_hello_step(hr_session_t *s, unsigned step)
+{
+    if (s == NULL) {
+        return;
+    }
+    switch (step) {
+    case 0: send_state(s); break;
+    case 1: hr_session_send_simple(s, "UNIQUE"); break;
+    case 2: hr_session_send_simple(s, "FDNAME"); break;
+    case 3: hr_session_send_simple(s, "REQCFG"); break;
+    default: break;
+    }
+}
+
 void hr_session_hello(hr_session_t *s)
 {
     if (s == NULL) {
