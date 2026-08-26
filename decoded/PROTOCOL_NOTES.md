@@ -79,7 +79,7 @@
 >
 > | Command | Reply |
 > |---|---|
-> | `REQCFG` | `CFG,9ABC-5678-1234,HM-4B~04,PSTF231103561BKC,` |
+> | `REQCFG` | `CFG,9ABC-5678-1234,HM-4B~04,PSTF000000000XXX,` |
 > | `FDNAME` | `SNM,My Freeze Dryer,` |
 > | `REQSYSINF` | `SYSINF,2026-08-20_18.34,30,635,158,4` |
 > | `REQPREF` | `SYSPREF,0,18000,90,14400,13,` |
@@ -88,7 +88,7 @@
 > | `FDFILES` | `FDFILELIST,FactoryTest.log,0,596` |
 > | `FILEREAD` | `FDFILEBLOCK,,0,0,0,00` |
 >
-> **`REQCFG` carries the serial number**: `PSTF231103561BKC` is the data-plate
+> **`REQCFG` carries the serial number**: `PSTF000000000XXX` is the data-plate
 > value `P-STF 0000-00000 XXX` with separators stripped. We spent effort reading
 > it off the machine; one command would have done it. `HM-4B~04` looks like a
 > model code and `9ABC-5678-1234` like a device ID.
