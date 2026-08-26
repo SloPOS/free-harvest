@@ -1177,3 +1177,54 @@ referenced twice and is consistent with a direct handler, while `FDNAME`,
 global. **Their dryer's protocol layer is alive; the executor behind it is
 not.** That is a machine-state problem, not a framing one, and it is why
 matching the handshake byte-for-byte did not fix them.
+
+## WIFIINFO's connection flags, and the panel that never showed a connection (2026-08-26)
+
+`WIFIINFO` fields 3 and 6 - `registered` and `cloud` - were declared in
+hr_session.h as "always false" and **nothing in the firmware ever wrote them**.
+`hr_session_set_wifi()` did not even take them as arguments. So for the entire
+life of this project the dryer was told, every two to ten seconds, that the
+adapter was not registered and had no route to the vendor cloud.
+
+The visible symptom was reported by a user before it was understood: the dryer's
+own WiFi panel showed the network name correctly but never showed a connection
+to HarvestRight. Field 2 (the SSID) was populated; field 6 was not.
+
+Genuine adapter, captured, showing both transitions:
+
+    WIFIINFO 1 0 ""          0 HR_aabbccddeeff 0 0 161   early boot, no network
+    WIFIINFO 2 0 ""          1 HR_aabbccddeeff 0 0 7     claimed, still no network
+    WIFIINFO 5 81 "MyNetwork" 1 HR_aabbccddeeff 0 1 37   claimed and online
+
+Ours, for comparison, on a fully working link:
+
+    WIFIINFO 5 48 "Ourplace"  0 HR-Adapter-Setup 0 0 2726
+
+**Confirmed on hardware.** Setting both flags to 1 made the dryer's WiFi panel
+show the connection. Verified live by toggling `POST /api/wififlags` while the
+panel was open, then from a cold boot with the automatic rule in place.
+
+The rule shipped in 1.0.5: both flags follow station association - 0/0 with no
+network, 1/1 once associated. That mirrors the genuine adapter's observed
+transitions. It states that THIS adapter is connected and serving the dryer; it
+is not a claim of registration with any vendor account, and nothing in this
+firmware talks to HarvestRight's servers. `POST /api/wififlags` overrides it by
+hand for diagnostics and is sticky, so the main loop cannot silently undo it.
+
+**Open question:** whether a dryer told `cloud=1` will attempt cloud operations
+that then fail. Nothing of the sort was observed on 6.0.641041 over a normal
+session - telemetry, handshake and control all continued unchanged - but this
+has not been exercised on 6.0.644170, and a machine that tries to reach servers
+through an adapter that is not a bridge is an untested path.
+
+### Why this took so long to find
+
+The flags are two integers in a frame we were already sending correctly, in the
+right position, with the right shape. Every structural check passed. Only the
+VALUES were wrong, and the field that would have shown it - the dryer's own
+panel - is not visible from the network side. It surfaced because a user looked
+at the machine and said the panel showed a network but no server.
+
+That is the same lesson as the missing TX logging one entry above: the firmware
+could not show its own outbound half, so nobody could see what was being
+asserted. See also the STATE divergence noted there, still uncorrected.

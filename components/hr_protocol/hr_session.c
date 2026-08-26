@@ -108,6 +108,25 @@ void hr_session_hello(hr_session_t *s)
     hr_session_send_simple(s, "REQCFG");
 }
 
+void hr_session_set_cloud(hr_session_t *s, bool registered, bool cloud)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->wifi.cloud_override = true;
+    s->wifi.registered = registered;
+    s->wifi.cloud = cloud;
+}
+
+void hr_session_set_cloud_auto(hr_session_t *s, bool online)
+{
+    if (s == NULL || s->wifi.cloud_override) {
+        return;
+    }
+    s->wifi.registered = online;
+    s->wifi.cloud = online;
+}
+
 void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
                          const char *ssid, const char *ap_name)
 {

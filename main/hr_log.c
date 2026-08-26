@@ -8,8 +8,20 @@
 #include <stdio.h>
 #include <string.h>
 
-#define LOG_LINES 80
-#define LOG_LINE_LEN 160
+/*
+ * Ring sizing.
+ *
+ * Was 80 lines, which held about 45 seconds once TX logging roughly doubled
+ * the line rate - not enough to capture a boot plus the handshake that
+ * follows it, which is exactly the window that matters when diagnosing a
+ * dryer that will not start.
+ *
+ * 384 x 144 = 55KB of static DRAM. At the observed busy rate (~1.8 lines/s
+ * while a panel sits on the WiFi screen) that is around 3.5 minutes, and
+ * roughly 10 minutes on an idle machine.
+ */
+#define LOG_LINES 384
+#define LOG_LINE_LEN HR_LOG_LINE_MAX
 
 static char s_lines[LOG_LINES][LOG_LINE_LEN];
 static int s_head;      /* next slot to write */
@@ -82,7 +94,7 @@ void hr_log_addf(const char *fmt, ...)
 }
 
 /* Escape a log line into JSON-string body. */
-static size_t esc(const char *in, char *out, size_t cap)
+size_t hr_log_escape(const char *in, char *out, size_t cap)
 {
     size_t o = 0;
     for (size_t i = 0; in[i] && o + 2 < cap; i++) {
@@ -100,6 +112,35 @@ static size_t esc(const char *in, char *out, size_t cap)
     return o;
 }
 
+size_t hr_log_count(void)
+{
+    size_t n = 0;
+    if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        n = (size_t)s_count;
+        xSemaphoreGive(s_lock);
+    }
+    return n;
+}
+
+bool hr_log_line(size_t i, char *out, size_t cap)
+{
+    bool ok = false;
+    if (out == NULL || cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (i < (size_t)s_count) {
+            int start = (s_count == LOG_LINES) ? s_head : 0;
+            int idx = (start + (int)i) % LOG_LINES;
+            snprintf(out, cap, "%s", s_lines[idx]);
+            ok = true;
+        }
+        xSemaphoreGive(s_lock);
+    }
+    return ok;
+}
+
 size_t hr_log_json(char *out, size_t cap)
 {
     size_t o = 0;
@@ -109,7 +150,7 @@ size_t hr_log_json(char *out, size_t cap)
         for (int i = 0; i < s_count && o + 200 < cap; i++) {
             int idx = (start + i) % LOG_LINES;
             char e[LOG_LINE_LEN * 2];
-            esc(s_lines[idx], e, sizeof(e));
+            hr_log_escape(s_lines[idx], e, sizeof(e));
             o += (size_t)snprintf(out + o, cap - o, "%s\"%s\"", i ? "," : "", e);
         }
         xSemaphoreGive(s_lock);

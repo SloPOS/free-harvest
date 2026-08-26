@@ -859,12 +859,87 @@ static esp_err_t h_ota(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* GET /api/log -> recent device log lines (debug view). */
+/*
+ * GET (or POST) /api/log -> recent device log lines (debug view).
+ *
+ * Streamed in chunks, one line at a time. It used to build the whole document
+ * in a single 8KB static buffer, which silently capped the response at roughly
+ * 80 lines - about 45 seconds of a busy link - no matter how large the ring
+ * buffer behind it was. Growing the ring alone would have changed nothing.
+ *
+ * POST is accepted as well as GET. The endpoint is read-only either way, and
+ * the usual way to reach it is pasting a curl line next to the POST that sends
+ * a command; getting the method wrong there returned a bare 405 that looked
+ * like a firmware fault rather than a typo.
+ */
 static esp_err_t h_log(httpd_req_t *req)
 {
-    static char json[8192]; /* static: too large for the httpd task stack */
-    size_t n = hr_log_json(json, sizeof(json));
-    return send_json(req, json, n);
+    char line[HR_LOG_LINE_MAX];
+    char esc[HR_LOG_LINE_MAX * 2 + 8];
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send_chunk(req, "[", 1);
+
+    size_t n = hr_log_count();
+    for (size_t i = 0; i < n; i++) {
+        if (!hr_log_line(i, line, sizeof(line))) {
+            continue;
+        }
+        char body[HR_LOG_LINE_MAX * 2 + 4];
+        hr_log_escape(line, body, sizeof(body));
+        int len = snprintf(esc, sizeof(esc), "%s\"%s\"", i ? "," : "", body);
+        if (len > 0) {
+            httpd_resp_send_chunk(req, esc, (size_t)len);
+        }
+    }
+
+    httpd_resp_send_chunk(req, "]", 1);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+/*
+ * POST /api/wififlags  body: registered=0|1&cloud=0|1
+ *
+ * The two WIFIINFO fields the dryer's own WiFi panel renders as "connected to
+ * HarvestRight". Both have been hardcoded 0 since the project started, so the
+ * panel has never had anything to show. Exposed as a live toggle rather than a
+ * compile-time constant so the effect can be watched on the machine's screen
+ * without a reflash between attempts.
+ *
+ * This asserts something about reachability we do not actually verify, which
+ * is why it is a deliberate switch and not a default.
+ */
+static esp_err_t h_wififlags(httpd_req_t *req)
+{
+    char buf[64];
+    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
+                                                        : (int)sizeof(buf) - 1;
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+
+    char reg[4] = {0}, cld[4] = {0};
+    httpd_query_key_value(buf, "registered", reg, sizeof(reg));
+    httpd_query_key_value(buf, "cloud", cld, sizeof(cld));
+
+    bool registered = (reg[0] == '1');
+    bool cloud = (cld[0] == '1');
+    hr_session_set_cloud(s_session, registered, cloud);
+    ESP_LOGW(TAG, "WIFIINFO flags set: registered=%d cloud=%d",
+             (int)registered, (int)cloud);
+
+    char out[64];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":true,\"registered\":%d,\"cloud\":%d}",
+                     (int)registered, (int)cloud);
+    return send_json(req, out, (size_t)n);
 }
 
 /* GET /api/mqtt -> current broker/connection status. */
@@ -1918,6 +1993,8 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/mqtt", HTTP_GET, h_mqtt_get);
     reg("/api/mqtt", HTTP_POST, h_mqtt_post);
     reg("/api/log", HTTP_GET, h_log);
+    reg("/api/log", HTTP_POST, h_log);
+    reg("/api/wififlags", HTTP_POST, h_wififlags);
     reg("/img/*", HTTP_GET, h_img);
     /* Captive-portal probes (Android/Apple/Windows). */
     reg("/generate_204", HTTP_GET, h_redirect);

@@ -88,8 +88,23 @@ typedef struct {
         int  rssi;              /* signal, 0 when not associated            */
         char ssid[33];
         char ap_name[33];       /* our own soft-AP name                     */
-        bool registered;        /* claimed by a vendor account; always false */
-        bool cloud;             /* vendor cloud reachable; always false      */
+        /*
+         * registered = field 3, cloud = field 6 of WIFIINFO.
+         *
+         * The dryer's own WiFi panel renders these: it shows the SSID from
+         * field 2 but reports no server connection while field 6 is 0. Both
+         * were hardcoded false for the life of this project because nothing
+         * ever set them, so the dryer has never once been told the adapter
+         * has internet.
+         *
+         * Captured from the genuine adapter:
+         *     WIFIINFO 1 0 ""          0 HR_aabbccddeeff 0 0 161   early boot
+         *     WIFIINFO 2 0 ""          1 HR_aabbccddeeff 0 0 7     claimed, no net
+         *     WIFIINFO 5 81 "MyNetwork" 1 HR_aabbccddeeff 0 1 37   claimed + online
+         */
+        bool registered;        /* adapter claimed by a vendor account */
+        bool cloud;             /* adapter can reach the vendor cloud  */
+        bool cloud_override;    /* set by hand; stops the automatic rule */
     } wifi;
 } hr_session_t;
 
@@ -127,6 +142,28 @@ void hr_session_hello(hr_session_t *s);
  * The dryer's own panel shows link state and signal from these.
  */
 void hr_session_heartbeat(hr_session_t *s);
+
+/*
+ * Set the two WIFIINFO connection flags. Separate from hr_session_set_wifi()
+ * because they describe reachability BEYOND the local network, which the
+ * association state cannot tell us.
+ */
+void hr_session_set_cloud(hr_session_t *s, bool registered, bool cloud);
+
+/*
+ * The automatic rule: report both flags set once the adapter is associated to
+ * the user's network, clear when it is not.
+ *
+ * This mirrors the genuine adapter's observed transitions - 0/0 before it has
+ * a network, 1/1 once it does. It is a statement about THIS adapter serving
+ * the dryer, not a claim of registration with any vendor account, and it is
+ * what stops a dryer sitting on its WiFi panel waiting to be told the link is
+ * complete.
+ *
+ * Does nothing once hr_session_set_cloud() has been called, so a manual
+ * override for diagnostics is not immediately undone by the main loop.
+ */
+void hr_session_set_cloud_auto(hr_session_t *s, bool online);
 
 void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
                          const char *ssid, const char *ap_name);

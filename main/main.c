@@ -21,6 +21,7 @@
 #include "hr_usb.h"
 #include "hr_wifi.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
@@ -374,6 +375,13 @@ void app_main(void)
             bool up = (hr_wifi_status() == HR_WIFI_CONNECTED);
             hr_session_set_wifi(&s_session, up ? 5 : 1,
                                 hr_wifi_rssi_pct(), ssid, CONFIG_HR_AP_SSID);
+            /*
+             * Tell the dryer the link is complete once we actually have a
+             * network. Hardcoded false for the life of this project, which is
+             * why the machine's own WiFi panel always showed the SSID but
+             * never a connection.
+             */
+            hr_session_set_cloud_auto(&s_session, up);
         }
 
         /* ---- batch logbook. All flash work happens on THIS task. ------- */
@@ -459,12 +467,13 @@ void app_main(void)
             last_beat = t;
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
-                     "frames_in=%lu frames_out=%lu link=%s | trend pts=%u persisted=%u "
+                     "frames_in=%lu frames_out=%lu link=%s | heap=%u | trend pts=%u persisted=%u "
                      "bytes=%u writes=%lu fails=%lu drops=%lu",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in, s_session.frames_out,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
+                     (unsigned)esp_get_free_heap_size(),
                      (unsigned)hr_trend_count(&s_trend),
                      (unsigned)s_trend_persisted,
                      (unsigned)hr_capture_trend_bytes(),

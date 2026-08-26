@@ -52,6 +52,56 @@ static void test_acks_reqinfo_with_gotit(void)
               "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
 }
 
+static void test_cloud_flags_reach_the_wire(void)
+{
+    /*
+     * WIFIINFO fields 3 and 6 - registered and cloud.
+     *
+     * Both were hardcoded false for the life of this project because nothing
+     * ever wrote them, so the dryer's own WiFi panel showed the SSID from
+     * field 2 and no server connection, permanently. A dryer waiting to be
+     * told the link is complete sits on that panel re-asking REQINFO.
+     *
+     * The automatic rule sets both once the adapter is associated. Pinned
+     * against the captured genuine frame:
+     *
+     *     WIFIINFO 5 81 "MyNetwork" 1 HR_aabbccddeeff 0 1 37
+     */
+    TEST_CASE("WIFIINFO carries the connection flags");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+    hr_session_set_cloud_auto(&s, true);
+
+    feed(&s, "REQINFO\r", 37000);
+
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 1 HR_aabbccddeeff 0 1 37\r");
+}
+
+static void test_manual_cloud_override_wins(void)
+{
+    /*
+     * A hand-set value must survive the main loop, which calls the automatic
+     * rule every pass. Without this a diagnostic override would be undone
+     * within milliseconds and look like the endpoint had no effect.
+     */
+    TEST_CASE("manual cloud override beats the automatic rule");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    hr_session_set_cloud(&s, false, false);
+    hr_session_set_cloud_auto(&s, true);   /* must be ignored */
+
+    feed(&s, "REQINFO\r", 37000);
+    CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
+}
+
 static void test_reqinfo_before_wifi_is_up(void)
 {
     /*
@@ -362,6 +412,8 @@ int main(void)
     test_send_safe_refuses_dangerous_sends_nothing();
     test_acks_reqinfo_with_gotit();
     test_reqinfo_before_wifi_is_up();
+    test_cloud_flags_reach_the_wire();
+    test_manual_cloud_override_wins();
     test_captures_serial_number();
     test_captures_uid();
     test_records_latest_stat();
