@@ -52,6 +52,38 @@ static void test_acks_reqinfo_with_gotit(void)
               "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
 }
 
+static void test_recipe_verbs_refused_on_generic_path(void)
+{
+    /*
+     * SENDCANDY through the generic field builder does not fail loudly - it
+     * produces a different, still-parseable recipe:
+     *
+     *     want: SENDCANDY "4,70,140,...,CANDY,0," 100001
+     *     got:  SENDCANDY 4 70 140 ... CANDY 0
+     *
+     * On a machine about to run, that sets temperatures nobody chose. Refused
+     * outright so /api/cmd and the MQTT command topic cannot reach it; the
+     * validated hr_recipe_build() path is the only way to send one.
+     */
+    TEST_CASE("recipe verbs are refused on the generic config path");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+
+    CHECK(!hr_session_send_config(&s, "SENDCANDY",
+                                  "4,70,140,150,160,300,7200,300,CANDY,0,"));
+    CHECK(!hr_session_send_config(&s, "SENDCUSTOM", "1,2,3"));
+    CHECK(!hr_session_send_config(&s, "SENDBATCH", "1"));
+    CHECK(!hr_session_send_config(&s, "SENDSCIENCE", "1"));
+
+    /* nothing reached the wire */
+    CHECK_INT(log.frames, 0);
+
+    /* a genuine config verb still works */
+    CHECK(hr_session_send_config(&s, "SETDATE", "2026,8,26"));
+    CHECK_INT(log.frames, 1);
+}
+
 static void test_cloud_flags_reach_the_wire(void)
 {
     /*
@@ -412,6 +444,7 @@ int main(void)
     test_send_safe_refuses_dangerous_sends_nothing();
     test_acks_reqinfo_with_gotit();
     test_reqinfo_before_wifi_is_up();
+    test_recipe_verbs_refused_on_generic_path();
     test_cloud_flags_reach_the_wire();
     test_manual_cloud_override_wins();
     test_captures_serial_number();

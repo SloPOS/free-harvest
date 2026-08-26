@@ -403,11 +403,47 @@ bool hr_session_send_raw(hr_session_t *s, const char *frame)
     return true;
 }
 
+/*
+ * The recipe verbs carry ONE quoted CSV argument plus a counter:
+ *
+ *     SENDCANDY "4,70,140,150,160,300,7200,300,CANDY,0," 100001
+ *
+ * The generic field builder below splits args on ',' and emits each piece as
+ * its own space-delimited field, which produces:
+ *
+ *     SENDCANDY 4 70 140 150 160 300 7200 300 CANDY 0
+ *
+ * That is not a malformed frame the dryer rejects - it is a DIFFERENT, still
+ * parseable recipe. Sent to a machine about to run, it sets temperatures and
+ * times nobody chose. A wrong recipe that looks accepted is worse than an
+ * error, so these verbs are refused here rather than reshaped.
+ *
+ * The correct path is hr_recipe_build() + hr_session_send_raw(), which
+ * validates the recipe, rejects names that collide with other verbs under the
+ * dryer's substring matching, and emits the quoted form. /api/recipes/send and
+ * /api/recipes/apply already use it.
+ */
+static bool is_recipe_verb(const char *verb)
+{
+    static const char *const recipe[] = {
+        "SENDCANDY", "SENDCUSTOM", "SENDBATCH", "SENDSCIENCE",
+    };
+    for (size_t i = 0; i < sizeof(recipe) / sizeof(recipe[0]); i++) {
+        if (strcmp(verb, recipe[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool hr_session_send_config(hr_session_t *s, const char *verb, const char *args)
 {
     hr_cmd_class_t cls = hr_cmd_classify(verb);
     if (cls != HR_CMD_SAFE && cls != HR_CMD_CONFIG) {
         return false; /* hardware/unknown verbs are never sent */
+    }
+    if (verb != NULL && is_recipe_verb(verb)) {
+        return false; /* see is_recipe_verb - must go through hr_recipe */
     }
     hr_builder_t b;
     hr_build_begin(&b, verb);
