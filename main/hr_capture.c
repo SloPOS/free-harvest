@@ -3,6 +3,7 @@
 #include "esp_timer.h"
 
 #include "esp_log.h"
+#include "nvs.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -10,6 +11,7 @@
 #include "freertos/task.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -28,16 +30,77 @@ static const char *TAG = "hr_capture";
 /* Graph series, separate from the frame log: compact, fixed-width records so a
    restore is a straight read rather than a re-parse of the text log. */
 #define TRENDFILE MOUNT "/trend.bin"
-#define LOGFILE MOUNT "/frames.log"
 /*
- * Stop appending a little short of full so the filesystem always has room to
- * be read and cleared. Without this a full SPIFFS can be awkward to recover.
+ * ROTATING SEGMENTS.
+ *
+ * This was one file, "/frames.log", that STOPPED appending when the partition
+ * neared full. On a dryer left running that is a log which quietly becomes
+ * useless: the oldest hours are preserved and everything since is discarded,
+ * which is the wrong half to keep. Defrost and end-of-cycle states live at the
+ * END of a run, so a stopped log loses exactly what we are trying to capture.
+ *
+ * Four segments, written in turn. On rotation the NEXT segment is deleted
+ * before it becomes active, so the oldest quarter is what goes. Recording
+ * never stops.
+ *
+ * Four rather than the batch logbook's two: a rotation costs 25% of history
+ * instead of 50%, so the retained window never drops below three quarters of
+ * capacity - about 2MB, or roughly two full cycles.
  */
-#define RESERVE_BYTES (64 * 1024)
+#define CAP_SEGMENTS 4
+
+static const char *const k_seg[CAP_SEGMENTS] = {
+    MOUNT "/frames.0.log",
+    MOUNT "/frames.1.log",
+    MOUNT "/frames.2.log",
+    MOUNT "/frames.3.log",
+};
+
+/*
+ * Held back from the segments so the filesystem is never driven to genuinely
+ * full: SPIFFS becomes awkward to read or clear there, and the trend file
+ * (~43KB) shares this partition and must always have room to be rewritten.
+ */
+#define RESERVE_BYTES (128 * 1024)
 
 static bool s_ready;
 static SemaphoreHandle_t s_lock;
 static size_t s_total;      /* partition capacity */
+static uint8_t s_seg;       /* active segment index */
+static size_t s_seg_used;   /* bytes in the active segment */
+static size_t s_seg_max;    /* per-segment cap, computed at mount */
+static unsigned long s_rotations;
+
+/*
+ * RUN COLLAPSING.
+ *
+ * An idle dryer repeats itself. REQINFO arrives every 10 seconds doing
+ * nothing, and every 2 seconds while a panel sits on the WiFi screen - where
+ * it was measured at 80% of all inbound frames. Writing each one costs flash
+ * and buys nothing: consecutive identical frames carry no information beyond
+ * "still the same, still going".
+ *
+ * Identical consecutive bodies are collapsed into a single summary line:
+ *
+ *     45231  REQINFO,
+ *     105240 ~repeat REQINFO, x30 45231..105240
+ *
+ * The count and the time span are kept, so the CADENCE survives - which
+ * matters, because the 10s-vs-2s REQINFO rate is how we identify a machine
+ * parked on its WiFi screen. The summary is strictly denser than the frames
+ * it replaces, not lossier.
+ *
+ * A run is flushed when a different frame arrives, when the log is read or
+ * cleared, and every RUN_MAX_MS regardless - otherwise a dryer left idle for
+ * hours would leave the whole stretch invisible until something changed.
+ */
+#define RUN_MAX_MS 60000UL
+
+static char     s_run_body[HR_CAPTURE_LINE_MAX];
+static uint32_t s_run_count;      /* repeats SUPPRESSED, not including the first */
+static uint32_t s_run_first_ms;
+static uint32_t s_run_last_ms;
+static unsigned long s_suppressed;
 static size_t s_used;       /* bytes written to the log */
 static bool s_full_warned;
 
@@ -81,31 +144,149 @@ static volatile unsigned long s_trend_writes, s_trend_fails;
 unsigned long hr_capture_trend_writes(void) { return s_trend_writes; }
 unsigned long hr_capture_trend_fails(void) { return s_trend_fails; }
 
+static size_t seg_size(unsigned i)
+{
+    struct stat st;
+    return (stat(k_seg[i], &st) == 0) ? (size_t)st.st_size : 0;
+}
+
+/*
+ * Segments in age order: index 0 is the oldest surviving, CAP_SEGMENTS-1 is
+ * the active one. The segment immediately after the active is the oldest,
+ * because it is the one deleted at the next rotation.
+ */
+static unsigned seg_at(unsigned age_order)
+{
+    return (unsigned)((s_seg + 1u + age_order) % CAP_SEGMENTS);
+}
+
+static size_t seg_total_used(void)
+{
+    size_t n = 0;
+    for (unsigned i = 0; i < CAP_SEGMENTS; i++) {
+        n += seg_size(i);
+    }
+    return n;
+}
+
+/* Remember which segment is active so a reboot does not append to the oldest
+ * one and invert the age order - the same reason hr_batchstore persists it. */
+static void seg_save(void)
+{
+    nvs_handle_t nh;
+    if (nvs_open("hrcap", NVS_READWRITE, &nh) == ESP_OK) {
+        nvs_set_u8(nh, "seg", s_seg);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+}
+
+static void seg_load(void)
+{
+    nvs_handle_t nh;
+    s_seg = 0;
+    if (nvs_open("hrcap", NVS_READONLY, &nh) == ESP_OK) {
+        uint8_t v = 0;
+        if (nvs_get_u8(nh, "seg", &v) == ESP_OK && v < CAP_SEGMENTS) {
+            s_seg = v;
+        }
+        nvs_close(nh);
+    }
+}
+
+/*
+ * Write one line to the active segment. Caller holds the lock and has already
+ * rotated if needed.
+ */
+static void emit(uint32_t t_ms, const char *body)
+{
+    FILE *f = fopen(k_seg[s_seg], "a");
+    if (f == NULL) {
+        return;
+    }
+    int n = fprintf(f, "%" PRIu32 "\t%s\n", t_ms, body);
+    fclose(f);
+    if (n > 0) {
+        s_used += (size_t)n;
+        s_seg_used += (size_t)n;
+    }
+}
+
+/* Emit the pending run summary, if any. Caller holds the lock. */
+static void flush_run(void)
+{
+    if (s_run_count == 0) {
+        return;
+    }
+    char line[HR_CAPTURE_LINE_MAX + 64];
+    snprintf(line, sizeof(line), "~repeat %s x%" PRIu32 " %" PRIu32 "..%" PRIu32,
+             s_run_body, s_run_count, s_run_first_ms, s_run_last_ms);
+    emit(s_run_last_ms, line);
+    s_run_count = 0;
+}
+
 /* Runs on the worker task: the only place that touches the filesystem. */
 static void write_line_now(const write_msg_t *m)
 {
     if (!s_ready) {
         return;
     }
-    if (s_total && s_used + RESERVE_BYTES >= s_total) {
-        if (!s_full_warned) {
-            s_full_warned = true;
-            ESP_LOGW(TAG, "capture log full (%u bytes) - download and clear it "
-                          "to keep recording", (unsigned)s_used);
-        }
-        return;
-    }
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
         return;
     }
-    FILE *f = fopen(LOGFILE, "a");
-    if (f != NULL) {
-        int n = fprintf(f, "%" PRIu32 "\t%s\n", m->t_ms, m->body);
-        fclose(f);
-        if (n > 0) {
-            s_used += (size_t)n;
-        }
+
+    /*
+     * Rotate BEFORE writing so a line is never split across two segments.
+     * The estimate is deliberately generous - an over-estimate rotates one
+     * line early, an under-estimate would truncate a frame.
+     */
+    size_t need = strlen(m->body) + 16;
+    /* A pending summary belongs with the frames it describes. */
+    if (s_seg_max && s_seg_used + need > s_seg_max) {
+        unsigned next = (unsigned)((s_seg + 1u) % CAP_SEGMENTS);
+        size_t dropped = seg_size(next);
+        remove(k_seg[next]);
+        s_seg = (uint8_t)next;
+        s_seg_used = 0;
+        s_rotations++;
+        seg_save();
+        s_used = seg_total_used();
+        ESP_LOGW(TAG, "capture rotated to seg%u; dropped %u bytes of the "
+                      "oldest frames (rotation %lu)",
+                 next, (unsigned)dropped, s_rotations);
     }
+
+    /*
+     * Same frame as last time? Extend the run instead of writing it. The run
+     * is still flushed every RUN_MAX_MS so a long idle stretch is never
+     * entirely absent from the log.
+     */
+    if (s_run_count > 0 && strcmp(m->body, s_run_body) == 0) {
+        s_run_count++;
+        s_run_last_ms = m->t_ms;
+        s_suppressed++;
+        if (m->t_ms - s_run_first_ms >= RUN_MAX_MS) {
+            flush_run();
+            snprintf(s_run_body, sizeof(s_run_body), "%s", m->body);
+            s_run_first_ms = m->t_ms;
+            s_run_last_ms = m->t_ms;
+        }
+        xSemaphoreGive(s_lock);
+        return;
+    }
+    if (s_run_count == 0 && s_run_body[0] != '\0' &&
+        strcmp(m->body, s_run_body) == 0) {
+        /* second sighting - start a run rather than writing the duplicate */
+        s_run_count = 1;
+        s_run_first_ms = s_run_last_ms = m->t_ms;
+        s_suppressed++;
+        xSemaphoreGive(s_lock);
+        return;
+    }
+
+    flush_run();
+    emit(m->t_ms, m->body);
+    snprintf(s_run_body, sizeof(s_run_body), "%s", m->body);
     xSemaphoreGive(s_lock);
 }
 
@@ -332,11 +513,34 @@ void hr_capture_mount_now(void)
     if (esp_spiffs_info("capture", &total, &used) == ESP_OK) {
         s_total = total;
     }
+    seg_load();
+    s_seg_used = seg_size(s_seg);
+    s_used = seg_total_used();
+    s_seg_max = (s_total > RESERVE_BYTES)
+                    ? (s_total - RESERVE_BYTES) / CAP_SEGMENTS
+                    : 0;
+
+    /*
+     * Migrate a pre-rotation single file into segment 0 rather than orphaning
+     * it - it holds real captured frames somebody may still want.
+     */
     struct stat st;
-    s_used = (stat(LOGFILE, &st) == 0) ? (size_t)st.st_size : 0;
+    if (stat(MOUNT "/frames.log", &st) == 0) {
+        if (seg_size(0) == 0 && rename(MOUNT "/frames.log", k_seg[0]) == 0) {
+            ESP_LOGW(TAG, "migrated legacy frames.log (%u bytes) into seg0",
+                     (unsigned)st.st_size);
+        } else {
+            remove(MOUNT "/frames.log");
+        }
+        s_seg_used = seg_size(s_seg);
+        s_used = seg_total_used();
+    }
+
     s_ready = true;
-    ESP_LOGI(TAG, "capture log ready: %u bytes used of %u", (unsigned)s_used,
-             (unsigned)s_total);
+    ESP_LOGI(TAG, "capture log ready: %u bytes used of %u, seg%u active, "
+                  "%u per segment",
+             (unsigned)s_used, (unsigned)s_total, (unsigned)s_seg,
+             (unsigned)s_seg_max);
 }
 
 bool hr_capture_ready(void)
@@ -361,9 +565,17 @@ bool hr_capture_clear(void)
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    remove(LOGFILE);
+    s_run_count = 0;
+    s_run_body[0] = '\0';
+    for (unsigned i = 0; i < CAP_SEGMENTS; i++) {
+        remove(k_seg[i]);
+    }
+    remove(MOUNT "/frames.log");   /* legacy, if migration ever failed */
+    s_seg = 0;
+    s_seg_used = 0;
     s_used = 0;
     s_full_warned = false;
+    seg_save();
     xSemaphoreGive(s_lock);
     ESP_LOGI(TAG, "capture log cleared");
     return true;
@@ -448,33 +660,78 @@ bool hr_capture_format(void)
     return true;
 }
 
+/*
+ * A download spans every segment, oldest first, so it reads as one continuous
+ * log exactly as it did when there was a single file.
+ */
+typedef struct {
+    int      fd;      /* -1 when no segment is currently open */
+    unsigned age;     /* next age-order slot to open, 0 = oldest */
+} cap_reader_t;
+
 void *hr_capture_open(void)
 {
     if (!s_ready) {
         return NULL;
     }
-    int fd = open(LOGFILE, O_RDONLY);
-    if (fd < 0) {
-        ESP_LOGE(TAG, "capture open(%s) failed: %s (errno %d)", LOGFILE,
-                 strerror(errno), errno);
+    /* Make any pending run visible before the caller reads the log. */
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(500)) == pdTRUE) {
+        flush_run();
+        xSemaphoreGive(s_lock);
+    }
+
+    cap_reader_t *r = calloc(1, sizeof(*r));
+    if (r == NULL) {
         return NULL;
     }
-    return (void *)(intptr_t)(fd + 1);
+    r->fd = -1;
+    r->age = 0;
+    return r;
 }
 
 int hr_capture_read(void *handle, char *buf, size_t cap)
 {
-    if (handle == NULL || buf == NULL || cap == 0) {
+    cap_reader_t *r = (cap_reader_t *)handle;
+    if (r == NULL || buf == NULL || cap == 0) {
         return 0;
     }
-    int fd = (int)(intptr_t)handle - 1;
-    int n = (int)read(fd, buf, cap);
-    return (n < 0) ? 0 : n;
+    for (;;) {
+        if (r->fd < 0) {
+            if (r->age >= CAP_SEGMENTS) {
+                return 0;           /* every segment consumed */
+            }
+            unsigned i = seg_at(r->age++);
+            r->fd = open(k_seg[i], O_RDONLY);
+            if (r->fd < 0) {
+                continue;           /* segment absent - normal before wrap */
+            }
+        }
+        int n = (int)read(r->fd, buf, cap);
+        if (n > 0) {
+            return n;
+        }
+        close(r->fd);               /* end of this segment: move to the next */
+        r->fd = -1;
+    }
 }
 
 void hr_capture_close(void *handle)
 {
-    if (handle != NULL) {
-        close((int)(intptr_t)handle - 1);
+    cap_reader_t *r = (cap_reader_t *)handle;
+    if (r != NULL) {
+        if (r->fd >= 0) {
+            close(r->fd);
+        }
+        free(r);
     }
+}
+
+unsigned long hr_capture_rotations(void)
+{
+    return s_rotations;
+}
+
+unsigned long hr_capture_suppressed(void)
+{
+    return s_suppressed;
 }
