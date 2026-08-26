@@ -360,7 +360,9 @@ mode change, not commands into it.
 
 ## SYSINF — human-readable status
 `SYSINF,2026/02/24 08:02,26,550,91,4`
-- `[1]` RTC date/time (real clock)
+- `[1]` **NOT the RTC** - see the 2026-08-26 correction at the end of this
+  file. Setting the clock left this field unchanged; its shape matches the
+  batch CSV filename format. Unidentified.
 - `[2]` 26 (temp/count) · `[3]` 550 (**likely vacuum in mTorr**) · `[4]` 91 (percent?) · `[5]` 4 (state)
 
 ## TYPE 15 — diagnostics snapshot (richest)
@@ -1228,3 +1230,53 @@ at the machine and said the panel showed a network but no server.
 That is the same lesson as the missing TX logging one entry above: the firmware
 could not show its own outbound half, so nobody could see what was being
 asserted. See also the STATE divergence noted there, still uncorrected.
+
+## SETDATE works, and SYSINF[1] is not the clock (2026-08-26)
+
+**`SETDATE YYYY/MM/DD HH:MM` sets the dryer's real-time clock.** Confirmed on
+hardware: the machine's panel clock was six days behind, the command was sent,
+and the panel then read the correct time.
+
+    ADPT->DRYER  SETDATE 2026/08/26 14:01
+
+Five integers, slash-separated date, colon-separated time, one space between.
+**Seconds are not required.** The firmware's own RTC-setter logs two adjacent
+format strings that suggest six integers -
+
+    RTC calendar set to  Date : %d/%d/%d
+    Time  : %d : %d : %d
+
+\- but the five-field form is what was demonstrated to work, and the log
+strings describe how the dryer PRINTS the result, not what it parses. Another
+reminder that a format string is not evidence of a wire format.
+
+### It had never once worked
+
+Not a protocol problem. `/api/cmd` gated on
+
+    if (hr_cmd_classify(verb) != HR_CMD_SAFE)
+
+and `SETDATE` is `HR_CMD_CONFIG`, so every press returned "Refused: not
+allowed" and nothing reached the dryer. The comment three lines below that gate
+had always said the class is re-checked inside `hr_session_send_config()`,
+which only makes sense if CONFIG verbs were expected to arrive there. The gate
+and the code beneath it disagreed and the gate won silently. Fixed in v1.0.7 by
+admitting SAFE and CONFIG, with the recipe verbs refused inside send_config so
+the widening is not a net loosening.
+
+### CORRECTION: SYSINF field 1 is NOT the RTC
+
+This document has recorded `SYSINF`'s first field as "RTC date/time (real
+clock)" since the early analysis, on the strength of an older build emitting
+`2026/02/24 08:02`.
+
+**It is not.** Setting the clock corrected the panel and left this field
+unchanged at `2026-08-20_18.34` across the whole exchange. That shape also
+matches the batch CSV filename format in the same binary:
+
+    %05ld.%04d-%02d-%02d_%02d.%02d.csv   ->  2026-08-20_18.34
+
+So field 1 reads as a batch or record timestamp, not the live clock. Treat it
+as **unidentified** rather than trusting the old annotation, and do not use it
+to verify anything clock-related - it is what made the working SETDATE above
+look, for several minutes, like a failure.
