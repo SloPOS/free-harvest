@@ -1104,7 +1104,7 @@ const PHASE = {
       {k:"START",   d:"Automatic mode — best for most foods"},
       {k:"CUSTOM",  d:"Set your own freeze/dry temperatures"},
       {k:"CANDY",   d:"Candy mode with pre-warming"}],
-    note:"You can name the batch from Settings → Batch before starting." },
+    note:"You can name the batch when you start it, or from Settings → Batch." },
   2:{ /* PREPARING */
     head:"Preparing the freeze dryer",
     body:"The chamber is pre-cooling. <b>Now is the time to load your trays</b> — "+
@@ -1675,6 +1675,7 @@ function askStartSetup(){
     "the dryer will run for roughly a day. Make sure the trays are loaded and " +
     "the drain valve is shut before confirming.";
   $("#cfyes").textContent = "Start batch";
+  addBatchNameField();
   $("#cfwrap").style.display = "flex";
 }
 
@@ -1754,7 +1755,7 @@ function renderRecipes(){
 
     const row = document.createElement("div");
     row.className = "rcprow";
-    row.appendChild(rcpBtn("Send", function(){ sendRecipe(r, false); }));
+    row.appendChild(rcpBtn("Send", function(){ askSendRecipe(r); }));
     const st = rcpBtn("Send + Start", function(){ askStartRecipe(r); });
     st.className = "ctrlbtn sev2";
     row.appendChild(st);
@@ -1881,6 +1882,32 @@ function askStartRecipe(r){
     "immediately. The dryer will run for roughly a day. Make sure the trays " +
     "are loaded and the drain valve is shut before confirming.";
   $("#cfyes").textContent = "Start batch";
+  addBatchNameField();
+  $("#cfwrap").style.display = "flex";
+}
+
+/*
+ * Sending a recipe WITHOUT starting still overwrites what the dryer has
+ * configured, so it is confirmed too - just not as a batch start, and with no
+ * name field, because nothing is beginning yet.
+ */
+function askSendRecipe(r){
+  pendingAction = {recipe:r, sendonly:true};
+  $("#cftitle").textContent = "Send " + r.name + " to the dryer?";
+  $("#cfbody").textContent  = "This replaces the recipe currently configured " +
+    "on the machine. Nothing starts - you can start it from the panel or from " +
+    "here afterwards.";
+  $("#cfyes").textContent = "Send recipe";
+  $("#cfwrap").style.display = "flex";
+}
+
+function askSubmitSetup(){
+  if(isDirty() || nameProblem(setName)) return;
+  pendingAction = {setup:true, sendonly:true};
+  $("#cftitle").textContent = "Send these settings to the dryer?";
+  $("#cfbody").textContent  = "This replaces the recipe currently configured " +
+    "on the machine. Nothing starts.";
+  $("#cfyes").textContent = "Send settings";
   $("#cfwrap").style.display = "flex";
 }
 
@@ -1951,7 +1978,37 @@ function paintControls(st){
      mirrored button list for those screens would just be a stray Cancel next
      to a full editor. Every other screen still shows its buttons. */
   if(st.stat_type === 43 || st.stat_type === 31){
-    card.style.display="none"; return;
+    /*
+     * BACK TO HOME.
+     *
+     * This branch used to hide the card outright, which left a dryer parked on
+     * a recipe-configuration screen showing no controls at all - including the
+     * Cancel that gets it back. The setup panel is the right editor for these
+     * screens, but "no way out" is not the right answer when the machine is
+     * sitting on one and the user is not standing next to it.
+     *
+     * Only ever offers a button we have MEASURED: Cancel is 18 on screen 43
+     * and 26 on screen 31, captured from the genuine app. Screens without a
+     * captured way back - 15, 44, the Wi-Fi panel - still offer nothing,
+     * because a guessed button number on a settings screen is how someone
+     * ends up pressing RESET WIFI from another room.
+     */
+    var back = acts.filter(function(a){
+      return a.name==="cfg_cancel" || a.name==="custom_cancel";
+    })[0];
+    if(!back){ card.style.display="none"; return; }
+    card.style.display="";
+    box.innerHTML="";
+    var hb=document.createElement("button");
+    hb.type="button";
+    hb.className="ctrlbtn sev0";
+    hb.textContent="Back to home screen";
+    hb.onclick=function(){ sendAction(back, st.stat_type, false); };
+    box.appendChild(hb);
+    hint.textContent="The dryer is on a configuration screen. Use the setup "+
+                     "panel to edit the recipe, or send it back to the home "+
+                     "screen - nothing in progress is affected.";
+    return;
   }
   if(st.link!=="up" || !st.have_tel){
     card.style.display="";
@@ -1988,7 +2045,38 @@ function askThen(act, st){
   $("#cftitle").textContent = act.label + "?";
   $("#cfbody").textContent  = consequenceOf(act, st);
   $("#cfyes").textContent   = act.label;
+  /* Only a start gets the name field - ending or skipping a run is not the
+     moment to ask what it was called. */
+  if(act.name==="start_auto") addBatchNameField();
   $("#cfwrap").style.display="flex";
+}
+
+/*
+ * Naming the batch at the moment it starts.
+ *
+ * The field used to exist only in Settings -> Batch, which meant a run was
+ * named after the fact or never - and an unnamed batch is the one thing the
+ * logbook cannot reconstruct afterwards. Asking here costs one input on a
+ * dialog the user is already reading in order to start.
+ *
+ * Deliberately OPTIONAL. A blank name starts the batch anyway: refusing to
+ * run a dryer over bookkeeping would be the wrong trade, and the name can
+ * still be set from Settings later.
+ */
+function addBatchNameField(){
+  var wrap=document.createElement("div");
+  wrap.className="field";
+  wrap.style.marginTop="14px";
+  var lab=document.createElement("label");
+  lab.setAttribute("for","cfbname");
+  lab.textContent="Name this batch (optional)";
+  var inp=document.createElement("input");
+  inp.id="cfbname";
+  inp.maxLength=24;
+  inp.placeholder="e.g. Strawberries";
+  wrap.appendChild(lab);
+  wrap.appendChild(inp);
+  $("#cfbody").appendChild(wrap);
 }
 
 function closeConfirm(){ $("#cfwrap").style.display="none"; pendingAction=null; }
@@ -2542,14 +2630,27 @@ document.addEventListener("keydown", e=>{
 $("#cfyes").addEventListener("click", async ()=>{
   if(!pendingAction) return;
   const p = pendingAction;
+  /* Read the name BEFORE closeConfirm() tears the dialog down. */
+  const bname = $("#cfbname") ? $("#cfbname").value.trim() : "";
   closeConfirm();
+  /*
+   * Name first, then start. If naming fails the batch still starts - a run
+   * the user asked for should not be blocked by a label, and the failure is
+   * visible in the logbook as an unnamed batch.
+   */
+  if(bname){
+    try{ await ctrlPost("/api/cmd",
+                        "verb=SETBNAME&args="+encodeURIComponent(bname)); }
+    catch(e){}
+  }
   if(p.del){
     try{ await fetch("/api/recipes/delete",{method:"POST",
                                             body:"slot="+p.recipe.slot}); }catch(e){}
     refreshRecipes();
     return;
   }
-  if(p.setup){ submitSetup(true); return; }
+  if(p.setup){ submitSetup(!p.sendonly); return; }
+  if(p.sendonly){ sendRecipe(p.recipe, false); return; }
   if(p.start){ sendRecipe(p.recipe, true); return; }
   sendAction(p.act, p.screen, true);
 });
@@ -2580,7 +2681,7 @@ $("#setname").addEventListener("input", ()=>{
   setName = $("#setname").value.trim();
   updateButtons();
 });
-$("#setsubmit").addEventListener("click", ()=>submitSetup(false));
+$("#setsubmit").addEventListener("click", askSubmitSetup);
 $("#setstart").addEventListener("click", askStartSetup);
 $("#setcancel").addEventListener("click", cancelSetup);
 
