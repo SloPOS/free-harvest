@@ -731,7 +731,26 @@ static esp_err_t h_cmd(httpd_req_t *req)
     httpd_query_key_value(buf, "args", args, sizeof(args));
     hr_url_decode(args);
 
-    if (hr_cmd_classify(verb) != HR_CMD_SAFE) {
+    /*
+     * SAFE verbs are reads. CONFIG verbs are recoverable writes - the dryer's
+     * clock, its preferences, its name - and the UI offers one directly:
+     * Settings -> "Set dryer clock to this device's time" sends SETDATE.
+     *
+     * This gate admitted SAFE only, so every CONFIG verb came back "not
+     * allowed" and that button had never once worked. The comment immediately
+     * below has always said the class is re-checked inside
+     * hr_session_send_config(), which only makes sense if CONFIG verbs were
+     * expected to reach it. The gate and the code beneath it disagreed, and
+     * the gate won silently.
+     *
+     * Widening it is not a net loosening. The recipe verbs that also live in
+     * CONFIG are refused inside send_config(), because the generic field
+     * builder reshapes them into a different VALID recipe rather than an
+     * error. Hardware verbs, REBOOT, SETSN and FDRENAME are in neither class
+     * and stay unreachable. pin_guard() above still applies to all of it.
+     */
+    hr_cmd_class_t cls = hr_cmd_classify(verb);
+    if (cls != HR_CMD_SAFE && cls != HR_CMD_CONFIG) {
         httpd_resp_set_status(req, "403 Forbidden");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"not allowed\"}");
     }
