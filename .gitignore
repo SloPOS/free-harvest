@@ -53,3 +53,7 @@ tools/screen-map-*.txt
 # Backup of the stock adapter's USB volume: vendor firmware plus device
 # identifiers (MAC). Analysis notes are fine in the repo; this is not.
 /drive backup/
+
+# Vendor firmware cipher key - publishing this is the maintainer's decision,
+# not something a stray "git add -A" gets to make.
+tools/decode_h6r.py
