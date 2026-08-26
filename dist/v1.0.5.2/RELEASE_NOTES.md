@@ -1,7 +1,8 @@
-# Free Harvest v1.0.5.1
+# Free Harvest v1.0.5.2
 
 **A supplement to [v1.0.5](../../releases/tag/v1.0.5), not a new feature release.**
-It contains v1.0.5 plus two fixes to the opening handshake, and nothing else.
+It contains v1.0.5 plus three fixes to how the adapter introduces
+itself, and nothing else.
 
 If v1.0.5 talks to your dryer, this changes almost nothing — your handshake
 takes about three quarters of a second longer and that is the whole difference.
@@ -49,6 +50,27 @@ down and the handshake never re-ran. A user's log shows it exactly — the
 adapter re-enumerates, and then nothing but `REQINFO` forever.
 
 Now keyed on the USB mount count as well, so a re-attach re-introduces.
+
+## The adapter identified itself with a name no dryer has seen
+
+`WIFIINFO` field 4 is the adapter's own identifier. Every genuine capture
+carries `HR_` followed by the MAC with no separators:
+
+```
+genuine : WIFIINFO 5 81 "MyNetwork" 1 HR_aabbccddeeff 0 1 37
+ours    : WIFIINFO 5 100 "MyNetwork" 1 HR-Adapter-Setup 0 1 5627
+```
+
+The same string appears a second time in `esp/version.txt` on the stock
+adapter's mass-storage volume, which the dryer also reads — so a real adapter
+presents that identifier to the machine twice, in that format. We were sending
+`HR-Adapter-Setup`, which matches neither.
+
+Now sent as `HR_<mac>`, e.g. `HR_84fce6687e6c`.
+
+**Whether any firmware checks it is unknown.** This closes a measured
+divergence from the genuine adapter; it is not a demonstrated fix. Your setup
+hotspot keeps its existing name — only the field sent to the dryer changed.
 
 ## What this does not include
 
