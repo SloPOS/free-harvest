@@ -191,6 +191,9 @@
   button:active{transform:scale(.985)}
   button.primary{background:var(--accent); color:var(--accent-ink); border-color:transparent}
   button.ghost{background:transparent}
+  /* Destructive actions. Outlined rather than filled: a solid red block reads
+     as the primary action on the card, and this never is. */
+  button.danger{background:transparent; color:var(--bad); border-color:var(--bad)}
   button:disabled{opacity:.45; cursor:not-allowed}
   .row{display:grid; grid-template-columns:1fr 1fr; gap:10px}
   .row.one{grid-template-columns:1fr}
@@ -776,6 +779,22 @@
       <div id="datestatus" class="notice"></div>
       <div class="hint">Sends <span class="mono">SETDATE</span> with your browser's
         current date/time.</div>
+    </div>
+
+    <div class="card">
+      <h2>Reboot the dryer</h2>
+      <button id="dryerreboot" class="danger">Reboot freeze dryer</button>
+      <div id="rebootstatus" class="notice"></div>
+      <div class="hint"><b>Ends any batch in progress.</b> A restarted machine
+        does not resume a run — whatever was inside is lost. Use it when the
+        panel has locked up and there is nothing left to lose.</div>
+      <div class="hint" style="color:var(--bad)"><b>Unverified.</b> This sends
+        the dryer's <span class="mono">REBOOT</span> command, which has never
+        been tested on a real machine. It is on this project's never-probe list
+        precisely because a verb's name is not evidence of what it does —
+        <span class="mono">SPC</span> reads like a pump control and sets the
+        display colour; <span class="mono">ADV</span> was recorded as dead and
+        starts cycles. Treat the outcome as unknown.</div>
     </div>
 
     <div class="card">
@@ -2287,7 +2306,20 @@ async function sendCmd(verb,args,statusEl){
   const el=statusEl||$("#cmdstatus");
   note(el,"Sending "+esc(verb)+"…","info");
   try{
-    const body="verb="+encodeURIComponent(args? verb+","+args : verb);
+    /*
+     * verb and args are SEPARATE parameters. This used to send
+     * "verb=SETDATE,2026/08/26 14:01" - the arguments packed into the verb
+     * field, comma-joined - which the firmware reads into a 24-byte buffer
+     * and then fails to classify, so every command carrying an argument came
+     * back "not allowed". SETDATE, SETBNAME and the raw-command box's
+     * arguments field were all dead because of this one line.
+     *
+     * The firmware side was corrected earlier and its comment says arguments
+     * "were parsed by the UI and then silently dropped here" - but the UI had
+     * never sent them in a form that could arrive.
+     */
+    const body="verb="+encodeURIComponent(verb)+
+      (args? "&args="+encodeURIComponent(args) : "");
     const r=await fetch("/api/cmd",{method:"POST",
       headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
     const j=await r.json();
@@ -2311,6 +2343,25 @@ $("#bnamesave").addEventListener("click",async()=>{
   const v=$("#bname").value.trim();
   if(!v){ note($("#bnamestatus"),"Enter a name first","bad"); return; }
   sendCmd("SETBNAME", v, $("#bnamestatus"));
+});
+$("#dryerreboot").addEventListener("click",async()=>{
+  if(!confirm(
+    "Reboot the freeze dryer?\n\n"+
+    "This ENDS ANY BATCH IN PROGRESS. A restarted machine does not resume a "+
+    "run, and whatever is inside is lost.\n\n"+
+    "This command has never been tested on a real dryer. It is named REBOOT "+
+    "in the firmware, but what it actually does is unverified — it may not "+
+    "reboot at all.")) return;
+  const el=$("#rebootstatus");
+  note(el,"Sending REBOOT…","info");
+  try{
+    const r=await fetch("/api/dryer/reboot",{method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      body:"confirm=REBOOT"});
+    const j=await r.json();
+    note(el, j.ok? "REBOOT sent — watch the machine's panel"
+                 : "Refused: "+esc(j.reason||"not allowed"), j.ok?"ok":"bad");
+  }catch(e){ note(el,"Request failed","bad"); }
 });
 $("#setdate").addEventListener("click",()=>{
   const d=new Date(), p=n=>String(n).padStart(2,"0");
