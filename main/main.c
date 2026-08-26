@@ -23,6 +23,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -92,6 +93,36 @@ static size_t s_trend_persisted;
 static bool s_resume_done;
 /* Backoff clock for the series write, so a failure cannot spin. */
 static unsigned long s_trend_last_try;
+
+/*
+ * The identifier we present to the dryer in WIFIINFO field 4.
+ *
+ * Every genuine capture carries "HR_" followed by the adapter's MAC with no
+ * separators - HR_aabbccddeeff - and the same string appears a second time in
+ * esp/version.txt on the stock adapter's mass-storage volume, which the dryer
+ * also reads. So a real adapter presents that identifier to the machine twice,
+ * in that format.
+ *
+ * We were sending CONFIG_HR_AP_SSID, "HR-Adapter-Setup", which matches neither
+ * the format nor anything the dryer has seen before. Whether any firmware
+ * actually checks it is UNKNOWN - this is a divergence from ground truth being
+ * closed, not a demonstrated fix.
+ *
+ * This changes only the WIFIINFO field. The setup hotspot keeps its
+ * CONFIG_HR_AP_SSID name, because that one is for humans to find in a phone's
+ * Wi-Fi list and "HR_3c8427e1b4f0" is not.
+ */
+static const char *adapter_id(void)
+{
+    static char id[20];
+    if (id[0] == '\0') {
+        uint8_t mac[6] = {0};
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(id, sizeof(id), "HR_%02x%02x%02x%02x%02x%02x",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    return id;
+}
 
 static unsigned long now_ms(void)
 {
@@ -397,7 +428,7 @@ void app_main(void)
             hr_wifi_current_ssid(ssid, sizeof(ssid));
             bool up = (hr_wifi_status() == HR_WIFI_CONNECTED);
             hr_session_set_wifi(&s_session, up ? 5 : 1,
-                                hr_wifi_rssi_pct(), ssid, CONFIG_HR_AP_SSID);
+                                hr_wifi_rssi_pct(), ssid, adapter_id());
             /*
              * Tell the dryer the link is complete once we actually have a
              * network. Hardcoded false for the life of this project, which is
