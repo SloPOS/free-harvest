@@ -1111,3 +1111,69 @@ counter is not a stable per-action key, and nothing should be built on the
 assumption that a repeat carries the same number. Our own control path sends one
 value per press and does not retry, which is unaffected - but the earlier note
 overstated what the captures showed.
+
+## Both halves of the conversation are now logged (2026-08-26)
+
+Until v1.0.4 the firmware logged only `RX <- `. A user reading their own log saw
+their dryer asking `REQINFO` every two seconds with nothing apparently
+answering, and reasonably concluded the adapter never replied. It was replying
+to every one of them. Refuting that took reading the source, which is not a
+diagnostic anyone should need.
+
+`hr_usb_tx()` now logs `TX -> ` for every frame, and the 10-second heartbeat
+carries `frames_out` alongside `frames_in`.
+
+Verified on the live dryer immediately after OTA:
+
+    I (3327) RX <- REQINFO,
+    I (3328) TX -> WIFIINFO 5 51 "Ourplace" 0 HR-Adapter-Setup 0 0 2
+    I (3519) TX -> STATE 5 51
+    I (3520) TX -> UNIQUE
+    I (3520) TX -> FDNAME
+    I (3547) TX -> REQCFG
+    I (3635) RX <- UID,...
+    I (3769) RX <- SNM,...
+    I (3854) RX <- CFG,...
+    I (18605) TX -> STATE 5 48        <- 15s heartbeat
+
+REQINFO is answered in 1 ms. All three identity queries are answered inside
+320 ms. **`REQINFO` on a ~10s cycle is NORMAL** - this machine interleaves it
+with `STAT` indefinitely. A log full of REQINFO is not itself a fault signal;
+the absence of `STAT` is.
+
+### Our STATE does not match any captured STATE
+
+Exposed by the new logging. Every genuine `STATE` frame in the capture is:
+
+    STATE 1 0
+    STATE 2 0
+
+First field 1 or 2, second field **always 0**. We send `STATE 5 51` - field 0
+from the same `up ? 5 : 1` expression that feeds WIFIINFO, field 1 from RSSI
+percent.
+
+WIFIINFO's first field legitimately takes 5 (`WIFIINFO 5 81 "MyNetwork" 1 ...`
+is captured), so 5 is a valid *link* value. But STATE's first field has never
+been observed as anything but 1 or 2, and its second field never as anything but
+0. Treating the two frames as sharing a field domain was an assumption, not an
+observation.
+
+This dryer (6.0.641041) accepts `STATE 5 51` without complaint - the handshake
+completes and telemetry flows. So this is NOT known to be a bug. It is recorded
+because it is a measured divergence from ground truth and therefore a candidate
+whenever a stricter machine misbehaves. Changing it is untested in both
+directions; do not "fix" it on a working machine to satisfy a hunch.
+
+### Contrast: the 6.0.644170 machine that will not start
+
+A second user's dryer, on the newer build, answers the identical handshake with
+`UID` **and nothing else** - no `SNM`, no `CFG`, no `STAT`, and `REQINFO`
+forever. Byte accounting on their log is exact (UID 66 B + REQINFO 9 B each,
+matching `rx_bytes`), so nothing is being dropped or mis-framed.
+
+That split maps onto the dispatcher's structure recorded above: `UNIQUE` is
+referenced twice and is consistent with a direct handler, while `FDNAME`,
+`REQCFG` and `STAT` all require the separate task that consumes the mailbox
+global. **Their dryer's protocol layer is alive; the executor behind it is
+not.** That is a machine-state problem, not a framing one, and it is why
+matching the handshake byte-for-byte did not fix them.

@@ -153,6 +153,31 @@ static void on_line_state(int itf, cdcacm_event_t *event)
 void hr_usb_tx(const char *data, size_t len, void *user)
 {
     (void)user;
+
+#if CONFIG_HR_HTTP_LOG_TO_UART
+    /*
+     * Log what we transmit, mirroring "RX <- " in main.c.
+     *
+     * Only the receive side used to be logged. A log therefore showed the
+     * dryer asking REQINFO every two seconds with nothing apparently
+     * answering - indistinguishable from a firmware that never replies, even
+     * though hr_session.c answers every one of them. A user reasonably read
+     * their own log as "we send nothing back", and the only way to tell them
+     * otherwise was to read the source. Half a conversation is not a
+     * diagnostic tool; print both halves.
+     */
+    {
+        char     line[HR_MAX_FRAME];
+        size_t   n = (len < sizeof(line) - 1) ? len : sizeof(line) - 1;
+        memcpy(line, data, n);
+        /* Trim the frame terminator so the log reads as one line per frame. */
+        while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == '\n')) {
+            n--;
+        }
+        line[n] = '\0';
+        ESP_LOGI(TAG, "TX -> %s", line);
+    }
+#endif
     size_t queued = tinyusb_cdcacm_write_queue(CDC_ITF, (const uint8_t *)data,
                                                len);
     if (queued != len) {
