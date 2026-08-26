@@ -1979,36 +1979,32 @@ function paintControls(st){
      to a full editor. Every other screen still shows its buttons. */
   if(st.stat_type === 43 || st.stat_type === 31){
     /*
-     * BACK TO HOME.
+     * The setup panel replicates these screens and carries its own Cancel at
+     * the bottom, so a mirrored button here would be a second way out sitting
+     * next to a full editor.
      *
-     * This branch used to hide the card outright, which left a dryer parked on
-     * a recipe-configuration screen showing no controls at all - including the
-     * Cancel that gets it back. The setup panel is the right editor for these
-     * screens, but "no way out" is not the right answer when the machine is
-     * sitting on one and the user is not standing next to it.
+     * A "back to home" button was tried here and removed: it duplicated a
+     * control the user already had. The screens that genuinely strand a user -
+     * the Wi-Fi panel and Diagnostics - cannot be served the same way, and it
+     * is worth writing down why rather than rediscovering it.
      *
-     * Only ever offers a button we have MEASURED: Cancel is 18 on screen 43
-     * and 26 on screen 31, captured from the genuine app. Screens without a
-     * captured way back - 15, 44, the Wi-Fi panel - still offer nothing,
-     * because a guessed button number on a settings screen is how someone
-     * ends up pressing RESET WIFI from another room.
+     * There is no verb that sets the machine's screen. All 49 are known: STATE
+     * is the ADAPTER reporting its own link to the dryer, STATUS is a query,
+     * and ADV is the only thing that moves the state machine - forwards, which
+     * is how it starts cycles. Nothing goes back.
+     *
+     * That leaves CLICK, which is screen-relative and needs a captured button
+     * number. We have Cancel for 43 and 31 and nothing for the Wi-Fi panel or
+     * Diagnostics. Worse, a dryer sitting on the Wi-Fi panel REPORTS screen 1,
+     * so a button offered on the home screen could not tell the two apart -
+     * and button 10 on screen 1 is Start Auto. A misfire would not fail, it
+     * would begin a 24-hour run.
+     *
+     * So the escape hatch for a stranded machine is the reboot control in
+     * Settings, not a guessed CLICK. Capturing those screens' buttons is what
+     * would change this.
      */
-    var back = acts.filter(function(a){
-      return a.name==="cfg_cancel" || a.name==="custom_cancel";
-    })[0];
-    if(!back){ card.style.display="none"; return; }
-    card.style.display="";
-    box.innerHTML="";
-    var hb=document.createElement("button");
-    hb.type="button";
-    hb.className="ctrlbtn sev0";
-    hb.textContent="Back to home screen";
-    hb.onclick=function(){ sendAction(back, st.stat_type, false); };
-    box.appendChild(hb);
-    hint.textContent="The dryer is on a configuration screen. Use the setup "+
-                     "panel to edit the recipe, or send it back to the home "+
-                     "screen - nothing in progress is affected.";
-    return;
+    card.style.display="none"; return;
   }
   if(st.link!=="up" || !st.have_tel){
     card.style.display="";
