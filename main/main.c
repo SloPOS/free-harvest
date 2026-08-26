@@ -65,6 +65,15 @@ static volatile bool      s_batch_done_pending;
 static bool               s_batch_boot_checked;
 static uint32_t           s_batch_saved_ms;
 static bool               s_batch_store_inited;
+
+/*
+ * Introducing ourselves once per link, and a STATE heartbeat after that.
+ * s_hello_done resets whenever the link drops, so a re-enumeration
+ * re-introduces rather than leaving the dryer waiting for an adapter it has
+ * already forgotten about.
+ */
+static bool     s_hello_done;
+static uint32_t s_heartbeat_ms;
 /* Graph points already written to flash, so the loop only persists new ones. */
 static size_t s_trend_persisted;
 /* The resume decision runs once, after the capture log mounts and the dryer
@@ -325,6 +334,29 @@ void app_main(void)
                 }
             }
             xSemaphoreGive(s_hist_lock);
+        }
+
+        /*
+         * Say hello once the link is up, then heartbeat.
+         *
+         * The genuine adapter opens with STATE / UNIQUE / FDNAME / REQCFG and
+         * then emits STATE every ~15s. This firmware used to initiate nothing
+         * at all, which one dryer tolerated and another did not - the latter
+         * sending REQINFO forever and never starting telemetry.
+         */
+        {
+            bool up = (s_session.link == HR_LINK_UP);
+            if (!up) {
+                s_hello_done = false;
+            } else if (!s_hello_done) {
+                s_hello_done = true;
+                s_heartbeat_ms = (uint32_t)now_ms();
+                ESP_LOGI(TAG, "link up: introducing ourselves to the dryer");
+                hr_session_hello(&s_session);
+            } else if ((uint32_t)now_ms() - s_heartbeat_ms > 15000u) {
+                s_heartbeat_ms = (uint32_t)now_ms();
+                hr_session_heartbeat(&s_session);
+            }
         }
 
         /*

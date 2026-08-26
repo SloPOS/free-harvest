@@ -75,6 +75,39 @@ static void send_wifiinfo(hr_session_t *s)
     hr_session_send(s, &b);
 }
 
+static void send_state(hr_session_t *s)
+{
+    hr_builder_t b;
+    hr_build_begin(&b, "STATE");
+    hr_build_int(&b, s->wifi.link);
+    hr_build_int(&b, s->wifi.rssi);
+    hr_session_send(s, &b);
+}
+
+void hr_session_heartbeat(hr_session_t *s)
+{
+    if (s != NULL) {
+        send_state(s);
+    }
+}
+
+void hr_session_hello(hr_session_t *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    /*
+     * Order matters: it is the order the genuine adapter uses. UNIQUE asks the
+     * dryer who it is, FDNAME reads its name file, REQCFG reads its recipe
+     * configuration - so after this exchange we know the machine, and the
+     * dryer has been told an adapter is present.
+     */
+    send_state(s);
+    hr_session_send_simple(s, "UNIQUE");
+    hr_session_send_simple(s, "FDNAME");
+    hr_session_send_simple(s, "REQCFG");
+}
+
 void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
                          const char *ssid, const char *ap_name)
 {

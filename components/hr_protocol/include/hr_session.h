@@ -104,6 +104,30 @@ void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user);
  * Call whenever the network state changes. `uptime_s` is not stored - the
  * frame carries seconds since boot, which the caller supplies at send time.
  */
+/*
+ * Introduce ourselves to the dryer, the way the genuine adapter does.
+ *
+ * Captured from a real HarvestRight adapter immediately after enumeration:
+ *
+ *     ADPT->DRYER  STATE 2 0
+ *     ADPT->DRYER  UNIQUE      -> dryer answers UID
+ *     ADPT->DRYER  FDNAME      -> dryer answers SNM
+ *     ADPT->DRYER  REQCFG      -> dryer answers CFG
+ *
+ * Until now this firmware initiated NOTHING - it only ever answered. One dryer
+ * streams telemetry regardless and never revealed the gap; another sends only
+ * REQINFO forever and never starts, which is what this is meant to fix.
+ *
+ * Every verb here is a read or a status report. None changes machine state.
+ */
+void hr_session_hello(hr_session_t *s);
+
+/*
+ * Periodic STATE, which the genuine adapter emits roughly every 15 seconds.
+ * The dryer's own panel shows link state and signal from these.
+ */
+void hr_session_heartbeat(hr_session_t *s);
+
 void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
                          const char *ssid, const char *ap_name);
 
