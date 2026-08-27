@@ -191,9 +191,6 @@
   button:active{transform:scale(.985)}
   button.primary{background:var(--accent); color:var(--accent-ink); border-color:transparent}
   button.ghost{background:transparent}
-  /* Destructive actions. Outlined rather than filled: a solid red block reads
-     as the primary action on the card, and this never is. */
-  button.danger{background:transparent; color:var(--bad); border-color:var(--bad)}
   button:disabled{opacity:.45; cursor:not-allowed}
   .row{display:grid; grid-template-columns:1fr 1fr; gap:10px}
   .row.one{grid-template-columns:1fr}
@@ -782,22 +779,6 @@
     </div>
 
     <div class="card">
-      <h2>Reboot the dryer</h2>
-      <button id="dryerreboot" class="danger">Reboot freeze dryer</button>
-      <div id="rebootstatus" class="notice"></div>
-      <div class="hint"><b>Ends any batch in progress.</b> A restarted machine
-        does not resume a run — whatever was inside is lost. Use it when the
-        panel has locked up and there is nothing left to lose.</div>
-      <div class="hint" style="color:var(--bad)"><b>Unverified.</b> This sends
-        the dryer's <span class="mono">REBOOT</span> command, which has never
-        been tested on a real machine. It is on this project's never-probe list
-        precisely because a verb's name is not evidence of what it does —
-        <span class="mono">SPC</span> reads like a pump control and sets the
-        display colour; <span class="mono">ADV</span> was recorded as dead and
-        starts cycles. Treat the outcome as unknown.</div>
-    </div>
-
-    <div class="card">
       <h2>Raw command</h2>
       <div class="field">
         <label for="rawverb">Command</label>
@@ -1104,7 +1085,7 @@ const PHASE = {
       {k:"START",   d:"Automatic mode — best for most foods"},
       {k:"CUSTOM",  d:"Set your own freeze/dry temperatures"},
       {k:"CANDY",   d:"Candy mode with pre-warming"}],
-    note:"You can name the batch when you start it, or from Settings → Batch." },
+    note:"You can name the batch from Settings → Batch before starting." },
   2:{ /* PREPARING */
     head:"Preparing the freeze dryer",
     body:"The chamber is pre-cooling. <b>Now is the time to load your trays</b> — "+
@@ -1675,7 +1656,6 @@ function askStartSetup(){
     "the dryer will run for roughly a day. Make sure the trays are loaded and " +
     "the drain valve is shut before confirming.";
   $("#cfyes").textContent = "Start batch";
-  addBatchNameField();
   $("#cfwrap").style.display = "flex";
 }
 
@@ -1755,7 +1735,7 @@ function renderRecipes(){
 
     const row = document.createElement("div");
     row.className = "rcprow";
-    row.appendChild(rcpBtn("Send", function(){ askSendRecipe(r); }));
+    row.appendChild(rcpBtn("Send", function(){ sendRecipe(r, false); }));
     const st = rcpBtn("Send + Start", function(){ askStartRecipe(r); });
     st.className = "ctrlbtn sev2";
     row.appendChild(st);
@@ -1882,32 +1862,6 @@ function askStartRecipe(r){
     "immediately. The dryer will run for roughly a day. Make sure the trays " +
     "are loaded and the drain valve is shut before confirming.";
   $("#cfyes").textContent = "Start batch";
-  addBatchNameField();
-  $("#cfwrap").style.display = "flex";
-}
-
-/*
- * Sending a recipe WITHOUT starting still overwrites what the dryer has
- * configured, so it is confirmed too - just not as a batch start, and with no
- * name field, because nothing is beginning yet.
- */
-function askSendRecipe(r){
-  pendingAction = {recipe:r, sendonly:true};
-  $("#cftitle").textContent = "Send " + r.name + " to the dryer?";
-  $("#cfbody").textContent  = "This replaces the recipe currently configured " +
-    "on the machine. Nothing starts - you can start it from the panel or from " +
-    "here afterwards.";
-  $("#cfyes").textContent = "Send recipe";
-  $("#cfwrap").style.display = "flex";
-}
-
-function askSubmitSetup(){
-  if(isDirty() || nameProblem(setName)) return;
-  pendingAction = {setup:true, sendonly:true};
-  $("#cftitle").textContent = "Send these settings to the dryer?";
-  $("#cfbody").textContent  = "This replaces the recipe currently configured " +
-    "on the machine. Nothing starts.";
-  $("#cfyes").textContent = "Send settings";
   $("#cfwrap").style.display = "flex";
 }
 
@@ -1978,32 +1932,6 @@ function paintControls(st){
      mirrored button list for those screens would just be a stray Cancel next
      to a full editor. Every other screen still shows its buttons. */
   if(st.stat_type === 43 || st.stat_type === 31){
-    /*
-     * The setup panel replicates these screens and carries its own Cancel at
-     * the bottom, so a mirrored button here would be a second way out sitting
-     * next to a full editor.
-     *
-     * A "back to home" button was tried here and removed: it duplicated a
-     * control the user already had. The screens that genuinely strand a user -
-     * the Wi-Fi panel and Diagnostics - cannot be served the same way, and it
-     * is worth writing down why rather than rediscovering it.
-     *
-     * There is no verb that sets the machine's screen. All 49 are known: STATE
-     * is the ADAPTER reporting its own link to the dryer, STATUS is a query,
-     * and ADV is the only thing that moves the state machine - forwards, which
-     * is how it starts cycles. Nothing goes back.
-     *
-     * That leaves CLICK, which is screen-relative and needs a captured button
-     * number. We have Cancel for 43 and 31 and nothing for the Wi-Fi panel or
-     * Diagnostics. Worse, a dryer sitting on the Wi-Fi panel REPORTS screen 1,
-     * so a button offered on the home screen could not tell the two apart -
-     * and button 10 on screen 1 is Start Auto. A misfire would not fail, it
-     * would begin a 24-hour run.
-     *
-     * So the escape hatch for a stranded machine is the reboot control in
-     * Settings, not a guessed CLICK. Capturing those screens' buttons is what
-     * would change this.
-     */
     card.style.display="none"; return;
   }
   if(st.link!=="up" || !st.have_tel){
@@ -2041,38 +1969,7 @@ function askThen(act, st){
   $("#cftitle").textContent = act.label + "?";
   $("#cfbody").textContent  = consequenceOf(act, st);
   $("#cfyes").textContent   = act.label;
-  /* Only a start gets the name field - ending or skipping a run is not the
-     moment to ask what it was called. */
-  if(act.name==="start_auto") addBatchNameField();
   $("#cfwrap").style.display="flex";
-}
-
-/*
- * Naming the batch at the moment it starts.
- *
- * The field used to exist only in Settings -> Batch, which meant a run was
- * named after the fact or never - and an unnamed batch is the one thing the
- * logbook cannot reconstruct afterwards. Asking here costs one input on a
- * dialog the user is already reading in order to start.
- *
- * Deliberately OPTIONAL. A blank name starts the batch anyway: refusing to
- * run a dryer over bookkeeping would be the wrong trade, and the name can
- * still be set from Settings later.
- */
-function addBatchNameField(){
-  var wrap=document.createElement("div");
-  wrap.className="field";
-  wrap.style.marginTop="14px";
-  var lab=document.createElement("label");
-  lab.setAttribute("for","cfbname");
-  lab.textContent="Name this batch (optional)";
-  var inp=document.createElement("input");
-  inp.id="cfbname";
-  inp.maxLength=24;
-  inp.placeholder="e.g. Strawberries";
-  wrap.appendChild(lab);
-  wrap.appendChild(inp);
-  $("#cfbody").appendChild(wrap);
 }
 
 function closeConfirm(){ $("#cfwrap").style.display="none"; pendingAction=null; }
@@ -2262,8 +2159,7 @@ async function refreshState(){
       $("#ver").textContent = st.version;
       $("#set-ver-sub").textContent = "Free Harvest v"+st.version;
       /* st.serial carries the SNM frame, which is the user-set machine NAME,
-         not a serial number - "My Freeze Dryer" on the development dryer. The
-         real serial arrives in CFG and is reported separately as st.dryer_sn. */
+         not a serial number. The real serial arrives in CFG as st.dryer_sn. */
       $("#abouthw").textContent = "Dryer name "+(st.serial||"—")+
         (st.dryer_sn ? " · serial "+st.dryer_sn : "")+
         " · adapter IP "+(st.ip||"—");
@@ -2423,25 +2319,6 @@ $("#bnamesave").addEventListener("click",async()=>{
   const v=$("#bname").value.trim();
   if(!v){ note($("#bnamestatus"),"Enter a name first","bad"); return; }
   sendCmd("SETBNAME", v, $("#bnamestatus"));
-});
-$("#dryerreboot").addEventListener("click",async()=>{
-  if(!confirm(
-    "Reboot the freeze dryer?\n\n"+
-    "This ENDS ANY BATCH IN PROGRESS. A restarted machine does not resume a "+
-    "run, and whatever is inside is lost.\n\n"+
-    "This command has never been tested on a real dryer. It is named REBOOT "+
-    "in the firmware, but what it actually does is unverified — it may not "+
-    "reboot at all.")) return;
-  const el=$("#rebootstatus");
-  note(el,"Sending REBOOT…","info");
-  try{
-    const r=await fetch("/api/dryer/reboot",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:"confirm=REBOOT"});
-    const j=await r.json();
-    note(el, j.ok? "REBOOT sent — watch the machine's panel"
-                 : "Refused: "+esc(j.reason||"not allowed"), j.ok?"ok":"bad");
-  }catch(e){ note(el,"Request failed","bad"); }
 });
 $("#setdate").addEventListener("click",()=>{
   const d=new Date(), p=n=>String(n).padStart(2,"0");
@@ -2622,27 +2499,14 @@ document.addEventListener("keydown", e=>{
 $("#cfyes").addEventListener("click", async ()=>{
   if(!pendingAction) return;
   const p = pendingAction;
-  /* Read the name BEFORE closeConfirm() tears the dialog down. */
-  const bname = $("#cfbname") ? $("#cfbname").value.trim() : "";
   closeConfirm();
-  /*
-   * Name first, then start. If naming fails the batch still starts - a run
-   * the user asked for should not be blocked by a label, and the failure is
-   * visible in the logbook as an unnamed batch.
-   */
-  if(bname){
-    try{ await ctrlPost("/api/cmd",
-                        "verb=SETBNAME&args="+encodeURIComponent(bname)); }
-    catch(e){}
-  }
   if(p.del){
     try{ await fetch("/api/recipes/delete",{method:"POST",
                                             body:"slot="+p.recipe.slot}); }catch(e){}
     refreshRecipes();
     return;
   }
-  if(p.setup){ submitSetup(!p.sendonly); return; }
-  if(p.sendonly){ sendRecipe(p.recipe, false); return; }
+  if(p.setup){ submitSetup(true); return; }
   if(p.start){ sendRecipe(p.recipe, true); return; }
   sendAction(p.act, p.screen, true);
 });
@@ -2673,7 +2537,7 @@ $("#setname").addEventListener("input", ()=>{
   setName = $("#setname").value.trim();
   updateButtons();
 });
-$("#setsubmit").addEventListener("click", askSubmitSetup);
+$("#setsubmit").addEventListener("click", ()=>submitSetup(false));
 $("#setstart").addEventListener("click", askStartSetup);
 $("#setcancel").addEventListener("click", cancelSetup);
 
