@@ -155,6 +155,10 @@ PLACEHOLDER_UID = "0-31323334-35363738-39414243"
 HW_LEVEL = 4
 FW_VERSION = "6.0.641041"
 
+# Set by --stuck. Reproduces a dryer that answers UNIQUE and then goes
+# quiet, so the stock adapter's reaction can be recorded.
+STUCK = False
+
 
 def uid_frame(words):
     """Build a UID frame around `words`, honouring --hw and --fw."""
@@ -394,6 +398,12 @@ def main():
                          "rest. A DERIVED value - --uid is the measured one.")
     ap.add_argument("--serial", default=None,
                     help="override the serial number sent in SNM")
+    ap.add_argument("--stuck", action="store_true",
+                    help="reproduce the failing dryer: answer UNIQUE with UID, "
+                         "poll REQINFO, and answer NOTHING else - no SNM, no "
+                         "CFG, no telemetry. Shows what the STOCK adapter does "
+                         "when a machine goes quiet after the identity query, "
+                         "which is the behaviour Free Harvest has to match.")
     ap.add_argument("--hw", type=int, default=None,
                     help="the integer before the version in the UID frame. 4 on "
                          "a dryer that works, 5 on one that does not. Meaning "
@@ -420,7 +430,8 @@ def main():
                          "the app offer START")
     args = ap.parse_args()
 
-    global REAL_STAT, REAL_UID, REAL_SNM, HW_LEVEL, FW_VERSION
+    global REAL_STAT, REAL_UID, REAL_SNM, HW_LEVEL, FW_VERSION, STUCK
+    STUCK = args.stuck
     if args.hw is not None:
         HW_LEVEL = args.hw
     if args.fw:
@@ -609,7 +620,12 @@ def main():
                         log.new_verbs.append(verb)
 
                 # Multi-frame answers first, then the simple table.
-                if verb == "FDNAME":
+                if STUCK and verb != "UNIQUE":
+                    # The failing dryer answers the identity query and nothing
+                    # else. Staying silent here is the whole experiment: what
+                    # the stock adapter does NEXT is what we need to copy.
+                    log(f"   (stuck mode: deliberately not answering {verb})")
+                elif verb == "FDNAME":
                     for r in FDNAME_REPLY:
                         send(r, "answering FDNAME (as a file)")
                         time.sleep(0.3)
@@ -642,7 +658,7 @@ def main():
             last_stat = time.time()
 
         # Keep the telemetry flowing, or the adapter may decide we are gone.
-        if time.time() - last_stat >= args.stat_secs:
+        if not STUCK and time.time() - last_stat >= args.stat_secs:
             last_stat = time.time()
             send(REAL_STAT, "idle cadence")
 
