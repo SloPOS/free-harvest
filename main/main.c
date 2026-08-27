@@ -521,11 +521,13 @@ void app_main(void)
             last_beat = t;
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
-                     "frames_in=%lu frames_out=%lu link=%s | heap=%u | trend pts=%u persisted=%u "
+                     "frames_in=%lu frames_out=%lu bad=%lu unknown=%lu link=%s | heap=%u | "
+                     "trend pts=%u persisted=%u "
                      "bytes=%u writes=%lu fails=%lu drops=%lu",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in, s_session.frames_out,
+                     s_session.stream.frames_bad, s_session.unknown_verbs,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
                      (unsigned)esp_get_free_heap_size(),
                      (unsigned)hr_trend_count(&s_trend),
