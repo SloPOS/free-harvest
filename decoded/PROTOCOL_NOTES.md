@@ -1366,3 +1366,53 @@ FUN_0002bb88 to run. So mode 2 alone does not explain the symptom - either the
 executor is not running, or it is running and FDNAME's own case does nothing
 useful. Both point at 0x2225c and the state machine around it as the next
 target, not at the mode byte.
+
+### The executor runs ON the CDC thread (2026-08-27, follow-up)
+
+Call graph, built by decoding Thumb BL encodings at every even offset - the
+only technique that works here, since a linear sweep desynchronises:
+
+    CDC thread 0x5be94      task entry: passed as a POINTER, never BL'd,
+                            which is why "find the caller" comes up empty
+      -> 0x5ba4c            called at 0x5c87a
+        -> 0x2203c          called at 0x5bb6e
+          -> 0x2bb88        the executor, called at 0x2225c
+
+Each of those has exactly ONE call site. The executor is not a separate task.
+
+### It has its own gate, and it is NOT the MSC one
+
+On the way to the executor, 0x5ba4c blocks:
+
+    0x5bb28  ldr   r3, [pc, #0x208]
+    0x5bb2a  mov.w r1, #-1            portMAX_DELAY
+    0x5bb2e  ldr   r0, [r3]
+    0x5bb30  bl    0x772d8            wait, no timeout
+
+That handle is **0x2000e8c8**. The MSC-init wait at 0x5beb0 uses
+**0x2000eda0**. Different objects. The mailbox is not held by MSC init.
+
+0x2000e8c8 is given at 0x5c442, on a USB path that also sets the mode byte to
+0. 0x76dc0 / 0x772d8 are the generic RTOS give/wait primitives - 80 and 61
+call sites across the image - so they carry no special meaning by themselves.
+
+### Why this rules mass storage out
+
+The MSC wait sits in the CDC thread's STARTUP, before the loop that reaches
+the executor. The executor runs on that same thread, downstream of it.
+
+So a machine whose CDC thread is still parked on the MSC gate could not be
+sending anything at all. The dryer in question sends REQINFO every ten seconds
+and answers UNIQUE. **Its CDC thread is demonstrably past the MSC wait**, and
+the executor is downstream on the same thread - therefore mass storage is not
+what is holding the mailbox, and presenting a volume cannot release it.
+
+That is a stronger argument than the earlier one, which only established that
+the CDC thread was running without knowing the executor shared it.
+
+### What is left
+
+Either 0x2000e8c8 is never given on that machine, or the executor runs and
+FDNAME's own jump-table case produces nothing. Distinguishing them needs
+Ghidra flow analysis on 0x2203c and on the FDNAME case of the 52-entry table -
+byte-level scanning has been taken as far as it goes here.
