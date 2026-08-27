@@ -1280,3 +1280,89 @@ So field 1 reads as a batch or record timestamp, not the live clock. Treat it
 as **unidentified** rather than trusting the old annotation, and do not use it
 to verify anything clock-related - it is what made the working SETDATE above
 look, for several minutes, like a failure.
+
+## The executor task, located (G0644170, 2026-08-27)
+
+Decoded from the stock adapter's volume backup: `tools/decode_h6r.py "drive
+backup/G0644170.h6r"`. Clean - 0 bad checksums, 566,156 bytes, base 0x18000,
+S0 digest 1ca1a992...c281. Analysis below is capstone over the raw image, not
+Ghidra, so addresses are literal and flow is only as good as the scan.
+
+### The mailbox has exactly two touchers
+
+`DAT_000296dc` is a literal-pool slot holding RAM address **0x20004342**. That
+address appears in exactly two pool slots in the whole image:
+
+    0x296dc   the dispatcher   - WRITES the command ID
+    0x2be40   FUN_0002bb88     - READS it
+
+which settles the mailbox reading: one writer, one reader, no other consumer.
+
+### The executor is FUN_0002bb88
+
+    0x2bb88  push.w {r4,r5,r6,r7,r8,lr}
+    0x2bb8c  ldr    r4, [pc, #0x2b0]     r4 = &mailbox
+    0x2bb8e  sub.w  sp, sp, #0x398       920 bytes of stack
+    0x2bb92  ldrb   r2, [r4]             the command ID
+    0x2bb94  subs   r3, r2, #1
+    0x2bb96  cmp    r3, #0x33            51
+    0x2bb98  bhi    0x2bc2a              out of range
+    0x2bb9a  tbh    [pc, r3, lsl #1]     52-entry jump table
+
+52 entries for IDs 0x01-0x34 - exactly the verb map. The bytes following the
+`tbh` are table halfwords; a linear disassembler renders them as nonsense
+`lsls`/`movs`, which is worth knowing before someone reads them as code.
+
+**Called from exactly one place: 0x2225c**, inside a large state machine. Found
+by decoding Thumb BL encodings at every even offset - capstone's linear sweep
+finds no callers at all, because the sweep desynchronises long before it.
+
+### The housekeeping guard
+
+`DAT_000296d0` holds RAM address **0x2000d640**, the mode byte. Read at
+0x294e4, inside the dispatcher:
+
+    0x294e4  ldr  r3, [pc, #0x1e8]
+    0x294e8  ldrb r3, [r3]
+    0x294ee  cmp  r3, #2
+    0x294f0  beq  0x29588        -> the restricted path
+
+Three writers:
+
+    0x2d118   stores 1, after a call at 0x7e108 returns nonzero
+    0x5c41a   stores 0   (USB region)
+    0x5c608   stores 1 or 2 (USB region) - the decisive one:
+
+        0x5c608  cmp   r3, #0x1a
+        0x5c60a  ite   ne
+        0x5c60c  movne r3, #1        normal
+        0x5c60e  moveq r3, #2        HOUSEKEEPING-ONLY
+        0x5c612  strb  r3, [r2]
+
+**Mode 2 is entered on exactly one value: 0x1a.** Everything else gives mode 1.
+
+### NOT established: where the 0x1a comes from
+
+Nothing in the image branches to 0x5c608. Wide BL/B.W, short B/Bcc and
+CBZ/CBNZ encodings were all scanned across the whole binary - no hits - and
+there is no `tbb`/`tbh` anywhere in the enclosing USB function's range. The
+instruction sequence itself is unmistakable (a compiler's ternary: cmp / ite /
+movne / moveq / strb), so the code is real; its predecessor is simply not
+reachable by byte-level scanning. **That link needs Ghidra's flow analysis.**
+
+Until it is closed, "the dryer is in mode 2" remains a hypothesis that fits the
+symptom rather than a demonstrated cause.
+
+### Why it matters, and the awkward part
+
+In mode 2 the dispatcher accepts only UNIQUE, STATE, WIFIINFO and FDNAME.
+`REQCFG` and `REQSTAT` are not in that set, which matches a machine that
+answers UNIQUE and drops both - observed, repeatedly, including REQSTAT sent
+entirely on its own.
+
+But **FDNAME IS in the accepted set**, and that machine does not answer it
+either. Accepted means "stored in the mailbox"; answering still needs
+FUN_0002bb88 to run. So mode 2 alone does not explain the symptom - either the
+executor is not running, or it is running and FDNAME's own case does nothing
+useful. Both point at 0x2225c and the state machine around it as the next
+target, not at the mode byte.
