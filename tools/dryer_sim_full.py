@@ -384,7 +384,7 @@ def main():
                     help="how long to keep playing the dryer")
     ap.add_argument("--stat-secs", type=float, default=15.0,
                     help="idle STAT cadence, matching the real machine")
-    ap.add_argument("--reqinfo-secs", type=float, default=30.0,
+    ap.add_argument("--reqinfo-secs", type=float, default=None,
                     help="how often to poll REQINFO, as the real dryer does")
     ap.add_argument("--uid", default=None,
                     help="the dryer's real 128-bit MCU unique ID as it appears "
@@ -432,6 +432,11 @@ def main():
 
     global REAL_STAT, REAL_UID, REAL_SNM, HW_LEVEL, FW_VERSION, STUCK
     STUCK = args.stuck
+    if args.reqinfo_secs is None:
+        # The failing machine polls every 10s, measured: 672 REQINFO frames in
+        # 6725 seconds. Match it under --stuck so the adapter sees the real
+        # cadence rather than a slower one that might change how it retries.
+        args.reqinfo_secs = 10.0 if STUCK else 30.0
     if args.hw is not None:
         HW_LEVEL = args.hw
     if args.fw:
@@ -508,11 +513,21 @@ def main():
             log(f"   (write failed: {e})")
 
     # Opening handshake, in the order a real dryer uses.
-    send(REAL_UID, "identity")
-    time.sleep(0.5)
-    send(REAL_SNM, "serial number")
-    time.sleep(0.5)
-    send(REAL_STAT, "initial status")
+    #
+    # SUPPRESSED under --stuck. The failing machine announces NOTHING: it polls
+    # REQINFO from boot and stays silent until a UNIQUE arrives, then answers
+    # that one frame and nothing after it. Volunteering UID/SNM/STAT here would
+    # hand the adapter three of the answers it is supposed to have to ask for,
+    # and the experiment would show a satisfied adapter that proves nothing.
+    if not STUCK:
+        send(REAL_UID, "identity")
+        time.sleep(0.5)
+        send(REAL_SNM, "serial number")
+        time.sleep(0.5)
+        send(REAL_STAT, "initial status")
+    else:
+        log("  ### stuck mode: announcing nothing. REQINFO only until a")
+        log("  ### UNIQUE arrives; that gets a UID and nothing else follows.")
 
     buf = b""
     last_stat = time.time()
