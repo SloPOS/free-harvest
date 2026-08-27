@@ -84,6 +84,58 @@ static void test_recipe_verbs_refused_on_generic_path(void)
     CHECK_INT(log.frames, 1);
 }
 
+static void test_heartbeat_reasks_until_answered(void)
+{
+    /*
+     * The genuine adapter re-asks for anything the dryer has not answered, on
+     * every heartbeat, indefinitely. Measured against a simulator playing a
+     * dryer that answers UNIQUE and then goes silent:
+     *
+     *     32.39  <- FDNAME / REQCFG
+     *     47.44  <- FDNAME / REQCFG     +15.1s
+     *     62.56  <- FDNAME / REQCFG     +15.1s
+     *
+     * Free Harvest asked once at link-up and never again, so a dryer that
+     * missed that single request was never asked a second time.
+     *
+     * serial comes from SNM and dryer_sn from CFG, so an empty field is the
+     * unanswered-request flag.
+     */
+    TEST_CASE("heartbeat re-asks for unanswered identity");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    /* Nothing answered yet: STATE plus both queries. */
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 3);
+    CHECK(strstr(log.buf, "FDNAME") != NULL);
+    CHECK(strstr(log.buf, "REQCFG") != NULL);
+
+    /* The dryer answers FDNAME. The next heartbeat must stop asking for it
+       and keep asking for the other. */
+    log.frames = 0;
+    log.len = 0;
+    log.buf[0] = '\0';
+    feed(&s, "SNM,My Freeze Dryer,\r", 1000);
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 2);
+    CHECK(strstr(log.buf, "FDNAME") == NULL);
+    CHECK(strstr(log.buf, "REQCFG") != NULL);
+
+    /* Both answered: back to a bare STATE heartbeat. */
+    log.frames = 0;
+    log.len = 0;
+    log.buf[0] = '\0';
+    feed(&s, "CFG,37C9-355A-3037,HM-4B~04,PSTF000000000XXX,\r", 2000);
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 1);
+    CHECK(strstr(log.buf, "FDNAME") == NULL);
+    CHECK(strstr(log.buf, "REQCFG") == NULL);
+    CHECK(strstr(log.buf, "STATE") != NULL);
+}
+
 static void test_cloud_flags_reach_the_wire(void)
 {
     /*
@@ -445,6 +497,7 @@ int main(void)
     test_acks_reqinfo_with_gotit();
     test_reqinfo_before_wifi_is_up();
     test_recipe_verbs_refused_on_generic_path();
+    test_heartbeat_reasks_until_answered();
     test_cloud_flags_reach_the_wire();
     test_manual_cloud_override_wins();
     test_captures_serial_number();

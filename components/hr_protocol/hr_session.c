@@ -86,8 +86,40 @@ static void send_state(hr_session_t *s)
 
 void hr_session_heartbeat(hr_session_t *s)
 {
-    if (s != NULL) {
-        send_state(s);
+    if (s == NULL) {
+        return;
+    }
+    send_state(s);
+
+    /*
+     * RE-ASK FOR ANYTHING THE DRYER HAS NOT ANSWERED.
+     *
+     * Measured directly from the genuine adapter, driven by a simulator
+     * playing a dryer that answers UNIQUE and then goes silent:
+     *
+     *     32.39  <- FDNAME / REQCFG
+     *     47.44  <- FDNAME / REQCFG     +15.1s
+     *     62.56  <- FDNAME / REQCFG     +15.1s
+     *     77.66  <- FDNAME / REQCFG     +15.1s
+     *
+     * It re-asks on every heartbeat, indefinitely, and stops only once the
+     * answer arrives - the simulator's own notes record REQCFG going "3
+     * requests in 45s -> 0" the moment a CFG was supplied.
+     *
+     * Free Harvest asked once, at link-up, and never again. A dryer that
+     * missed that single request, or was not ready for it, was never asked a
+     * second time: one unanswered FDNAME in the log and then nothing but
+     * STATE forever, which is exactly what a failing 6.0.644170 machine
+     * shows.
+     *
+     * `serial` is filled from SNM and `dryer_sn` from CFG, so an empty field
+     * IS the unanswered-request flag; no extra state is needed.
+     */
+    if (s->info.serial[0] == '\0') {
+        hr_session_send_simple(s, "FDNAME");
+    }
+    if (s->info.dryer_sn[0] == '\0') {
+        hr_session_send_simple(s, "REQCFG");
     }
 }
 
@@ -100,25 +132,26 @@ void hr_session_hello_step(hr_session_t *s, unsigned step)
     case 0: send_state(s); break;
     case 1: {
         /*
-         * UNIQUE MUST CARRY "lH". It is not decoration.
+         * UNIQUE carries "lH", but this is NOT established as required.
          *
-         * The dryer's UNIQUE handler (0x2d108 in G0644170) does exactly this:
+         * The dryer's UNIQUE handler (0x2d108 in G0644170) does contain
          *
-         *     ldr  r1, ="lH"
-         *     bl   strstr
-         *     cbz  r0, skip        <- argument missing: skip the next two
-         *     movs r2, #1
-         *     strb r2, [mode]      <- mode = 1, ONLY when "lH" is present
+         *     ldr r1, ="lH" / bl strstr / cbz r0, skip / strb #1, [mode]
          *
-         * so a bare UNIQUE still returns UID - the reply is further down and
-         * unconditional - while leaving the mode byte at 0. That byte is read
-         * again in the dryer's USB layer (0x5c32c, "cmp #0"), which is where a
-         * machine that answers UNIQUE and then nothing else diverges.
+         * and it was tempting to read that as "the argument is mandatory".
+         * It is not safe to: the strstr searches a FIXED buffer at
+         * 0x20003b00, which is NOT the buffer the verb chain matches against
+         * (0x20003f38), so it is probably checking something else entirely.
          *
-         * This project sent it bare for its whole life. An early capture
-         * recorded "UNIQUE lH"; a later one showed it bare, and the bare form
-         * was adopted as ground truth. The argument was the part that mattered.
-         */
+         * Decisive evidence against: the GENUINE adapter, driven by a
+         * simulator playing a stuck dryer, sent a bare "UNIQUE" - captured
+         * 2026-08-27. An earlier capture showed "UNIQUE lH". Both are real, so
+         * the adapter does it both ways and neither form can be wrong.
+         *
+         * It stays because it is within observed genuine behaviour and is
+         * verified harmless on 6.0.641041 - UID, SNM, CFG and telemetry all
+         * arrive exactly as with the bare form. It is NOT the fix for a dryer
+         * that goes quiet; the retry in hr_session_heartbeat() is.         */
         hr_builder_t b;
         hr_build_begin(&b, "UNIQUE");
         hr_build_str(&b, "lH");

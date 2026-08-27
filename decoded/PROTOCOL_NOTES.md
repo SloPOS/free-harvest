@@ -1464,3 +1464,59 @@ On 6.0.641041, `UNIQUE lH` produces UID, SNM, CFG and STAT exactly as bare
 UNIQUE did - the argument does not disturb a machine that never needed it.
 Whether it fixes 644170 is the open question, but it is the first change with a
 mechanism behind it rather than a resemblance.
+
+## The stock adapter RETRIES. We did not. (2026-08-27)
+
+Measured directly: `dryer_sim_full.py --stuck` plays a dryer that answers UNIQUE
+and then goes silent - exactly what a 6.0.644170 machine does - and the GENUINE
+adapter was put in front of it.
+
+    32.39  <- UNIQUE          (answered with UID)
+    32.39  <- FDNAME          (deliberately unanswered)
+    32.39  <- REQCFG          (deliberately unanswered)
+    47.44  <- FDNAME / REQCFG     +15.1s
+    62.56  <- FDNAME / REQCFG     +15.1s
+    77.66  <- FDNAME / REQCFG     +15.1s
+    92.76  <- FDNAME / REQCFG     +15.1s
+   107.88  <- FDNAME / REQCFG     +15.1s
+
+**It re-asks on every heartbeat, indefinitely, until answered.** Consistent with
+this file's older note that supplying a CFG took REQCFG from "3 requests in 45s"
+to zero.
+
+Free Harvest asked ONCE, at link-up, and never again. A dryer that missed that
+single request, or was not ready for it, was never asked a second time - one
+unanswered FDNAME in the log and then nothing but STATE forever, which is
+precisely what the failing machine shows.
+
+Fixed in 1.0.5.5: hr_session_heartbeat() re-sends FDNAME while `serial` is empty
+and REQCFG while `dryer_sn` is empty. Those fields are filled from SNM and CFG,
+so an empty field IS the unanswered-request flag - no extra state.
+
+### CORRECTION: "UNIQUE lH" is NOT required
+
+1.0.5.4 shipped on the reading that UNIQUE must carry "lH", because the dryer's
+handler contains `strstr(0x20003b00, "lH")` gating the mode byte.
+
+**That reading was wrong.** The strstr searches a FIXED buffer at 0x20003b00,
+which is not the buffer the verb chain matches against (0x20003f38), so it is
+probably testing something else entirely. And decisively: in this capture the
+genuine adapter sent a **bare `UNIQUE`**.
+
+An earlier capture did show `UNIQUE lH`. Both are real - the adapter does it
+both ways - so neither form can be called wrong, and this project's own rule
+applies: a capture showing a shorter frame does not disprove one showing a
+longer frame. The argument is kept because it is within observed genuine
+behaviour and verified harmless on 6.0.641041, but it is NOT the fix, and the
+1.0.5.4 notes overstated it.
+
+### Two other things this capture showed
+
+**The adapter rebooted mid-run.** Its WIFIINFO uptime field went 1012 -> 3 at
+about 21s, with a serial-port drop just before, and `registered` flickered
+1 -> 0 across it. A stock adapter facing an unresponsive dryer apparently
+restarts itself. Unexplained, and worth remembering before reading any adapter
+reboot as a fault.
+
+**It sends STATUS.** Seen at 18.23s, a verb Free Harvest has never sent. Not
+known to matter, but it is another difference from genuine behaviour.
