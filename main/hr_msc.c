@@ -5,7 +5,11 @@
 #include "esp_mac.h"
 #include "esp_partition.h"
 #include "esp_vfs_fat.h"
+#include "sdkconfig.h"
+
+#if CONFIG_TINYUSB_MSC_ENABLED
 #include "tusb_msc_storage.h"
+#endif
 #include "wear_levelling.h"
 
 #include <errno.h>
@@ -52,12 +56,24 @@ static void write_version_file(void)
         ESP_LOGE(TAG, "cannot write version.txt: %s", strerror(errno));
         return;
     }
-    fprintf(f, "HR_%02x%02x%02x%02x%02x%02x,%s,1,0/0\n",
+    fprintf(f, "HR_%02x%02x%02x%02x%02x%02x,%s,1,0/0",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ADAPTER_FW);
     fclose(f);
     ESP_LOGI(TAG, "version.txt written as HR_%02x%02x%02x%02x%02x%02x,%s,1,0/0",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ADAPTER_FW);
 }
+
+#if !CONFIG_TINYUSB_MSC_ENABLED
+/*
+ * PARKED. See sdkconfig.defaults for why: the volume would gate something that
+ * is demonstrably already running on the machine it was written for, and
+ * enabling it costs a broken build and a partition OTA cannot deliver. The
+ * implementation below is kept intact for when a dryer turns up whose CDC
+ * thread really is stuck on MSC init.
+ */
+bool hr_msc_init(void) { return false; }
+bool hr_msc_ready(void) { return false; }
+#else
 
 bool hr_msc_init(void)
 {
@@ -117,3 +133,5 @@ bool hr_msc_ready(void)
 {
     return s_ready;
 }
+
+#endif /* CONFIG_TINYUSB_MSC_ENABLED */
