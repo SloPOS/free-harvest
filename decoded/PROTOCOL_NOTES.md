@@ -1416,3 +1416,51 @@ Either 0x2000e8c8 is never given on that machine, or the executor runs and
 FDNAME's own jump-table case produces nothing. Distinguishing them needs
 Ghidra flow analysis on 0x2203c and on the FDNAME case of the 52-entry table -
 byte-level scanning has been taken as far as it goes here.
+
+## UNIQUE MUST CARRY "lH" (2026-08-27) - the answer
+
+`UNIQUE` is not a bare verb. Its handler in G0644170, FUN_0002d108, reached
+from the executor's jump-table stub at 0x2bec4:
+
+    0x2d10c  ldr  r1, ="lH"
+    0x2d110  bl   0x7e108        strstr(argument, "lH")
+    0x2d114  cbz  r0, 0x2d11c    NOT FOUND -> skip the next two instructions
+    0x2d116  movs r2, #1
+    0x2d11a  strb r2, [0x2000d640]   mode = 1, ONLY when "lH" is present
+
+The reply is further down and unconditional, so **a bare UNIQUE still returns
+UID** - which is exactly why this hid for so long. What it does not do is set
+the mode byte. That byte is read again in the dryer's USB layer at 0x5c32c
+("cmp #0"), and on 6.0.644170 a machine left at mode 0 answers UNIQUE and then
+nothing: no SNM, no CFG, no reply to a REQSTAT sent on its own, and never any
+telemetry.
+
+### How we got it wrong
+
+This document recorded `UNIQUE lH` from an early capture. A later hardware
+capture showed `UNIQUE` bare, was labelled ground truth, and the bare form was
+adopted - the argument read as noise. Both captures were real; the difference
+between them was the whole bug.
+
+**A capture showing a shorter frame does not disprove a capture showing a
+longer one.** The safe reading was the superset.
+
+### The evidence that pinned it
+
+A user's `/api/state` after 6725 seconds:
+
+    frames_in 673 | usb_rx_bytes 6114 | frames_bad 0 | unknown_verbs 0
+    serial "" | uid populated | have_tel false
+
+672 x `REQINFO,\r` (9 bytes) + one UID (66 bytes) = 6114 bytes exactly. Nothing
+dropped, nothing malformed, nothing unparsed - the dryer really did send one
+UID and then nothing but REQINFO for two hours. That exact accounting is what
+ruled out every "we are failing to parse the reply" theory and left the frame
+we send as the only remaining variable.
+
+### Verified
+
+On 6.0.641041, `UNIQUE lH` produces UID, SNM, CFG and STAT exactly as bare
+UNIQUE did - the argument does not disturb a machine that never needed it.
+Whether it fixes 644170 is the open question, but it is the first change with a
+mechanism behind it rather than a resemblance.

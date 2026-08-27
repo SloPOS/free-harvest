@@ -98,7 +98,33 @@ void hr_session_hello_step(hr_session_t *s, unsigned step)
     }
     switch (step) {
     case 0: send_state(s); break;
-    case 1: hr_session_send_simple(s, "UNIQUE"); break;
+    case 1: {
+        /*
+         * UNIQUE MUST CARRY "lH". It is not decoration.
+         *
+         * The dryer's UNIQUE handler (0x2d108 in G0644170) does exactly this:
+         *
+         *     ldr  r1, ="lH"
+         *     bl   strstr
+         *     cbz  r0, skip        <- argument missing: skip the next two
+         *     movs r2, #1
+         *     strb r2, [mode]      <- mode = 1, ONLY when "lH" is present
+         *
+         * so a bare UNIQUE still returns UID - the reply is further down and
+         * unconditional - while leaving the mode byte at 0. That byte is read
+         * again in the dryer's USB layer (0x5c32c, "cmp #0"), which is where a
+         * machine that answers UNIQUE and then nothing else diverges.
+         *
+         * This project sent it bare for its whole life. An early capture
+         * recorded "UNIQUE lH"; a later one showed it bare, and the bare form
+         * was adopted as ground truth. The argument was the part that mattered.
+         */
+        hr_builder_t b;
+        hr_build_begin(&b, "UNIQUE");
+        hr_build_str(&b, "lH");
+        hr_session_send(s, &b);
+        break;
+    }
     case 2: hr_session_send_simple(s, "FDNAME"); break;
     case 3: hr_session_send_simple(s, "REQCFG"); break;
     default: break;
