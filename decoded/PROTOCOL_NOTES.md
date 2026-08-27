@@ -1512,11 +1512,22 @@ behaviour and verified harmless on 6.0.641041, but it is NOT the fix, and the
 
 ### Two other things this capture showed
 
-**The adapter rebooted mid-run.** Its WIFIINFO uptime field went 1012 -> 3 at
-about 21s, with a serial-port drop just before, and `registered` flickered
-1 -> 0 across it. A stock adapter facing an unresponsive dryer apparently
-restarts itself. Unexplained, and worth remembering before reading any adapter
-reboot as a fault.
+**The adapter rebooted mid-run - and a human did it.** Its WIFIINFO uptime went
+1012 -> 3 at about 21s with a serial-port drop either side, and `registered`
+flickered 1 -> 0 across it. This was first written up here as the adapter
+restarting itself in the face of an unresponsive dryer. It was not: the
+operator power-cycled it. Corrected rather than deleted, because "the stock
+adapter has a watchdog" is exactly the kind of plausible invention that would
+have been quoted back later as a finding.
 
-**It sends STATUS.** Seen at 18.23s, a verb Free Harvest has never sent. Not
-known to matter, but it is another difference from genuine behaviour.
+**It sends STATUS.** Seen at 18.23s, a verb Free Harvest had never sent.
+
+Followed up on 6.0.641041: STATUS is a live telemetry request. Three trials,
+a STAT back in 79-100ms each time. It is NOT a synonym for REQSTAT - the two
+take different entries in the executor's jump table, 0x2beb8 against 0x2bd42,
+so they run different code. The failing machine ignores REQSTAT and has never
+been sent a STATUS, which makes it the one untried path to telemetry.
+
+Added to the handshake and to the retry set in 1.0.5.6. Side benefit on a
+healthy dryer: first telemetry arrives in about 3 seconds instead of waiting
+up to 15 for the machine to volunteer it.

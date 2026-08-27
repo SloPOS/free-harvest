@@ -153,7 +153,7 @@ void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user);
 void hr_session_hello(hr_session_t *s);
 
 /* Number of frames in the opening handshake. */
-#define HR_HELLO_STEPS 4
+#define HR_HELLO_STEPS 5
 
 /*
  * Send ONE frame of the handshake, 0..HR_HELLO_STEPS-1, so the caller can

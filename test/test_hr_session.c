@@ -107,32 +107,45 @@ static void test_heartbeat_reasks_until_answered(void)
     hr_session_init(&s, tx_capture, &log);
     hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
 
-    /* Nothing answered yet: STATE plus both queries. */
+    /* Nothing answered: STATE plus all three outstanding queries. */
     hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 3);
+    CHECK_INT(log.frames, 4);
     CHECK(strstr(log.buf, "FDNAME") != NULL);
     CHECK(strstr(log.buf, "REQCFG") != NULL);
+    CHECK(strstr(log.buf, "STATUS") != NULL);
 
-    /* The dryer answers FDNAME. The next heartbeat must stop asking for it
-       and keep asking for the other. */
+    /* The dryer answers FDNAME. Stop asking for that one, keep the rest. */
     log.frames = 0;
     log.len = 0;
     log.buf[0] = '\0';
     feed(&s, "SNM,My Freeze Dryer,\r", 1000);
     hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 2);
+    CHECK_INT(log.frames, 3);
     CHECK(strstr(log.buf, "FDNAME") == NULL);
     CHECK(strstr(log.buf, "REQCFG") != NULL);
 
-    /* Both answered: back to a bare STATE heartbeat. */
+    /* Then CFG. Only the telemetry prompt should remain. */
     log.frames = 0;
     log.len = 0;
     log.buf[0] = '\0';
     feed(&s, "CFG,37C9-355A-3037,HM-4B~04,PSTF000000000XXX,\r", 2000);
     hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 1);
-    CHECK(strstr(log.buf, "FDNAME") == NULL);
+    CHECK_INT(log.frames, 2);
     CHECK(strstr(log.buf, "REQCFG") == NULL);
+    CHECK(strstr(log.buf, "STATUS") != NULL);
+
+    /*
+     * And once telemetry arrives, back to a bare STATE. A dryer that answers
+     * everything must see no retries at all - the whole point is that this is
+     * invisible on a machine that was never broken.
+     */
+    log.frames = 0;
+    log.len = 0;
+    log.buf[0] = '\0';
+    feed(&s, "STAT,1,0,0,0,71,151638,19,0,38,1,1,Auto,v6.4,,\r", 3000);
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 1);
+    CHECK(strstr(log.buf, "STATUS") == NULL);
     CHECK(strstr(log.buf, "STATE") != NULL);
 }
 

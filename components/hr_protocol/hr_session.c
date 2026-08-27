@@ -121,6 +121,15 @@ void hr_session_heartbeat(hr_session_t *s)
     if (s->info.dryer_sn[0] == '\0') {
         hr_session_send_simple(s, "REQCFG");
     }
+    /*
+     * And keep asking for telemetry until some arrives. A healthy dryer
+     * sends STAT unprompted within seconds, so this fires once at most; a
+     * machine that never volunteers any gets prompted every heartbeat
+     * instead of being left alone forever.
+     */
+    if (!s->info.have_stat) {
+        hr_session_send_simple(s, "STATUS");
+    }
 }
 
 void hr_session_hello_step(hr_session_t *s, unsigned step)
@@ -160,6 +169,17 @@ void hr_session_hello_step(hr_session_t *s, unsigned step)
     }
     case 2: hr_session_send_simple(s, "FDNAME"); break;
     case 3: hr_session_send_simple(s, "REQCFG"); break;
+    /*
+     * STATUS. The genuine adapter sends it once when the host asserts DTR,
+     * and this project never sent it at all.
+     *
+     * On 6.0.641041 it is a live telemetry request: three trials, a STAT back
+     * in 79-100ms every time. It is NOT a duplicate of REQSTAT - the two take
+     * different entries in the dryer's executor jump table, 0x2beb8 against
+     * 0x2bd42, so they run different code. That matters because the failing
+     * machine ignores REQSTAT, and STATUS is a path nobody has tried on it.
+     */
+    case 4: hr_session_send_simple(s, "STATUS"); break;
     default: break;
     }
 }
