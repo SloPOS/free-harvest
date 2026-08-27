@@ -10,3 +10,9 @@ ota_1,       app,  ota_1,    0x220000, 0x200000,
 # not enough to record a full freeze-drying cycle. 3MB here stores roughly
 # 200 hours of frames and survives reboots.
 capture,     data, spiffs,   0x420000, 0x300000,
+# USB mass-storage volume presented to the dryer. The genuine adapter is a
+# composite CDC+MSC device and its volume carries esp/version.txt; the dryer's
+# own strings start the CDC thread from the MSC init path. 768KB in the free
+# tail of the 8MB part; only version.txt lives here, so it is sized for the
+# filesystem's own overhead rather than for content.
+msc,         data, fat,      0x720000, 0xC0000,

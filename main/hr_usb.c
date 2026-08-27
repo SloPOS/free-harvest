@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "tinyusb.h"
+#include "hr_msc.h"
 #include "tusb_cdc_acm.h"
 
 #include <string.h>
@@ -199,6 +200,18 @@ bool hr_usb_host_present(void)
 void hr_usb_init(hr_session_t *session)
 {
     s_session = session;
+
+    /*
+     * Mass storage FIRST. The host expects every interface to exist at
+     * enumeration, so the LUN has to be registered before the driver is
+     * installed - a device cannot grow one afterwards.
+     *
+     * A failure here is not fatal: we fall back to the CDC-only device that
+     * has always worked on 6.0.641041, rather than refusing to talk at all.
+     */
+    if (!hr_msc_init()) {
+        ESP_LOGW(TAG, "mass storage unavailable - continuing as CDC only");
+    }
 
     const tinyusb_config_t tusb_cfg = {
         .device_descriptor = NULL, /* default descriptor; see README re VID/PID */

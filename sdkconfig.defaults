@@ -5,6 +5,20 @@ CONFIG_TINYUSB_CDC_ENABLED=y
 CONFIG_TINYUSB_CDC_RX_BUFSIZE=1024
 CONFIG_TINYUSB_CDC_TX_BUFSIZE=1024
 
+# --- USB: also present a mass-storage volume.
+#
+# The genuine adapter is a COMPOSITE device - CDC-ACM on interface 0, MSC on
+# interface 1 - and its volume carries esp/version.txt. The dryer's own strings
+# put mass storage upstream of the serial port:
+#
+#     Waiting on USB MSC Init thread
+#     USB MSC finished starting CDC thread
+#
+# Firmware 6.0.641041 completes a full handshake against a CDC-only adapter, so
+# it does not require the volume. A 6.0.644170 machine answers UNIQUE and
+# nothing else. This is the experiment for whether that is the difference.
+CONFIG_TINYUSB_MSC_ENABLED=y
+
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_HZ=1000
 
