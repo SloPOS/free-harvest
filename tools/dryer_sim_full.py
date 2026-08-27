@@ -141,7 +141,27 @@ REAL_STAT = STATES["idle"]
 # unit. Pass --uid (read from your own dryer via /api/state) or --cpu
 # (the code the app shows) to present your actual machine.
 PLACEHOLDER_UID = "0-31323334-35363738-39414243"
-REAL_UID = "UID,%s,4,6.0.641041,0,5,2,1,51,204,255," % PLACEHOLDER_UID
+
+# The two fields that differ between the machines we have seen:
+#
+#     ...,4,6.0.641041,...   a dryer that works with Free Harvest
+#     ...,5,6.0.644170,...   a dryer that answers UNIQUE and then nothing
+#
+# The integer before the version is its own field in the firmware's format
+# string, separate from the version triple. What it means is NOT established -
+# "hardware level" is a guess from it being 4 on one machine and 5 on another.
+# It is exposed here so the stock adapter can be asked whether it CARES,
+# which is a question only the adapter can answer.
+HW_LEVEL = 4
+FW_VERSION = "6.0.641041"
+
+
+def uid_frame(words):
+    """Build a UID frame around `words`, honouring --hw and --fw."""
+    return "UID,%s,%d,%s,0,5,2,1,51,204,255," % (words, HW_LEVEL, FW_VERSION)
+
+
+REAL_UID = uid_frame(PLACEHOLDER_UID)
 
 # SNM is a NAME, not a serial number. The real machine answers with its
 # user-set name; we had been sending the data-plate serial, which is a
@@ -374,6 +394,15 @@ def main():
                          "rest. A DERIVED value - --uid is the measured one.")
     ap.add_argument("--serial", default=None,
                     help="override the serial number sent in SNM")
+    ap.add_argument("--hw", type=int, default=None,
+                    help="the integer before the version in the UID frame. 4 on "
+                         "a dryer that works, 5 on one that does not. Meaning "
+                         "unestablished - vary it to ask the STOCK adapter "
+                         "whether it behaves differently.")
+    ap.add_argument("--fw", default=None,
+                    help="the firmware version in the UID frame, e.g. "
+                         "6.0.644170. Default 6.0.641041, the build captured "
+                         "from a working machine.")
     ap.add_argument("--run-batch", action="store_true",
                     help="walk a whole freeze-drying run in about two minutes, "
                          "to exercise the adapter's batch logbook without "
@@ -391,7 +420,12 @@ def main():
                          "the app offer START")
     args = ap.parse_args()
 
-    global REAL_STAT, REAL_UID, REAL_SNM
+    global REAL_STAT, REAL_UID, REAL_SNM, HW_LEVEL, FW_VERSION
+    if args.hw is not None:
+        HW_LEVEL = args.hw
+    if args.fw:
+        FW_VERSION = args.fw
+    REAL_UID = uid_frame(PLACEHOLDER_UID)
     REAL_STAT = STATES[args.state]
     if args.stat:
         if not args.stat.startswith("STAT,"):
@@ -410,9 +444,9 @@ def main():
         # reverse word order, behind a leading zero word. Verified against a
         # real capture: "9ABC 5678 1234" -> 0-31323334-35363738-39414243.
         enc = ["".join("%02X" % ord(c) for c in w) for w in reversed(words)]
-        REAL_UID = ("UID,0-%s,4,6.0.641041,0,5,2,1,51,204,255," % "-".join(enc))
+        REAL_UID = uid_frame("0-" + "-".join(enc))
     elif args.uid:
-        REAL_UID = "UID,%s,4,6.0.641041,0,5,2,1,51,204,255," % args.uid
+        REAL_UID = uid_frame(args.uid)
     if args.serial:
         REAL_SNM = "SNM,%s," % args.serial
 
