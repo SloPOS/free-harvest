@@ -161,9 +161,10 @@
 > | MI_02 | `08/06/50` Mass Storage, SCSI bulk-only | `HarvestRightMSC Device` |
 >
 > Ours presents CDC only, as `0x303A/0x4001`. This finally explains the dryer
-> firmware strings that never fit: *"USB thumb drive timed out, continuing to
-> CDC"*, *"Waiting on USB MSC Init thread"*, *"Error in initializing FAT on
-> USB_HMSC"*. The mass-storage volume is how file transfer works — `FDFILELIST`,
+> firmware log messages that never fit: one about a USB thumb drive timing out
+> and falling back to CDC, one about waiting on the mass-storage init thread,
+> and one about failing to initialise a FAT filesystem on the host
+> mass-storage class. The volume is how file transfer works — `FDFILELIST`,
 > `FDFILEBLOCK`, `HRWiFi.txt`, `version.txt`, the `1:/esp` paths.
 >
 > The dryer probes MSC *first* and waits for it to time out before starting CDC,
@@ -1243,8 +1244,7 @@ Five integers, slash-separated date, colon-separated time, one space between.
 **Seconds are not required.** The firmware's own RTC-setter logs two adjacent
 format strings that suggest six integers -
 
-    RTC calendar set to  Date : %d/%d/%d
-    Time  : %d : %d : %d
+    a date logged as three integers, and a time as three more
 
 \- but the five-field form is what was demonstrated to work, and the log
 strings describe how the dryer PRINTS the result, not what it parses. Another
@@ -1300,14 +1300,10 @@ which settles the mailbox reading: one writer, one reader, no other consumer.
 
 ### The executor is FUN_0002bb88
 
-    0x2bb88  push.w {r4,r5,r6,r7,r8,lr}
-    0x2bb8c  ldr    r4, [pc, #0x2b0]     r4 = &mailbox
-    0x2bb8e  sub.w  sp, sp, #0x398       920 bytes of stack
-    0x2bb92  ldrb   r2, [r4]             the command ID
-    0x2bb94  subs   r3, r2, #1
-    0x2bb96  cmp    r3, #0x33            51
-    0x2bb98  bhi    0x2bc2a              out of range
-    0x2bb9a  tbh    [pc, r3, lsl #1]     52-entry jump table
+Entered at 0x2bb88. It reserves 920 bytes of stack, loads the mailbox
+pointer, reads the command ID from it as a single byte, bounds-checks the ID
+against 51, and dispatches through a halfword jump table based at 0x2bb9e.
+Out-of-range IDs go to 0x2bc2a.
 
 52 entries for IDs 0x01-0x34 - exactly the verb map. The bytes following the
 `tbh` are table halfwords; a linear disassembler renders them as nonsense
@@ -1322,22 +1318,18 @@ finds no callers at all, because the sweep desynchronises long before it.
 `DAT_000296d0` holds RAM address **0x2000d640**, the mode byte. Read at
 0x294e4, inside the dispatcher:
 
-    0x294e4  ldr  r3, [pc, #0x1e8]
-    0x294e8  ldrb r3, [r3]
-    0x294ee  cmp  r3, #2
-    0x294f0  beq  0x29588        -> the restricted path
+At 0x294e4 the dispatcher loads that byte, compares it against 2, and
+branches to 0x29588 - the restricted path - when it matches.
 
 Three writers:
 
-    0x2d118   stores 1, after a call at 0x7e108 returns nonzero
+    0x2d118   stores 1, after the call at 0x7e108 returns nonzero
     0x5c41a   stores 0   (USB region)
-    0x5c608   stores 1 or 2 (USB region) - the decisive one:
+    0x5c608   stores 1 or 2 (USB region) - the decisive one
 
-        0x5c608  cmp   r3, #0x1a
-        0x5c60a  ite   ne
-        0x5c60c  movne r3, #1        normal
-        0x5c60e  moveq r3, #2        HOUSEKEEPING-ONLY
-        0x5c612  strb  r3, [r2]
+At 0x5c608 a register is compared against 0x1a and an if-then-else selects the
+value written: 1 when it differs, 2 when it matches. The result is stored to
+the mode byte.
 
 **Mode 2 is entered on exactly one value: 0x1a.** Everything else gives mode 1.
 
@@ -1382,12 +1374,9 @@ Each of those has exactly ONE call site. The executor is not a separate task.
 
 ### It has its own gate, and it is NOT the MSC one
 
-On the way to the executor, 0x5ba4c blocks:
-
-    0x5bb28  ldr   r3, [pc, #0x208]
-    0x5bb2a  mov.w r1, #-1            portMAX_DELAY
-    0x5bb2e  ldr   r0, [r3]
-    0x5bb30  bl    0x772d8            wait, no timeout
+On the way to the executor, 0x5ba4c blocks. At 0x5bb28 a handle is loaded from a global, the timeout argument is set to
+-1 - portMAX_DELAY - and the wait primitive at 0x772d8 is called. No timeout,
+no alternative path.
 
 That handle is **0x2000e8c8**. The MSC-init wait at 0x5beb0 uses
 **0x2000eda0**. Different objects. The mailbox is not held by MSC init.
@@ -1422,11 +1411,10 @@ byte-level scanning has been taken as far as it goes here.
 `UNIQUE` is not a bare verb. Its handler in G0644170, FUN_0002d108, reached
 from the executor's jump-table stub at 0x2bec4:
 
-    0x2d10c  ldr  r1, ="lH"
-    0x2d110  bl   0x7e108        strstr(argument, "lH")
-    0x2d114  cbz  r0, 0x2d11c    NOT FOUND -> skip the next two instructions
-    0x2d116  movs r2, #1
-    0x2d11a  strb r2, [0x2000d640]   mode = 1, ONLY when "lH" is present
+At 0x2d10c the handler loads a two-character needle, calls the substring
+matcher at 0x7e108 against the argument, and when that returns null it skips
+the next two instructions. Only on a match does it write 1 to the mode byte at
+0x2000d640.
 
 The reply is further down and unconditional, so **a bare UNIQUE still returns
 UID** - which is exactly why this hid for so long. What it does not do is set
