@@ -5,36 +5,6 @@ CONFIG_TINYUSB_CDC_ENABLED=y
 CONFIG_TINYUSB_CDC_RX_BUFSIZE=1024
 CONFIG_TINYUSB_CDC_TX_BUFSIZE=1024
 
-# --- USB: also present a mass-storage volume.
-#
-# The genuine adapter is a COMPOSITE device - CDC-ACM on interface 0, MSC on
-# interface 1 - and its volume carries esp/version.txt. The dryer's own strings
-# put mass storage upstream of the serial port:
-#
-#     Waiting on USB MSC Init thread
-#     USB MSC finished starting CDC thread
-#
-# Firmware 6.0.641041 completes a full handshake against a CDC-only adapter, so
-# it does not require the volume. A 6.0.644170 machine answers UNIQUE and
-# nothing else. This is the experiment for whether that is the difference.
-# PARKED - do not enable without reading the note below.
-#
-# Turning this on does two things we are not ready for: it breaks the build
-# (esp_tinyusb 1.7.6~2's MSC storage calls the pre-IDF-6 esp_vfs_fat_register,
-# and the file compiles whenever MSC is on), and it adds a partition, which OTA
-# cannot deliver - our updater writes only the app, so every field device would
-# need a cable.
-#
-# Neither cost is worth paying, because the volume would not fix the machine it
-# was built for. Disassembly of 6.0.644170 confirms the dryer's CDC thread
-# blocks on MSC init with no timeout - but the dryer in question SENDS REQINFO
-# and answers UNIQUE, so its CDC thread is already running and the gate is
-# already passed. What is not running is the task behind the dispatcher.
-#
-# hr_msc.c is kept, complete and unused, for whenever a machine turns up whose
-# CDC thread really is stuck.
-# CONFIG_TINYUSB_MSC_ENABLED=y
-
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_HZ=1000
 
