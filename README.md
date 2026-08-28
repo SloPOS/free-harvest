@@ -28,7 +28,7 @@ your own network. No cloud account. No vendor lock-in.
 >
 > If your dryer answers the identity query once and then goes quiet, check the
 > firmware build before you suspect the adapter. That symptom cost this project
-> weeks of chasing a bug that was never in the adapter at all.
+> days of chasing a bug that was never in the adapter at all.
 
 ![Dashboard while a batch runs](docs/img/dashboard-running.png)
 
