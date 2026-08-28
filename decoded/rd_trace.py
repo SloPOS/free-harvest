@@ -15,11 +15,16 @@ Approach:
      subgraph.
 """
 import struct
+import sys
+
 from capstone import *
 from capstone.arm import *
 
 BASE = 0x18000
-blob = open(r"C:\Users\Jacob\ghidra\fw.bin", "rb").read()
+
+# The decoded firmware image, produced by tools/decode_h6r.py.
+FW = sys.argv[1] if len(sys.argv) > 1 else "fw.bin"
+blob = open(FW, "rb").read()
 END = BASE + len(blob)
 
 md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_MCLASS)

@@ -120,7 +120,7 @@ REAL_STAT = STATES["idle"]
 # 12-hex-digit cpu code like "9ABC 5678 1234" can correspond to a four-word UID
 # whose last word is zero. --cpu builds the frame that way.
 #
-# THIS DEFAULT IS A PLACEHOLDER AND IS KNOWN WRONG for this user's machine: the
+# THIS DEFAULT IS A PLACEHOLDER AND IS KNOWN WRONG for any real machine: the
 # server reported the real cpu code as 9ABC 5678 1234 while this UID was being
 # presented. Pass --uid (preferred, measured) or --cpu (derived) to correct it.
 # MEASURED 2026-08-21 from a USB capture of the real dryer answering the
@@ -689,7 +689,7 @@ def main():
     if log.new_verbs:
         log(f"  NON-ROUTINE verbs seen: {log.new_verbs}")
         log("  ^ these appeared outside the normal poll - most likely the")
-        log("    control path. Send the transcript over.")
+        log("    control path. The transcript records them in full.")
     else:
         log("  Nothing outside routine housekeeping. Either the app never")
         log("  reached the adapter, or control travels by another route")

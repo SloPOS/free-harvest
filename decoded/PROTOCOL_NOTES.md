@@ -537,7 +537,7 @@ entirely. It does confirm the dryer exposes a stable hardware ID over serial,
 which is the natural key for deciding "same machine, new adapter" when
 resuming batch history.
 
-It also means the simulator's `REAL_UID` is NOT this user's dryer, despite the
+It also means the simulator's `REAL_UID` is NOT the development dryer, despite the
 comment claiming captured values. The server's disagreement is the evidence.
 
 ## Newer firmware G0644170 decompiled (2026-08-21)
@@ -1128,7 +1128,7 @@ carries `frames_out` alongside `frames_in`.
 Verified on the live dryer immediately after OTA:
 
     I (3327) RX <- REQINFO,
-    I (3328) TX -> WIFIINFO 5 51 "Ourplace" 0 HR-Adapter-Setup 0 0 2
+    I (3328) TX -> WIFIINFO 5 51 "MyNetwork" 0 HR-Adapter-Setup 0 0 2
     I (3519) TX -> STATE 5 51
     I (3520) TX -> UNIQUE
     I (3520) TX -> FDNAME
@@ -1200,7 +1200,7 @@ Genuine adapter, captured, showing both transitions:
 
 Ours, for comparison, on a fully working link:
 
-    WIFIINFO 5 48 "Ourplace"  0 HR-Adapter-Setup 0 0 2726
+    WIFIINFO 5 48 "MyNetwork"  0 HR-Adapter-Setup 0 0 2726
 
 **Confirmed on hardware.** Setting both flags to 1 made the dryer's WiFi panel
 show the connection. Verified live by toggling `POST /api/wififlags` while the

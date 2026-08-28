@@ -66,7 +66,7 @@ adapter's mass-storage volume, which the dryer also reads — so a real adapter
 presents that identifier to the machine twice, in that format. We were sending
 `HR-Adapter-Setup`, which matches neither.
 
-Now sent as `HR_<mac>`, e.g. `HR_84fce6687e6c`.
+Now sent as `HR_<mac>`, e.g. `HR_aabbccddeeff`.
 
 **Whether any firmware checks it is unknown.** This closes a measured
 divergence from the genuine adapter; it is not a demonstrated fix. Your setup
