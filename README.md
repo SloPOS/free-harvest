@@ -26,6 +26,17 @@ your own network. No cloud account. No vendor lock-in.
 > it, both adapters went silent, and reverting to the build on
 > [harvestright.com](https://harvestright.com) brought both straight back.
 >
+> ### If you have already updated to it
+>
+> **You can go back.** The build published on harvestright.com is the working
+> one, and installing it over `6.0.644170` restored a dryer that had gone
+> completely silent - both Free Harvest and the HarvestRight adapter started
+> talking again immediately.
+>
+> We are deliberately not writing the procedure here, because we have done it
+> once and that is not enough to instruct anyone else on updating a freeze
+> dryer. Get the firmware and the steps from HarvestRight.
+>
 > If your dryer answers the identity query once and then goes quiet, check the
 > firmware build before you suspect the adapter. That symptom cost this project
 > days of chasing a bug that was never in the adapter at all.
