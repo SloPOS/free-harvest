@@ -111,7 +111,7 @@ Between 26 and 27 August, several changes were made chasing a dryer that answere
 the identity query and then went silent. That dryer was running `6.0.644170`, and
 the fault was in **its firmware** — the genuine HarvestRight adapter could not
 talk to it either. Everything added to work around it was solving nothing, and
-some of it cost healthy machines:
+some of it slowed down dryers that were working fine:
 
 - **A paced handshake**, spacing frames 250 ms apart — three quarters of a second
   of startup on every dryer, to work around a receive path that was never the
