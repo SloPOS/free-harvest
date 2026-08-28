@@ -59,7 +59,8 @@ Write-Output "  -> serial-ports.txt`n"
 #    payload that PROTOCOL_NOTES.md flags as the session gate.
 # --------------------------------------------------------------------------
 Write-Output '=== 3/4  Protocol interrogation ==='
-$py = 'C:\Users\Jacob\.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe'
+# Prefer an ESP-IDF python if one is installed; fall back to whatever is on PATH.
+$py = Join-Path $env:USERPROFILE '.espressif\python_env\idf6.0_py3.11_env\Scripts\python.exe'
 if (-not (Test-Path $py)) { $py = 'python' }
 
 $cand = $ports | Where-Object { $_.DeviceID -notmatch 'ACPI' } | Select-Object -First 1

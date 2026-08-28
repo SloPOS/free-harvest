@@ -2,7 +2,7 @@
 #
 # HOW TO RUN:
 #   1. In Ghidra: File > Import File > select fw.bin
-#      (or C:\Users\Jacob\ghidra\fw.bin). When asked:
+#      (the decoded image - see tools/decode_h6r.py). When asked:
 #         Language/Processor:  ARM:LE:32:Cortex   (little-endian Cortex-M)
 #         Options > Block name/base: leave default, then set image base below.
 #   2. Let auto-analysis run to completion (Analysis > Auto Analyze, accept defaults).

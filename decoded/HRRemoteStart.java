@@ -3,7 +3,7 @@
 // HOW TO RUN:
 //   1. Import fw.bin as ARM:LE:32:Cortex with Base Address 0x18000, auto-analyze.
 //   2. Window > Script Manager > Manage Script Directories (folder icon) > add
-//        C:\Users\Jacob\Downloads\HarvestRight-v6.0.641041-Upgrade\decoded
+//        the directory holding this file
 //   3. Select HRRemoteStart.java in the list > Run (green arrow).
 //      Output goes to the Console.
 //

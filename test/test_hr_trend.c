@@ -64,7 +64,7 @@ static void test_cold_oscillation_also_suppressed(void)
 {
     /*
      * At -15F the band is wider, so a +/-1 flap is even more thoroughly
-     * ignored. This is the regime the user reported as worst.
+     * ignored. This is the regime reported as worst in practice.
      */
     hr_trend_t tr;
     hr_trend_init(&tr);
