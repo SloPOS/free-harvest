@@ -84,69 +84,59 @@ static void test_recipe_verbs_refused_on_generic_path(void)
     CHECK_INT(log.frames, 1);
 }
 
-static void test_heartbeat_reasks_until_answered(void)
+static void test_heartbeat_is_only_state(void)
 {
     /*
-     * The genuine adapter re-asks for anything the dryer has not answered, on
-     * every heartbeat, indefinitely. Measured against a simulator playing a
-     * dryer that answers UNIQUE and then goes silent:
+     * The heartbeat is a bare STATE and nothing else.
      *
-     *     32.39  <- FDNAME / REQCFG
-     *     47.44  <- FDNAME / REQCFG     +15.1s
-     *     62.56  <- FDNAME / REQCFG     +15.1s
+     * 1.0.5.5 and 1.0.5.6 made it re-ask FDNAME, REQCFG and STATUS until the
+     * dryer answered, copying the genuine adapter, which does exactly that.
+     * It was chasing a machine that answered UNIQUE and then went silent -
+     * and that machine turned out to be running broken firmware the GENUINE
+     * adapter could not talk to either. The retries were solving nothing, so
+     * they came back out.
      *
-     * Free Harvest asked once at link-up and never again, so a dryer that
-     * missed that single request was never asked a second time.
-     *
-     * serial comes from SNM and dryer_sn from CFG, so an empty field is the
-     * unanswered-request flag.
+     * Pinned as a test because "re-ask until answered" is a reasonable-looking
+     * idea that would otherwise get reinvented.
      */
-    TEST_CASE("heartbeat re-asks for unanswered identity");
+    TEST_CASE("heartbeat sends STATE and nothing else");
     tx_log_t log = {0};
     hr_session_t s;
     hr_session_init(&s, tx_capture, &log);
     hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
 
-    /* Nothing answered: STATE plus all three outstanding queries. */
+    /* Nothing answered at all - still just one frame. */
     hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 4);
+    CHECK_INT(log.frames, 1);
+    CHECK(strstr(log.buf, "STATE") != NULL);
+    CHECK(strstr(log.buf, "FDNAME") == NULL);
+    CHECK(strstr(log.buf, "REQCFG") == NULL);
+    CHECK(strstr(log.buf, "STATUS") == NULL);
+}
+
+static void test_hello_is_one_burst(void)
+{
+    /*
+     * All five handshake frames go out together. They were paced at 250ms
+     * apart while chasing the broken-firmware dryer; that cost every healthy
+     * machine three quarters of a second and fixed nothing.
+     */
+    TEST_CASE("handshake is sent in one pass");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+
+    for (unsigned k = 0; k < HR_HELLO_STEPS; k++) {
+        hr_session_hello_step(&s, k);
+    }
+    CHECK_INT(log.frames, HR_HELLO_STEPS);
+    CHECK(strstr(log.buf, "STATE") != NULL);
+    CHECK(strstr(log.buf, "UNIQUE") != NULL);
     CHECK(strstr(log.buf, "FDNAME") != NULL);
     CHECK(strstr(log.buf, "REQCFG") != NULL);
     CHECK(strstr(log.buf, "STATUS") != NULL);
-
-    /* The dryer answers FDNAME. Stop asking for that one, keep the rest. */
-    log.frames = 0;
-    log.len = 0;
-    log.buf[0] = '\0';
-    feed(&s, "SNM,My Freeze Dryer,\r", 1000);
-    hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 3);
-    CHECK(strstr(log.buf, "FDNAME") == NULL);
-    CHECK(strstr(log.buf, "REQCFG") != NULL);
-
-    /* Then CFG. Only the telemetry prompt should remain. */
-    log.frames = 0;
-    log.len = 0;
-    log.buf[0] = '\0';
-    feed(&s, "CFG,37C9-355A-3037,HM-4B~04,PSTF000000000XXX,\r", 2000);
-    hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 2);
-    CHECK(strstr(log.buf, "REQCFG") == NULL);
-    CHECK(strstr(log.buf, "STATUS") != NULL);
-
-    /*
-     * And once telemetry arrives, back to a bare STATE. A dryer that answers
-     * everything must see no retries at all - the whole point is that this is
-     * invisible on a machine that was never broken.
-     */
-    log.frames = 0;
-    log.len = 0;
-    log.buf[0] = '\0';
-    feed(&s, "STAT,1,0,0,0,71,151638,19,0,38,1,1,Auto,v6.4,,\r", 3000);
-    hr_session_heartbeat(&s);
-    CHECK_INT(log.frames, 1);
-    CHECK(strstr(log.buf, "STATUS") == NULL);
-    CHECK(strstr(log.buf, "STATE") != NULL);
+    /* bare UNIQUE - the "lH" argument was a misreading, see hr_session.c */
+    CHECK(strstr(log.buf, "UNIQUE lH") == NULL);
 }
 
 static void test_cloud_flags_reach_the_wire(void)
@@ -510,7 +500,8 @@ int main(void)
     test_acks_reqinfo_with_gotit();
     test_reqinfo_before_wifi_is_up();
     test_recipe_verbs_refused_on_generic_path();
-    test_heartbeat_reasks_until_answered();
+    test_heartbeat_is_only_state();
+    test_hello_is_one_burst();
     test_cloud_flags_reach_the_wire();
     test_manual_cloud_override_wins();
     test_captures_serial_number();

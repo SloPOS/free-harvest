@@ -83,7 +83,6 @@ static bool               s_batch_store_inited;
  * here used to claim it did.
  */
 static uint8_t  s_hello_step;      /* frames sent so far, 0..HR_HELLO_STEPS */
-static uint32_t s_hello_ms;        /* when the last one went out */
 static unsigned s_hello_mounts;    /* USB mount count the handshake belongs to */
 static uint32_t s_heartbeat_ms;
 /* Graph points already written to flash, so the loop only persists new ones. */
@@ -397,17 +396,22 @@ void app_main(void)
             if (!up) {
                 s_hello_step = 0;
             } else if (s_hello_step < HR_HELLO_STEPS) {
-                if (s_hello_step == 0 ||
-                    (uint32_t)now_ms() - s_hello_ms >= 250u) {
-                    if (s_hello_step == 0) {
-                        ESP_LOGI(TAG,
-                                 "link up: introducing ourselves to the dryer");
-                    }
-                    hr_session_hello_step(&s_session, s_hello_step);
-                    s_hello_step++;
-                    s_hello_ms = (uint32_t)now_ms();
-                    s_heartbeat_ms = s_hello_ms;
+                /*
+                 * The whole handshake in one pass.
+                 *
+                 * It was paced at one frame per 250ms while chasing a dryer
+                 * that answered UNIQUE and then went silent. That dryer turned
+                 * out to be running broken firmware - the GENUINE adapter could
+                 * not talk to it either - so the pacing was solving nothing and
+                 * cost every healthy machine three quarters of a second of
+                 * startup. Sent together again, as it was through 1.0.0.
+                 */
+                ESP_LOGI(TAG, "link up: introducing ourselves to the dryer");
+                for (unsigned k = 0; k < HR_HELLO_STEPS; k++) {
+                    hr_session_hello_step(&s_session, k);
                 }
+                s_hello_step = HR_HELLO_STEPS;
+                s_heartbeat_ms = (uint32_t)now_ms();
             } else if ((uint32_t)now_ms() - s_heartbeat_ms > 15000u) {
                 s_heartbeat_ms = (uint32_t)now_ms();
                 hr_session_heartbeat(&s_session);

@@ -86,49 +86,8 @@ static void send_state(hr_session_t *s)
 
 void hr_session_heartbeat(hr_session_t *s)
 {
-    if (s == NULL) {
-        return;
-    }
-    send_state(s);
-
-    /*
-     * RE-ASK FOR ANYTHING THE DRYER HAS NOT ANSWERED.
-     *
-     * Measured directly from the genuine adapter, driven by a simulator
-     * playing a dryer that answers UNIQUE and then goes silent:
-     *
-     *     32.39  <- FDNAME / REQCFG
-     *     47.44  <- FDNAME / REQCFG     +15.1s
-     *     62.56  <- FDNAME / REQCFG     +15.1s
-     *     77.66  <- FDNAME / REQCFG     +15.1s
-     *
-     * It re-asks on every heartbeat, indefinitely, and stops only once the
-     * answer arrives - the simulator's own notes record REQCFG going "3
-     * requests in 45s -> 0" the moment a CFG was supplied.
-     *
-     * Free Harvest asked once, at link-up, and never again. A dryer that
-     * missed that single request, or was not ready for it, was never asked a
-     * second time: one unanswered FDNAME in the log and then nothing but
-     * STATE forever, which is exactly what a failing 6.0.644170 machine
-     * shows.
-     *
-     * `serial` is filled from SNM and `dryer_sn` from CFG, so an empty field
-     * IS the unanswered-request flag; no extra state is needed.
-     */
-    if (s->info.serial[0] == '\0') {
-        hr_session_send_simple(s, "FDNAME");
-    }
-    if (s->info.dryer_sn[0] == '\0') {
-        hr_session_send_simple(s, "REQCFG");
-    }
-    /*
-     * And keep asking for telemetry until some arrives. A healthy dryer
-     * sends STAT unprompted within seconds, so this fires once at most; a
-     * machine that never volunteers any gets prompted every heartbeat
-     * instead of being left alone forever.
-     */
-    if (!s->info.have_stat) {
-        hr_session_send_simple(s, "STATUS");
+    if (s != NULL) {
+        send_state(s);
     }
 }
 
@@ -139,45 +98,16 @@ void hr_session_hello_step(hr_session_t *s, unsigned step)
     }
     switch (step) {
     case 0: send_state(s); break;
-    case 1: {
-        /*
-         * UNIQUE carries "lH", but this is NOT established as required.
-         *
-         * The dryer's UNIQUE handler (0x2d108 in G0644170) does contain
-         *
-         *     ldr r1, ="lH" / bl strstr / cbz r0, skip / strb #1, [mode]
-         *
-         * and it was tempting to read that as "the argument is mandatory".
-         * It is not safe to: the strstr searches a FIXED buffer at
-         * 0x20003b00, which is NOT the buffer the verb chain matches against
-         * (0x20003f38), so it is probably checking something else entirely.
-         *
-         * Decisive evidence against: the GENUINE adapter, driven by a
-         * simulator playing a stuck dryer, sent a bare "UNIQUE" - captured
-         * 2026-08-27. An earlier capture showed "UNIQUE lH". Both are real, so
-         * the adapter does it both ways and neither form can be wrong.
-         *
-         * It stays because it is within observed genuine behaviour and is
-         * verified harmless on 6.0.641041 - UID, SNM, CFG and telemetry all
-         * arrive exactly as with the bare form. It is NOT the fix for a dryer
-         * that goes quiet; the retry in hr_session_heartbeat() is.         */
-        hr_builder_t b;
-        hr_build_begin(&b, "UNIQUE");
-        hr_build_str(&b, "lH");
-        hr_session_send(s, &b);
-        break;
-    }
+    case 1: hr_session_send_simple(s, "UNIQUE"); break;
     case 2: hr_session_send_simple(s, "FDNAME"); break;
     case 3: hr_session_send_simple(s, "REQCFG"); break;
     /*
-     * STATUS. The genuine adapter sends it once when the host asserts DTR,
-     * and this project never sent it at all.
-     *
-     * On 6.0.641041 it is a live telemetry request: three trials, a STAT back
-     * in 79-100ms every time. It is NOT a duplicate of REQSTAT - the two take
-     * different entries in the dryer's executor jump table, 0x2beb8 against
-     * 0x2bd42, so they run different code. That matters because the failing
-     * machine ignores REQSTAT, and STATUS is a path nobody has tried on it.
+     * STATUS, kept from the 6.0.644170 investigation because it is useful in
+     * its own right: it is a live telemetry request, three trials returning a
+     * STAT in 79-100ms, and asking for one here means the first reading lands
+     * in about a second instead of waiting up to fifteen for the dryer to
+     * volunteer it. Not a synonym for REQSTAT - different entry in the dryer's
+     * executor table, 0x2beb8 against 0x2bd42.
      */
     case 4: hr_session_send_simple(s, "STATUS"); break;
     default: break;
