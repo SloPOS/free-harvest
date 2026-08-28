@@ -12,6 +12,8 @@ dryer appears in Home Assistant automatically.
 Start a batch, configure a recipe, end a run, add drying time — from your phone, over
 your own network. No cloud account. No vendor lock-in.
 
+Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
+
 > ## ⚠️ Check your dryer's firmware first
 >
 > **Free Harvest is developed and tested against dryer firmware `6.0.641041`.**
