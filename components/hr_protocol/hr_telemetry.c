@@ -150,6 +150,14 @@ static void track_freeze(hr_phase_tracker_t *tr, const hr_telemetry_t *t)
     if (pct > tr->freeze_last_pct) {
         tr->freeze_last_pct = pct;
         tr->freeze_last_elapsed = el;
+
+        /* Record the observation for the recent-window rate. */
+        tr->freeze_win_pct[tr->freeze_win_head] = pct;
+        tr->freeze_win_elapsed[tr->freeze_win_head] = el;
+        tr->freeze_win_head = (tr->freeze_win_head + 1) % HR_FREEZE_WINDOW;
+        if (tr->freeze_win_count < HR_FREEZE_WINDOW) {
+            tr->freeze_win_count++;
+        }
     }
 }
 
@@ -166,8 +174,25 @@ long hr_freeze_eta_s(const hr_phase_tracker_t *tr, const hr_telemetry_t *t)
         tr->freeze_last_pct <= tr->freeze_first_pct) {
         return -1;
     }
-    long dpct = tr->freeze_last_pct - tr->freeze_first_pct;
-    long dt = tr->freeze_last_elapsed - tr->freeze_first_elapsed;
+    /*
+     * Prefer the recent window. With a full window we have the oldest and
+     * newest of the last HR_FREEZE_WINDOW percent observations, which measures
+     * what the machine is achieving NOW rather than what it averaged since the
+     * run began. Falls back to the whole-run figure until the window fills, so
+     * an ETA still appears early instead of showing nothing.
+     */
+    long dpct, dt;
+    if (tr->freeze_win_count >= 2) {
+        int newest = (tr->freeze_win_head - 1 + HR_FREEZE_WINDOW)
+                     % HR_FREEZE_WINDOW;
+        int oldest = (tr->freeze_win_head - tr->freeze_win_count
+                      + HR_FREEZE_WINDOW * 2) % HR_FREEZE_WINDOW;
+        dpct = tr->freeze_win_pct[newest] - tr->freeze_win_pct[oldest];
+        dt = tr->freeze_win_elapsed[newest] - tr->freeze_win_elapsed[oldest];
+    } else {
+        dpct = tr->freeze_last_pct - tr->freeze_first_pct;
+        dt = tr->freeze_last_elapsed - tr->freeze_first_elapsed;
+    }
     if (dpct <= 0 || dt <= 0) {
         return -1;
     }

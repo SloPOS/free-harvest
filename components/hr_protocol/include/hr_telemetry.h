@@ -132,6 +132,14 @@ const char *hr_phase_label(hr_phase_t p);
  */
 #define HR_RUN_STALE_MS 45000UL /* elapsed unchanged this long => not running */
 
+/*
+ * How many recent percent observations feed the ETA rate. Each entry is one
+ * new percent value, so this spans the last few percent of progress rather
+ * than a fixed wall-clock window - which is the right axis, because the whole
+ * point is that seconds-per-percent changes as the run proceeds.
+ */
+#define HR_FREEZE_WINDOW 6
+
 typedef struct {
     long last_elapsed;      /* last seen batch_elapsed_s */
     unsigned long last_change_ms; /* when it last increased */
@@ -149,6 +157,26 @@ typedef struct {
     long freeze_first_elapsed;   /* batch elapsed when we saw it */
     long freeze_last_pct;        /* most recent percent */
     long freeze_last_elapsed;    /* batch elapsed at that percent */
+
+    /*
+     * Recent-window rate.
+     *
+     * The whole-run average above is systematically optimistic near the end.
+     * Freezing is not linear in time: the chamber approaches its target
+     * asymptotically, so the last few percent take far longer than the first
+     * few. An average taken from the first sighting keeps reporting the early,
+     * fast rate long after the machine has stopped achieving it.
+     *
+     * This ring keeps the last few (percent, elapsed) observations so the rate
+     * can be measured over recent behaviour instead. It is deliberately NOT a
+     * curve fit - that needs a captured freeze curve to choose a model against,
+     * and none has been recorded yet. This is the model-free improvement that
+     * can be made honestly in the meantime.
+     */
+    long freeze_win_pct[HR_FREEZE_WINDOW];
+    long freeze_win_elapsed[HR_FREEZE_WINDOW];
+    int  freeze_win_head;        /* next slot to write */
+    int  freeze_win_count;       /* valid entries, saturating at the size */
 } hr_phase_tracker_t;
 
 void hr_phase_tracker_init(hr_phase_tracker_t *tr);

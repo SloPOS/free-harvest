@@ -243,6 +243,56 @@ static void test_type4_is_freezing(void)
     CHECK_INT(hr_phase_of(&t), HR_PHASE_FREEZING);
 }
 
+static void test_eta_tracks_a_decelerating_freeze(void)
+{
+    /*
+     * Freezing decelerates: the chamber approaches its target asymptotically,
+     * so late percent take far longer than early ones.
+     *
+     * This run spends 60s per percent for the first 10, then 300s per percent
+     * - a 5x slowdown, which is the shape the estimator has to survive.
+     *
+     * The whole-run average is dragged down by the fast early phase and is
+     * therefore optimistic. The recent window sees only the slow phase. With
+     * 15 percent remaining the honest answer is 15 * 300 = 4500s; the old
+     * whole-run figure would report roughly a third of that.
+     */
+    TEST_CASE("ETA follows recent rate, not the whole-run average");
+    hr_phase_tracker_t tr;
+    hr_phase_tracker_init(&tr);
+
+    hr_telemetry_t t;
+    memset(&t, 0, sizeof(t));
+    t.valid = true;
+    t.freeze_active = true;
+
+    long elapsed = 0;
+    for (long pct = 0; pct <= 10; pct++) {
+        t.freeze_pct = pct;
+        t.batch_elapsed_s = elapsed;
+        hr_phase_tracker_update(&tr, &t, (unsigned long)elapsed * 1000UL);
+        elapsed += 60;
+    }
+    for (long pct = 11; pct <= 85; pct++) {
+        t.freeze_pct = pct;
+        t.batch_elapsed_s = elapsed;
+        hr_phase_tracker_update(&tr, &t, (unsigned long)elapsed * 1000UL);
+        elapsed += 300;
+    }
+
+    long eta = hr_freeze_eta_s(&tr, &t);
+
+    /* 15 percent left at the rate actually being achieved now. */
+    CHECK_INT(eta, 15 * 300);
+
+    /*
+     * Guard against silently reverting to the old behaviour: the whole-run
+     * average here is about 274 s/pct, giving ~4100s. Requiring the answer to
+     * sit above that band pins the improvement rather than just the number.
+     */
+    CHECK(eta > 4200);
+}
+
 static void test_freeze_progress_rises_as_temp_falls(void)
 {
     /*
@@ -551,6 +601,7 @@ int main(void)
     test_freeze_eta_zero_at_100();
     test_freeze_eta_absent_when_not_freezing();
     test_type4_is_freezing();
+    test_eta_tracks_a_decelerating_freeze();
     test_freeze_progress_rises_as_temp_falls();
     test_freezing_counts_as_running_for_tracker();
     test_freeze_label();

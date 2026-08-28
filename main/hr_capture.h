@@ -114,6 +114,14 @@ size_t hr_capture_trend_bytes(void);
 unsigned long hr_capture_trend_writes(void);
 unsigned long hr_capture_trend_fails(void);
 
+/*
+ * How many times the log has rotated, and how many repeated frames were
+ * collapsed into run summaries. Both are reported so the compression is
+ * visible rather than something the user has to infer from a short log.
+ */
+unsigned long hr_capture_rotations(void);
+unsigned long hr_capture_suppressed(void);
+
 /* Discard the stored series (new batch, or a resume that does not apply). */
 void hr_capture_trend_reset(void);
 

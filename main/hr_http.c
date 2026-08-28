@@ -964,6 +964,59 @@ static esp_err_t h_wififlags(httpd_req_t *req)
     return send_json(req, out, (size_t)n);
 }
 
+/*
+ * POST /api/dryer/reboot   body: confirm=REBOOT
+ *
+ * The ONLY route that may send REBOOT, and it sends it with
+ * hr_session_send_raw() - deliberately bypassing hr_cmd_classify(), which
+ * places REBOOT in neither SAFE nor CONFIG.
+ *
+ * Why a dedicated route rather than adding REBOOT to a verb class: widening a
+ * class would expose it to /api/cmd AND the MQTT command topic at once, and
+ * MQTT has no confirmation step and no human in front of it. One explicit
+ * route keeps the blast radius to exactly this handler, and keeps the raw
+ * command box and MQTT unable to reach it at all.
+ *
+ * Guarded three ways: the control PIN, a literal confirm=REBOOT in the body so
+ * a stray POST cannot trigger it, and a confirmation dialog in the UI that
+ * says plainly the command is untested.
+ */
+static esp_err_t h_dryer_reboot(httpd_req_t *req)
+{
+    char buf[96];
+    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
+                                                        : (int)sizeof(buf) - 1;
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
+    char confirm[16] = {0};
+    httpd_query_key_value(buf, "confirm", confirm, sizeof(confirm));
+    if (strcmp(confirm, "REBOOT") != 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
+    }
+
+    LOCK();
+    bool ok = hr_session_send_raw(s_session, "REBOOT");
+    UNLOCK();
+    ESP_LOGW(TAG, "DRYER REBOOT sent from the web UI -> %s",
+             ok ? "sent" : "failed");
+    return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
+                     ok ? 11 : 12);
+}
+
 /* GET /api/mqtt -> current broker/connection status. */
 static esp_err_t h_mqtt_get(httpd_req_t *req)
 {
@@ -2017,6 +2070,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/log", HTTP_GET, h_log);
     reg("/api/log", HTTP_POST, h_log);
     reg("/api/wififlags", HTTP_POST, h_wififlags);
+    reg("/api/dryer/reboot", HTTP_POST, h_dryer_reboot);
     reg("/img/*", HTTP_GET, h_img);
     /* Captive-portal probes (Android/Apple/Windows). */
     reg("/generate_204", HTTP_GET, h_redirect);

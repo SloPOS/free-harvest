@@ -12,8 +12,23 @@ dryer appears in Home Assistant automatically.
 Start a batch, configure a recipe, end a run, add drying time — from your phone, over
 your own network. No cloud account. No vendor lock-in.
 
-Note: You must be on firmware version 6 or later. If your dryer does not support
-version 6, regrettably it will not send the signals appropriate for Free Harvest to run.
+> ## ⚠️ Check your dryer's firmware first
+>
+> **Free Harvest is developed and tested against dryer firmware `6.0.641041`.**
+> Settings → Diagnostics on the machine shows the build.
+>
+> You need **firmware 6 or later**: earlier builds do not send the signals Free
+> Harvest reads, and no adapter can change that.
+>
+> **Do not run `6.0.644170`.** That build is broken. On a dryer running it,
+> *nothing* can talk to the machine — not Free Harvest, and **not HarvestRight's
+> own adapter either**. We proved it the hard way: a working dryer was updated to
+> it, both adapters went silent, and reverting to the build on
+> [harvestright.com](https://harvestright.com) brought both straight back.
+>
+> If your dryer answers the identity query once and then goes quiet, check the
+> firmware build before you suspect the adapter. That symptom cost this project
+> weeks of chasing a bug that was never in the adapter at all.
 
 ![Dashboard while a batch runs](docs/img/dashboard-running.png)
 
