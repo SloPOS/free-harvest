@@ -168,6 +168,16 @@ static int open_stage(reader_t *r)
         if (r->fd >= 0) {
             return 0;
         }
+        /*
+         * Absent is normal - the older segment does not exist until the first
+         * rotation. A segment that stat()s non-empty and still will not open
+         * is damage, and silently returning an empty logbook for it reads
+         * exactly like "no batches have ever run".
+         */
+        if (file_size(p) > 0) {
+            ESP_LOGE(TAG, "logbook %s holds %u bytes but will not open "
+                          "(errno %d)", p, (unsigned)file_size(p), errno);
+        }
         r->stage++;
     }
     return -1;

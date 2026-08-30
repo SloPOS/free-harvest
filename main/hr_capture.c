@@ -63,6 +63,14 @@ static const char *const k_seg[CAP_SEGMENTS] = {
  */
 #define RESERVE_BYTES (128 * 1024)
 
+/*
+ * When the log already on flash will not fit the budget, the per-segment
+ * ceiling gives way before recorded frames do - but not below this floor,
+ * or rotation would thrash.
+ */
+#define SEG_MIN_BYTES  (64 * 1024)
+#define SEG_STEP_BYTES (4 * 1024)
+
 static bool s_ready;
 static SemaphoreHandle_t s_lock;
 static size_t s_total;      /* partition capacity */
@@ -148,6 +156,16 @@ static size_t seg_size(unsigned i)
 {
     struct stat st;
     return (stat(k_seg[i], &st) == 0) ? (size_t)st.st_size : 0;
+}
+
+/* What the whole set would occupy once every segment has reached the ceiling. */
+static size_t projected_set(const size_t *sz, size_t seg_max)
+{
+    size_t p = 0;
+    for (unsigned i = 0; i < CAP_SEGMENTS; i++) {
+        p += (sz[i] > seg_max) ? sz[i] : seg_max;
+    }
+    return p;
 }
 
 /*
@@ -564,27 +582,50 @@ void hr_capture_mount_now(void)
      * While that projection exceeds the budget, drop the biggest non-active
      * segment. Only acts when there is a real risk, and says what it dropped.
      */
-    while (s_seg_max) {
-        size_t projected = 0;
+    size_t sz[CAP_SEGMENTS];
+    for (unsigned i = 0; i < CAP_SEGMENTS; i++) {
+        sz[i] = seg_size(i);
+    }
+    const size_t budget = (s_total > RESERVE_BYTES) ? s_total - RESERVE_BYTES
+                                                    : 0;
+
+    /*
+     * Lowering the ceiling costs future headroom. Deleting a segment costs
+     * frames already recorded - which may be the run the user is about to
+     * download. So the ceiling gives way first, all the way to its floor.
+     */
+    if (s_seg_max && projected_set(sz, s_seg_max) > budget) {
+        size_t was = s_seg_max;
+        while (s_seg_max > SEG_MIN_BYTES &&
+               projected_set(sz, s_seg_max) > budget) {
+            s_seg_max -= SEG_STEP_BYTES;
+        }
+        ESP_LOGW(TAG, "per-segment ceiling lowered %u -> %u to fit the log "
+                      "already on flash; nothing dropped",
+                 (unsigned)was, (unsigned)s_seg_max);
+    }
+
+    /*
+     * Only when the files themselves overflow the budget - which no ceiling
+     * can fix - does recorded data have to go, oldest first.
+     */
+    while (s_seg_max && projected_set(sz, s_seg_max) > budget) {
         int    biggest = -1;
         size_t biggest_sz = 0;
         for (unsigned i = 0; i < CAP_SEGMENTS; i++) {
-            size_t sz = seg_size(i);
-            projected += (sz > s_seg_max) ? sz : s_seg_max;
-            if (i != s_seg && sz > biggest_sz) {
-                biggest_sz = sz;
+            if (i != s_seg && sz[i] > biggest_sz) {
+                biggest_sz = sz[i];
                 biggest = (int)i;
             }
         }
-        if (projected <= s_total - RESERVE_BYTES || biggest < 0 ||
-            biggest_sz == 0) {
+        if (biggest < 0 || biggest_sz == 0) {
             break;
         }
         remove(k_seg[biggest]);
-        ESP_LOGW(TAG, "seg%d dropped (%u bytes): the set projected to %u over "
-                      "a %u budget - an oversized segment cannot be kept",
-                 biggest, (unsigned)biggest_sz, (unsigned)projected,
-                 (unsigned)(s_total - RESERVE_BYTES));
+        sz[biggest] = 0;
+        ESP_LOGW(TAG, "seg%d dropped (%u bytes): even at the smallest ceiling "
+                      "the log on flash overflows the %u budget",
+                 biggest, (unsigned)biggest_sz, (unsigned)budget);
         s_used = seg_total_used();
     }
 
@@ -716,9 +757,21 @@ bool hr_capture_format(void)
  * A download spans every segment, oldest first, so it reads as one continuous
  * log exactly as it did when there was a single file.
  */
+/*
+ * Flash wears out and SPIFFS does not repair itself. A segment can develop a
+ * spot that returns EIO for good, and a log is exactly the kind of file where
+ * the bytes AFTER the damage are the ones worth having. So a read error steps
+ * over the bad region rather than ending the download.
+ */
+#define SKIP_BYTES 4096
+#define SKIP_MAX   64            /* at most 256 KB of damage stepped over */
+
 typedef struct {
     int      fd;      /* -1 when no segment is currently open */
     unsigned age;     /* next age-order slot to open, 0 = oldest */
+    unsigned cur;     /* segment currently open, for diagnostics */
+    size_t   got;     /* bytes read from it so far */
+    unsigned skips;   /* damaged regions stepped over in this segment */
 } cap_reader_t;
 
 void *hr_capture_open(void)
@@ -755,12 +808,56 @@ int hr_capture_read(void *handle, char *buf, size_t cap)
             unsigned i = seg_at(r->age++);
             r->fd = open(k_seg[i], O_RDONLY);
             if (r->fd < 0) {
-                continue;           /* segment absent - normal before wrap */
+                /*
+                 * Absent is normal before the first wrap. A segment that
+                 * stat()s non-empty and still will not open is not - that is
+                 * the fault that served an empty download while the info
+                 * endpoint reported megabytes.
+                 */
+                size_t sz = seg_size(i);
+                if (sz > 0) {
+                    ESP_LOGE(TAG, "capture: seg%u holds %u bytes but will not "
+                                  "open (errno %d)", i, (unsigned)sz, errno);
+                }
+                continue;
             }
+            r->cur = i;
+            r->got = 0;
+            r->skips = 0;
         }
         int n = (int)read(r->fd, buf, cap);
         if (n > 0) {
+            r->got += (size_t)n;
             return n;
+        }
+        if (n < 0) {
+            /*
+             * Step over the damage to the next page boundary and keep reading.
+             * Abandoning the segment here is what cost the end of a real run:
+             * one bad spot 238 KB into a 248 KB segment made everything after
+             * it - the last hours of the batch - unreachable, while the parts
+             * before it downloaded perfectly.
+             */
+            if (r->skips < SKIP_MAX) {
+                off_t here = lseek(r->fd, 0, SEEK_CUR);
+                if (here < 0) {
+                    here = (off_t)r->got;
+                }
+                off_t next = (here / SKIP_BYTES + 1) * SKIP_BYTES;
+                r->skips++;
+                if (lseek(r->fd, next, SEEK_SET) >= 0) {
+                    ESP_LOGW(TAG, "capture: seg%u unreadable at %u (errno %d);"
+                                  " skipping to %u",
+                             r->cur, (unsigned)here, errno, (unsigned)next);
+                    r->got = (size_t)next;
+                    continue;
+                }
+            }
+            ESP_LOGE(TAG, "capture: seg%u read failed after %u bytes "
+                          "(errno %d)", r->cur, (unsigned)r->got, errno);
+        } else if (r->got == 0 && seg_size(r->cur) > 0) {
+            ESP_LOGE(TAG, "capture: seg%u stats %u bytes but the first read "
+                          "returned 0", r->cur, (unsigned)seg_size(r->cur));
         }
         close(r->fd);               /* end of this segment: move to the next */
         r->fd = -1;
@@ -776,6 +873,21 @@ void hr_capture_close(void *handle)
         }
         free(r);
     }
+}
+
+unsigned hr_capture_seg_count(void)
+{
+    return CAP_SEGMENTS;
+}
+
+unsigned hr_capture_seg_active(void)
+{
+    return s_seg;
+}
+
+size_t hr_capture_seg_bytes(unsigned i)
+{
+    return (i < CAP_SEGMENTS) ? seg_size(i) : 0;
 }
 
 unsigned long hr_capture_rotations(void)

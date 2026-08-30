@@ -47,6 +47,16 @@ typedef struct {
 
     int32_t  extra_dry_s;               /* drying added during the run      */
 
+    /*
+     * Per-phase durations, seconds. Measured, not apportioned - each is the
+     * dryer's own elapsed counter across that phase. These are what a useful
+     * estimate for the NEXT run is built from, so they are recorded per batch
+     * rather than derived from the total afterwards.
+     */
+    uint32_t freeze_s;
+    uint32_t dry_s;
+    uint32_t final_s;
+
     /* Machine health. Extremes, not last values. */
     int16_t  min_temp_f;
     int16_t  max_temp_f;
@@ -73,6 +83,16 @@ size_t hr_batch_encode(const hr_batch_t *b, char *out, size_t cap);
  */
 bool hr_batch_decode(const char *line, hr_batch_t *out);
 
+/*
+ * Whether a screen number is a phase in which a run is under way.
+ *
+ * Exposed because main.c decides when to clear the graph from the same
+ * question. Two disagreeing definitions of "a batch is running" in one
+ * firmware is a reliable source of bugs - the header below says as much about
+ * the elapsed counter, and it applies here too.
+ */
+bool hr_phase_is_running(int phase);
+
 /* ---- the tracker -------------------------------------------------------- */
 
 /*
@@ -94,6 +114,15 @@ typedef struct {
     int        last_phase;
     int32_t    last_elapsed;
     bool       have_last;
+
+    /*
+     * The elapsed reading the run was first seen at, so duration is a delta
+     * rather than the counter's absolute value, and the value it rebased to
+     * when the batch clock took over from the preparation countdown.
+     */
+    int32_t    start_elapsed;
+    int32_t    phase_start_elapsed;
+    int        phase_of_start;
 
     /* Pull-down timing: when drying began, and whether 500um was reached. */
     int32_t    dry_start_elapsed;
@@ -139,6 +168,50 @@ bool hr_batch_abandon(hr_batch_tracker_t *t, hr_batch_t *out);
 void hr_batch_set_extra_dry(hr_batch_tracker_t *t, int32_t seconds);
 
 const char *hr_outcome_str(uint8_t outcome);
+
+/* ---- estimating the next run ------------------------------------------- */
+
+/*
+ * Seed values, in seconds, measured from a real run: roughly four pounds of
+ * unfrozen banana on an Auto cycle, dryer firmware 6.0.641041.
+ *
+ *   freeze  8.84 h    59F down to -16F
+ *   dry     8.96 h    -16F up to 110F, vacuum 440-662 mTorr
+ *   final  10.60 h    110F to 119F, vacuum 266-503 mTorr
+ *   total  28.40 h
+ *
+ * These are one batch, not a population, and one batch is a weak basis for a
+ * prediction - a full load, prefrozen food, or a different recipe will all move
+ * them. They exist so a first-time user sees something better than nothing;
+ * as soon as this machine has finished a run of its own, its own history is
+ * used instead and these are never consulted again.
+ */
+#define HR_SEED_FREEZE_S 31817u
+#define HR_SEED_DRY_S    32239u
+#define HR_SEED_FINAL_S  38155u
+
+typedef struct {
+    uint32_t freeze_s;
+    uint32_t dry_s;
+    uint32_t final_s;
+    uint32_t total_s;
+    uint8_t  samples;      /* completed runs behind it; 0 = the seed above */
+} hr_batch_estimate_t;
+
+/*
+ * Estimate the phases of the next run from completed ones.
+ *
+ * The median, not the mean: an interrupted-then-resumed run or a batch left
+ * sitting on Complete overnight produces an outlier that a mean would carry
+ * into every future estimate. Records that did not reach Complete are ignored
+ * entirely - an ended-early run says nothing about how long a full one takes.
+ *
+ * Returns false only when `out` is NULL. With no usable history it fills the
+ * seed values and reports samples = 0, so a caller always has something to
+ * show and can tell how much to trust it.
+ */
+bool hr_batch_estimate(const hr_batch_t *recent, size_t n,
+                       hr_batch_estimate_t *out);
 
 #ifdef __cplusplus
 }

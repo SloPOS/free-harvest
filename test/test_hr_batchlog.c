@@ -257,6 +257,133 @@ static void test_no_vacuum_reported(void)
     CHECK_INT((int)rec.pulldown_s, 0);
 }
 
+/*
+ * The dryer runs Preparing and Starting on their own countdown, then restarts
+ * the counter at zero when the batch clock proper begins. Taken from a real
+ * run: 0..892 preparing, 900..1834 starting, then 1 at Freezing.
+ *
+ * That restart used to be read as "a new batch started", which closed a
+ * 1834-second interrupted record right as freezing began and left the run that
+ * followed as a second batch nobody was watching the end of. The logbook
+ * finished a 28-hour run with no entry for it.
+ */
+static void test_prep_countdown_is_not_a_new_run(void)
+{
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+
+    CHECK_INT(hr_batch_observe(&t, PREP, 0, 74, 0, "Auto", 100, &rec),
+              HR_BATCH_STARTED);
+    CHECK_INT(hr_batch_observe(&t, PREP, 892, 63, 0, "Auto", 100, &rec),
+              HR_BATCH_NOTHING);
+    CHECK_INT(hr_batch_observe(&t, START, 900, 63, 0, "Auto", 100, &rec),
+              HR_BATCH_NOTHING);
+    CHECK_INT(hr_batch_observe(&t, START, 1834, 59, 0, "Auto", 100, &rec),
+              HR_BATCH_NOTHING);
+
+    /* The restart. Same run, so nothing is emitted and nothing is closed. */
+    CHECK_INT(hr_batch_observe(&t, FREEZE, 1, 59, 0, "Auto", 100, &rec),
+              HR_BATCH_NOTHING);
+    CHECK(t.active);
+
+    CHECK_INT(hr_batch_observe(&t, FREEZE, 31818, -16, 600, "Auto", 100, &rec),
+              HR_BATCH_NOTHING);
+
+    /* Duration counts from the rebased origin, not from the counter's value. */
+    CHECK_INT((int)t.cur.duration_s, 31817);
+
+    CHECK_INT(hr_batch_observe(&t, DONE, 31900, 60, 600, "Auto", 100, &rec),
+              HR_BATCH_FINISHED);
+    CHECK_INT(rec.outcome, HR_OUTCOME_COMPLETE);
+}
+
+/* Each phase is timed on the dryer's own counter, for estimating the next run. */
+static void test_phase_durations_are_recorded(void)
+{
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+
+    hr_batch_observe(&t, FREEZE, 1, 59, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FREEZE, 31818, -16, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, DRY, 31826, -16, 440, "Auto", 100, &rec);
+    hr_batch_observe(&t, DRY, 64065, 110, 440, "Auto", 100, &rec);
+    hr_batch_observe(&t, FINAL, 64069, 110, 499, "Auto", 100, &rec);
+    hr_batch_observe(&t, FINAL, 102224, 119, 284, "Auto", 100, &rec);
+    CHECK_INT(hr_batch_observe(&t, DONE, 102230, 119, 284, "Auto", 100, &rec),
+              HR_BATCH_FINISHED);
+
+    CHECK_INT((int)rec.freeze_s, 31817);
+    CHECK_INT((int)rec.dry_s, 32239);
+    CHECK_INT((int)rec.final_s, 38155);
+
+    /* And the record survives a trip through the file format. */
+    char line[HR_BATCH_LINE_MAX];
+    hr_batch_t back;
+    CHECK(hr_batch_encode(&rec, line, sizeof(line)) > 0);
+    CHECK(hr_batch_decode(line, &back));
+    CHECK_INT((int)back.freeze_s, 31817);
+    CHECK_INT((int)back.dry_s, 32239);
+    CHECK_INT((int)back.final_s, 38155);
+}
+
+static void test_estimate_seeds_then_learns(void)
+{
+    hr_batch_estimate_t e;
+
+    /* Nothing recorded yet: the seed, and it says so. */
+    CHECK(hr_batch_estimate(NULL, 0, &e));
+    CHECK_INT(e.samples, 0);
+    CHECK_INT((int)e.freeze_s, HR_SEED_FREEZE_S);
+    CHECK_INT((int)e.total_s,
+              HR_SEED_FREEZE_S + HR_SEED_DRY_S + HR_SEED_FINAL_S);
+
+    /* Three completed runs: the median of each phase, not the mean, so the
+     * long outlier does not drag the estimate up. */
+    hr_batch_t h[3];
+    memset(h, 0, sizeof(h));
+    for (int i = 0; i < 3; i++) {
+        h[i].outcome = HR_OUTCOME_COMPLETE;
+    }
+    h[0].freeze_s = 30000; h[0].dry_s = 30000; h[0].final_s = 30000;
+    h[1].freeze_s = 32000; h[1].dry_s = 32000; h[1].final_s = 32000;
+    h[2].freeze_s = 90000; h[2].dry_s = 90000; h[2].final_s = 90000;
+
+    CHECK(hr_batch_estimate(h, 3, &e));
+    CHECK_INT(e.samples, 3);
+    CHECK_INT((int)e.freeze_s, 32000);
+    CHECK_INT((int)e.dry_s, 32000);
+    CHECK_INT((int)e.final_s, 32000);
+    CHECK_INT((int)e.total_s, 96000);
+}
+
+/*
+ * A run that was ended early or interrupted says nothing about how long a full
+ * one takes, and a version-1 record carries no phase times at all. Counting
+ * either would pull every estimate toward zero while still looking plausible.
+ */
+static void test_estimate_ignores_unfinished_runs(void)
+{
+    hr_batch_estimate_t e;
+    hr_batch_t h[3];
+    memset(h, 0, sizeof(h));
+
+    h[0].outcome = HR_OUTCOME_ENDED_EARLY;
+    h[0].freeze_s = 100; h[0].dry_s = 100; h[0].final_s = 100;
+
+    h[1].outcome = HR_OUTCOME_COMPLETE;      /* v1 record: no phase times */
+    h[1].freeze_s = 0; h[1].dry_s = 0; h[1].final_s = 0;
+
+    h[2].outcome = HR_OUTCOME_COMPLETE;
+    h[2].freeze_s = 31817; h[2].dry_s = 32239; h[2].final_s = 38155;
+
+    CHECK(hr_batch_estimate(h, 3, &e));
+    CHECK_INT(e.samples, 1);
+    CHECK_INT((int)e.freeze_s, 31817);
+    CHECK_INT((int)e.total_s, 31817 + 32239 + 38155);
+}
+
 int main(void)
 {
     test_round_trip();
@@ -270,5 +397,9 @@ int main(void)
     test_abandon();
     test_unknown_date_stays_unknown();
     test_no_vacuum_reported();
+    test_prep_countdown_is_not_a_new_run();
+    test_phase_durations_are_recorded();
+    test_estimate_seeds_then_learns();
+    test_estimate_ignores_unfinished_runs();
     return TEST_REPORT();
 }

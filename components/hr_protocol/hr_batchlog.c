@@ -16,12 +16,27 @@
 /* Vacuum considered "pulled down". Inferred from captures, not measured. */
 #define PULLDOWN_UM   500
 
-#define CSV_VERSION   1
+#define CSV_VERSION   2
 
 static bool phase_is_running(int p)
 {
     return p == SCR_PREPARING || p == SCR_STARTING || p == SCR_FREEZING ||
            p == SCR_DRYING || p == SCR_FINAL_DRY;
+}
+
+bool hr_phase_is_running(int phase)
+{
+    return phase_is_running(phase);
+}
+
+/*
+ * Preparing and Starting run on a separate countdown that reaches its own end
+ * and then restarts at zero when the batch clock proper begins. Observed on a
+ * real run: 0..892 preparing, 900..1834 starting, then 1 at Freezing.
+ */
+static bool phase_is_prerun(int p)
+{
+    return p == SCR_PREPARING || p == SCR_STARTING;
 }
 
 /*
@@ -84,7 +99,7 @@ size_t hr_batch_encode(const hr_batch_t *b, char *out, size_t cap)
 
     char body[HR_BATCH_LINE_MAX];
     int n = snprintf(body, sizeof(body),
-                     "%d,%lu,%lu,%s,%u,%s,%ld,%d,%d,%ld,%lu,%u",
+                     "%d,%lu,%lu,%s,%u,%s,%ld,%d,%d,%ld,%lu,%u,%lu,%lu,%lu",
                      CSV_VERSION,
                      (unsigned long)b->start_epoch,
                      (unsigned long)b->duration_s,
@@ -96,7 +111,10 @@ size_t hr_batch_encode(const hr_batch_t *b, char *out, size_t cap)
                      (int)b->max_temp_f,
                      (long)b->best_vacuum_um,
                      (unsigned long)b->pulldown_s,
-                     (unsigned)b->outcome);
+                     (unsigned)b->outcome,
+                     (unsigned long)b->freeze_s,
+                     (unsigned long)b->dry_s,
+                     (unsigned long)b->final_s);
     if (n < 0 || (size_t)n >= sizeof(body)) {
         return 0;
     }
@@ -140,21 +158,24 @@ bool hr_batch_decode(const char *line, hr_batch_t *out)
 
     /* Split on commas. Field 5 (params) is space-separated internally, which
      * is why it can be split this way without a quoting scheme. */
-    char *f[12];
+    /*
+     * Version 1 had 12 fields; version 2 appends the three phase durations.
+     * Both are accepted, so a logbook written before the upgrade still reads.
+     */
+    char *f[15];
     int nf = 0;
     char *p = body;
     f[nf++] = p;
-    while (*p && nf < 12) {
+    while (*p && nf < 15) {
         if (*p == ',') {
             *p = '\0';
             f[nf++] = p + 1;
         }
         p++;
     }
-    if (nf != 12) {
-        return false;
-    }
-    if (atoi(f[0]) != CSV_VERSION) {
+    int ver = atoi(f[0]);
+    if ((ver != 1 && ver != 2) || (ver == 1 && nf != 12) ||
+        (ver == 2 && nf != 15)) {
         return false;
     }
 
@@ -178,6 +199,11 @@ bool hr_batch_decode(const char *line, hr_batch_t *out)
     out->best_vacuum_um = (int32_t)strtol(f[9], NULL, 10);
     out->pulldown_s     = (uint32_t)strtoul(f[10], NULL, 10);
     out->outcome        = (uint8_t)atoi(f[11]);
+    if (ver >= 2) {
+        out->freeze_s = (uint32_t)strtoul(f[12], NULL, 10);
+        out->dry_s    = (uint32_t)strtoul(f[13], NULL, 10);
+        out->final_s  = (uint32_t)strtoul(f[14], NULL, 10);
+    }
     return true;
 }
 
@@ -193,7 +219,8 @@ void hr_batch_tracker_reset(hr_batch_tracker_t *t)
     t->dry_start_elapsed = -1;
 }
 
-static void begin(hr_batch_tracker_t *t, uint32_t now_epoch, int32_t temp_f)
+static void begin(hr_batch_tracker_t *t, uint32_t now_epoch, int32_t temp_f,
+                  int32_t elapsed_s)
 {
     memset(&t->cur, 0, sizeof(t->cur));
     t->cur.start_epoch = now_epoch;
@@ -202,6 +229,8 @@ static void begin(hr_batch_tracker_t *t, uint32_t now_epoch, int32_t temp_f)
     t->cur.max_temp_f = (int16_t)temp_f;
     t->cur.best_vacuum_um = 0;      /* 0 == none seen; any reading beats it */
     t->active = true;
+    t->start_elapsed = elapsed_s;
+    t->phase_start_elapsed = elapsed_s;
     t->dry_start_elapsed = -1;
     t->pulldown_done = false;
     t->dry_extensions = 0;
@@ -234,17 +263,52 @@ hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
      * when that happens, the old one never got a proper ending.
      */
     if (t->active && t->have_last && elapsed_s < t->last_elapsed) {
-        finish(t, HR_OUTCOME_INTERRUPTED, out);
-        ev = HR_BATCH_FINISHED;
+        if (phase_is_prerun(t->last_phase) && running) {
+            /*
+             * Not a new run: the dryer counted the preparation phases on their
+             * own clock and has just restarted the counter for the batch
+             * itself. Rebase onto the new origin and keep the record open.
+             *
+             * Treating this as a new run is what stopped a real batch from
+             * ever reaching the logbook - it closed a 1834-second
+             * "interrupted" record at the moment freezing began, and the run
+             * that followed was a second batch whose ending nothing watched.
+             */
+            t->start_elapsed = elapsed_s;
+            t->phase_start_elapsed = elapsed_s;
+        } else {
+            finish(t, HR_OUTCOME_INTERRUPTED, out);
+            ev = HR_BATCH_FINISHED;
+        }
     }
 
     if (!t->active && running && ev == HR_BATCH_NOTHING) {
-        begin(t, now_epoch, temp_f);
+        begin(t, now_epoch, temp_f, elapsed_s);
         ev = HR_BATCH_STARTED;
     }
 
     if (t->active) {
-        t->cur.duration_s = (uint32_t)(elapsed_s > 0 ? elapsed_s : 0);
+        /* A delta from where this run was first seen, not the counter's
+         * absolute value - which is the previous run's total while idle. */
+        int32_t ran = elapsed_s - t->start_elapsed;
+        t->cur.duration_s = (uint32_t)(ran > 0 ? ran : 0);
+
+        /* Time in each phase, for estimating the next run. */
+        if (phase != t->last_phase && phase_is_running(phase)) {
+            t->phase_start_elapsed = elapsed_s;
+        }
+        if (phase_is_running(phase)) {
+            int32_t in_phase = elapsed_s - t->phase_start_elapsed;
+            if (in_phase > 0) {
+                if (phase == SCR_FREEZING) {
+                    t->cur.freeze_s = (uint32_t)in_phase;
+                } else if (phase == SCR_DRYING) {
+                    t->cur.dry_s = (uint32_t)in_phase;
+                } else if (phase == SCR_FINAL_DRY) {
+                    t->cur.final_s = (uint32_t)in_phase;
+                }
+            }
+        }
         /* Name the run from the dryer's own mode label. Refreshed on every
          * sample because the field is not reliably populated on the first
          * frame, and an unnamed record answers none of the questions the
@@ -309,6 +373,69 @@ void hr_batch_set_extra_dry(hr_batch_tracker_t *t, int32_t seconds)
     if (t != NULL) {
         t->cur.extra_dry_s = seconds;
     }
+}
+
+/* Median of a small array, in place. n > 0. */
+static uint32_t median_u32(uint32_t *v, size_t n)
+{
+    for (size_t i = 1; i < n; i++) {          /* insertion sort; n is tiny */
+        uint32_t k = v[i];
+        size_t j = i;
+        while (j > 0 && v[j - 1] > k) {
+            v[j] = v[j - 1];
+            j--;
+        }
+        v[j] = k;
+    }
+    return (n & 1u) ? v[n / 2] : (uint32_t)(((uint64_t)v[n / 2 - 1] +
+                                             v[n / 2]) / 2u);
+}
+
+#define EST_MAX 16      /* runs considered; more history is not more relevant */
+
+bool hr_batch_estimate(const hr_batch_t *recent, size_t n,
+                       hr_batch_estimate_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+
+    uint32_t fr[EST_MAX], dr[EST_MAX], fi[EST_MAX];
+    size_t k = 0;
+
+    for (size_t i = 0; i < n && k < EST_MAX; i++) {
+        const hr_batch_t *b = &recent[i];
+        /*
+         * Only completed runs, and only ones that actually recorded phases -
+         * a version-1 record has none, and counting its zeros would drag every
+         * estimate toward zero without ever looking wrong.
+         */
+        if (b->outcome != HR_OUTCOME_COMPLETE) {
+            continue;
+        }
+        if (b->freeze_s == 0 || b->dry_s == 0) {
+            continue;
+        }
+        fr[k] = b->freeze_s;
+        dr[k] = b->dry_s;
+        fi[k] = b->final_s;
+        k++;
+    }
+
+    if (k == 0) {
+        out->freeze_s = HR_SEED_FREEZE_S;
+        out->dry_s    = HR_SEED_DRY_S;
+        out->final_s  = HR_SEED_FINAL_S;
+        out->samples  = 0;
+    } else {
+        out->freeze_s = median_u32(fr, k);
+        out->dry_s    = median_u32(dr, k);
+        out->final_s  = median_u32(fi, k);
+        out->samples  = (uint8_t)k;
+    }
+    out->total_s = out->freeze_s + out->dry_s + out->final_s;
+    return true;
 }
 
 const char *hr_outcome_str(uint8_t outcome)

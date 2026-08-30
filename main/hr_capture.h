@@ -56,6 +56,11 @@ unsigned long hr_capture_dropped(void);
 size_t hr_capture_size(void);
 size_t hr_capture_capacity(void);
 
+/* Per-segment view, for diagnosing a download that does not match the size. */
+unsigned hr_capture_seg_count(void);
+unsigned hr_capture_seg_active(void);
+size_t   hr_capture_seg_bytes(unsigned i);
+
 /* Erase the log. Returns false on failure. */
 bool hr_capture_clear(void);
 

@@ -63,18 +63,20 @@ static long s_last_batch_elapsed = -1;
  */
 static hr_batch_tracker_t s_batch;
 static hr_batch_t         s_batch_done;
+static bool               s_last_running;
 static volatile bool      s_batch_done_pending;
 static bool               s_batch_boot_checked;
 static uint32_t           s_batch_saved_ms;
-static bool               s_batch_store_inited;
 
 /*
  * Introducing ourselves once per link, and a STATE heartbeat after that.
  *
- * The handshake is PACED - one frame per main-loop pass, 250ms apart - rather
- * than emitted as a burst. The captured genuine adapter waits for the dryer's
- * UID before sending its last frame, and a 6.0.644170 machine answered only
- * the second frame of our 15ms burst, ignoring the two behind it.
+ * The handshake is a BURST - every frame sent in one pass, measured at 93ms.
+ * It was paced 250ms apart for a while, to work around a 6.0.644170 machine
+ * that appeared to answer only the second frame. That firmware turned out to
+ * be broken outright - the genuine adapter could not talk to it either - so
+ * the pacing was solving nothing and cost three quarters of a second of
+ * startup on every healthy dryer. See dist/v1.0.6/RELEASE_NOTES.md.
  *
  * It also restarts on a USB RE-ENUMERATION, not only when the protocol link
  * drops. Those are different events: after a detach/attach the dryer has a
@@ -198,17 +200,29 @@ static void on_inbound(const hr_frame_t *f, void *user)
         hr_mqtt_publish_telemetry(&tel);
 
         /*
-         * Feed the graph series. The dryer's batch-elapsed counter only ever
-         * counts up within a run, so a DECREASE means a new batch started and
-         * the old curve must not be fitted across into the new one.
+         * Feed the graph series, and clear it when a new run begins.
+         *
+         * The trigger is the PHASE going from not-running to running, using
+         * the same definition of "running" the logbook uses. The elapsed
+         * counter alone is not enough to decide this and used to be the only
+         * test: it holds the previous run's total for as long as the dryer
+         * sits idle, so an idle spell filled the whole 30-hour window before
+         * the run even started, and the run itself was then recorded into a
+         * window with no room left in it.
+         *
+         * The backwards-counter test is kept as well, for a run that restarts
+         * without passing through an idle frame.
          */
         xSemaphoreTake(s_hist_lock, portMAX_DELAY);
-        if (s_last_batch_elapsed >= 0 &&
-            tel.batch_elapsed_s < s_last_batch_elapsed) {
+        const bool running_now = hr_phase_is_running(tel.type);
+        const bool went_back = (s_last_batch_elapsed >= 0 &&
+                                tel.batch_elapsed_s < s_last_batch_elapsed);
+        if ((running_now && !s_last_running) || (running_now && went_back)) {
             hr_trend_reset(&s_trend);
             s_trend_persisted = 0;
             hr_capture_trend_reset();
         }
+        s_last_running = running_now;
         s_last_batch_elapsed = tel.batch_elapsed_s;
         hr_trend_add(&s_trend, now_ms(), (int)tel.temperature_f,
                      (uint32_t)tel.pressure_microns, tel.pressure_valid);
@@ -443,8 +457,17 @@ void app_main(void)
         }
 
         /* ---- batch logbook. All flash work happens on THIS task. ------- */
-        if (!s_batch_store_inited && hr_capture_ready()) {
-            s_batch_store_inited = true;
+        /*
+         * Bring the logbook up once the capture filesystem is mounted, and
+         * bring it BACK if it ever goes unready.
+         *
+         * That happens after a reformat: the store is re-initialised before
+         * the remount has finished and fails with ENODEV. Latching this behind
+         * a one-shot flag left the logbook dead until the next reboot, with
+         * nothing in the UI to say so - a recovery path that quietly disables
+         * the thing it was meant to recover.
+         */
+        if (hr_capture_ready() && !hr_batchstore_ready()) {
             hr_batchstore_init();
         }
         if (hr_batchstore_ready()) {

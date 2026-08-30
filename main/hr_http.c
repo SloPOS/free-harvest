@@ -354,6 +354,7 @@ static esp_err_t h_verbs(httpd_req_t *req)
 /* -------------------------------------------------------------------- */
 static esp_err_t h_capture(httpd_req_t *req)
 {
+    bool degraded = false;      /* the flash log was there and would not read */
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Content-Disposition",
                        "attachment; filename=hr_capture.txt");
@@ -383,6 +384,7 @@ static esp_err_t h_capture(httpd_req_t *req)
                               "falling back to the RAM ring",
                          (unsigned)hr_capture_size());
                 hr_capture_close(h);
+                degraded = true;
                 goto ram_fallback;
             }
             if (httpd_resp_send_chunk(req, buf, first) != ESP_OK) {
@@ -401,6 +403,25 @@ static esp_err_t h_capture(httpd_req_t *req)
     }
 
 ram_fallback:;
+    /*
+     * SAY SO. This path serves the small in-memory ring - minutes, not hours.
+     * It used to do that silently, so a download of a 1.6 MB log arrived as
+     * sixty lines of idle chatter and looked like the whole log. Somebody sent
+     * that file on as a full capture of a 28-hour run, because nothing in it
+     * said otherwise.
+     */
+    if (degraded) {
+        static const char k_warn[] =
+            "### INCOMPLETE - THIS IS NOT THE FULL LOG ###\n"
+            "### The flash capture log exists but could not be read,\n"
+            "### so what follows is only the in-memory ring: the last\n"
+            "### few minutes, not the run you are looking for.\n"
+            "### Power-cycle the adapter and download again - the\n"
+            "### flash log usually reads cleanly after a restart.\n"
+            "###\n";
+        httpd_resp_send_chunk(req, k_warn, sizeof(k_warn) - 1);
+    }
+
     static hr_hist_entry_t out[HR_HIST_CAP];
     int n;
     LOCK();
@@ -419,12 +440,22 @@ ram_fallback:;
 /* GET /api/capture/info -> {"ready":..,"bytes":..,"capacity":..} */
 static esp_err_t h_capture_info(httpd_req_t *req)
 {
-    char body[160];
+    char body[256];
     int n = snprintf(body, sizeof(body),
-                     "{\"ready\":%s,\"bytes\":%u,\"capacity\":%u}",
+                     "{\"ready\":%s,\"bytes\":%u,\"capacity\":%u,"
+                     "\"active\":%u,\"segs\":[",
                      hr_capture_ready() ? "true" : "false",
                      (unsigned)hr_capture_size(),
-                     (unsigned)hr_capture_capacity());
+                     (unsigned)hr_capture_capacity(),
+                     hr_capture_seg_active());
+    for (unsigned i = 0; i < hr_capture_seg_count() && n > 0 &&
+                         n < (int)sizeof(body); i++) {
+        n += snprintf(body + n, sizeof(body) - (size_t)n, "%s%u",
+                      i ? "," : "", (unsigned)hr_capture_seg_bytes(i));
+    }
+    if (n > 0 && n < (int)sizeof(body)) {
+        n += snprintf(body + n, sizeof(body) - (size_t)n, "]}");
+    }
     return send_json(req, body, n);
 }
 
@@ -1900,11 +1931,12 @@ static esp_err_t h_batches(httpd_req_t *req)
         const hr_batch_t *b = &ring[idx];
         char nm[64];
         hr_json_escape(b->name, nm, sizeof(nm));
-        char row[352];
+        char row[448];      /* the three phase times pushed this past 352 */
         int rn = snprintf(row, sizeof(row),
                           "%s{\"start\":%lu,\"duration_s\":%lu,\"name\":\"%s\","
                           "\"family\":%u,\"extra_dry_s\":%ld,\"min_f\":%d,"
                           "\"max_f\":%d,\"vacuum_um\":%ld,\"pulldown_s\":%lu,"
+                          "\"freeze_s\":%lu,\"dry_s\":%lu,\"final_s\":%lu,"
                           "\"outcome\":\"%s\"}",
                           k ? "," : "",
                           (unsigned long)b->start_epoch,
@@ -1913,12 +1945,32 @@ static esp_err_t h_batches(httpd_req_t *req)
                           (int)b->min_temp_f, (int)b->max_temp_f,
                           (long)b->best_vacuum_um,
                           (unsigned long)b->pulldown_s,
+                          (unsigned long)b->freeze_s,
+                          (unsigned long)b->dry_s,
+                          (unsigned long)b->final_s,
                           hr_outcome_str(b->outcome));
         if (rn > 0 && httpd_resp_send_chunk(req, row, rn) != ESP_OK) {
             return ESP_FAIL;
         }
     }
-    httpd_resp_send_chunk(req, "]}", 2);
+    /*
+     * How long the next run is likely to take, from the runs above. Sent with
+     * the logbook because it is derived from it - a caller that has the
+     * history should not have to ask a second endpoint for the conclusion.
+     */
+    hr_batch_estimate_t est;
+    hr_batch_estimate(ring, have, &est);
+    char tail[192];
+    int tn = snprintf(tail, sizeof(tail),
+                      "%s{\"freeze_s\":%lu,\"dry_s\":%lu,\"final_s\":%lu,\"total_s\":%lu,\"samples\":%u}",
+                      "],\"estimate\":",
+                      (unsigned long)est.freeze_s, (unsigned long)est.dry_s,
+                      (unsigned long)est.final_s, (unsigned long)est.total_s,
+                      (unsigned)est.samples);
+    if (tn > 0) {
+        httpd_resp_send_chunk(req, tail, tn);
+    }
+    httpd_resp_send_chunk(req, "}", 1);
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 

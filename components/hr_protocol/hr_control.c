@@ -70,9 +70,23 @@ static const hr_action_t k_actions[] = {
     { "dry_end",        "End Batch",           5,  1, HR_SEV_DESTRUCTIVE },
 
     /* --- Screen 6: Final dry --------------------------------------------- */
+    /*
+     * End Batch only.
+     *
+     * "More Dry Time" and "Less Dry Time" were listed here too, and were not
+     * on the machine: the owner watched a full run and the Final Dry screen
+     * never offered them. They belong to Batch Complete (screen 7) and to the
+     * extra-dry phase that follows it. Offering them here put two buttons in
+     * the app that the dryer had no control for, on the screen where a run
+     * spends its last ten hours.
+     *
+     * Nothing in the Final Dry telemetry distinguishes a state where they
+     * would apply: across a whole final-dry phase every field except
+     * temperature, vacuum, the two elapsed counters and the progress percent
+     * is constant. So there is no gate to add them back behind - they are
+     * simply not part of this screen.
+     */
     { "final_end",      "End Batch",           6,  1, HR_SEV_DESTRUCTIVE },
-    { "final_more",     "More Dry Time",       6,  2, HR_SEV_BENIGN      },
-    { "final_less",     "Less Dry Time",       6,  3, HR_SEV_CONFIRM     },
 
     /* --- Screen 7: Batch complete ---------------------------------------- */
     /*

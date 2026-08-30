@@ -102,7 +102,16 @@ static uint32_t median_u32(uint32_t *a, size_t n)
  * When the level does move it jumps TO the current reading rather than easing
  * toward it. Confirmation has already established the reading is real, and
  * easing would add lag exactly where fidelity matters.
- *
+ */
+
+/*
+ * How many consecutive empty buckets the smoothed line may bridge before it
+ * reads as a gap. Four buckets is two minutes - enough for a missed frame or a
+ * USB re-enumeration, far short of an idle weekend.
+ */
+#define GAP_CARRY_MAX 4
+
+/*
  * NOTE: this smoothed series is for DISPLAY. The curve fit in hr_estimate reads
  * the raw medians, because least-squares already averages the noise and does so
  * without introducing lag.
@@ -158,15 +167,27 @@ static void commit_bucket(hr_trend_t *tr)
     if (tr->t_count > 0) {
         p.temp_raw_f = median_i16(tr->t_samples, tr->t_count);
         p.temp_smooth_cf = smooth_step(tr, p.temp_raw_f);
+        tr->gap_run = 0;
     } else {
         /*
          * No frames landed in this bucket (a 76s gap spans two). Record the
-         * gap rather than inventing a reading, but carry the smoothed level
-         * forward so the line stays continuous.
+         * gap rather than inventing a reading, and carry the smoothed level
+         * forward only far enough to bridge a missed frame or a USB
+         * re-enumeration - GAP_CARRY_MAX buckets, two minutes.
+         *
+         * It used to carry indefinitely, "so the line stays continuous". Held
+         * across an idle dryer that is still sending frames but not being
+         * recorded, that is not smoothing but invention: a run logged after a
+         * long idle spell drew every point at the last idle temperature, and
+         * a 28-hour batch rendered as a flat 60F line.
          */
         p.temp_raw_f = HR_TREND_NO_TEMP;
-        p.temp_smooth_cf = tr->have_level ? (int16_t)tr->level_cf
-                                          : HR_TREND_NO_TEMP;
+        if (tr->gap_run < (uint16_t)-1) {
+            tr->gap_run++;
+        }
+        p.temp_smooth_cf = (tr->have_level && tr->gap_run <= GAP_CARRY_MAX)
+                               ? (int16_t)tr->level_cf
+                               : HR_TREND_NO_TEMP;
     }
     p.pressure_raw = (tr->p_count > 0) ? median_u32(tr->p_samples, tr->p_count)
                                        : 0;
@@ -175,10 +196,18 @@ static void commit_bucket(hr_trend_t *tr)
         tr->pts[tr->count++] = p;
     } else {
         /*
-         * 30 hours exceeded. Keep the OLDEST data and stop appending rather
-         * than shifting: the start of the cooling curve is what the fit needs,
-         * and a run this long is already past the phase we estimate.
+         * 30 hours exceeded: drop the OLDEST point and keep recording.
+         *
+         * This used to stop appending instead, keeping the oldest data because
+         * the start of the cooling curve is what the fit needs. That silently
+         * discarded everything after the window filled - and an idle dryer
+         * fills it just as readily as a running one, so a real 28-hour run
+         * that followed a long idle spell was recorded not at all. Losing the
+         * first half hour of a very long run is much the smaller loss.
          */
+        memmove(tr->pts, tr->pts + 1,
+                (HR_TREND_CAPACITY - 1) * sizeof(tr->pts[0]));
+        tr->pts[HR_TREND_CAPACITY - 1] = p;
         tr->overflowed = true;
     }
 
