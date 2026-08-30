@@ -26,7 +26,7 @@ Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 > *nothing* can talk to the machine — not Free Harvest, and **not HarvestRight's
 > own adapter either**. We proved it the hard way: a working dryer was updated to
 > it, both adapters went silent, and reverting to the build on
-> [harvestright.com](https://harvestright.com) brought both straight back.
+> [https://harvestright.com](https://harvestright.com/pages/customer-support) brought both straight back.
 >
 > ### If you have already updated to it
 >
