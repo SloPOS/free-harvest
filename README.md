@@ -19,7 +19,7 @@ Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 > **Free Harvest is developed and tested against dryer firmware `6.0.641041`.**
 > Settings → Diagnostics on the machine shows the build.
 >
-> You need **firmware 6 or later**: earlier builds do not send the signals Free
+> You need **firmware 6.0.641041**: earlier builds do not send the signals Free
 > Harvest reads, and no adapter can change that.
 >
 > **Do not run `6.0.644170`.** That build is broken. On a dryer running it,
