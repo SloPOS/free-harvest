@@ -141,22 +141,9 @@ static const char *wifi_status_str(void)
  * from a lucky observation into a reading, and the reason separates a firmware
  * panic from a brownout on the dryer's USB rail, which need opposite fixes.
  */
-static const char *reset_reason_str(void)
-{
-    switch (esp_reset_reason()) {
-    case ESP_RST_POWERON:  return "poweron";
-    case ESP_RST_EXT:      return "external";
-    case ESP_RST_SW:       return "sw";        /* esp_restart(), e.g. after OTA */
-    case ESP_RST_PANIC:    return "panic";     /* crashed - look for a coredump */
-    case ESP_RST_INT_WDT:  return "int_wdt";
-    case ESP_RST_TASK_WDT: return "task_wdt";
-    case ESP_RST_WDT:      return "wdt";
-    case ESP_RST_DEEPSLEEP: return "deepsleep";
-    case ESP_RST_BROWNOUT: return "brownout";  /* USB rail sagged */
-    case ESP_RST_SDIO:     return "sdio";
-    default:               return "unknown";
-    }
-}
+/* The mapping lives in hr_capture.c, which writes it into the log at boot;
+ * one answer, so /api/state and the capture can never disagree. */
+#define reset_reason_str hr_reset_reason_str
 
 /* Defined with the rest of the control code further down; /api/state needs
  * it here to report whether control is switched on. */

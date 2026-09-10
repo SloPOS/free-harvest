@@ -51,8 +51,21 @@ bool hr_batchstore_clear(void);
  * proceeds - one record rather than a growing list, so NVS usage stays flat in
  * a 24 KB partition already shared with WiFi, MQTT and recipes.
  */
-bool hr_batchstore_save_open(const hr_batch_t *b);
-bool hr_batchstore_load_open(hr_batch_t *out);
+/*
+ * Checkpoint the run in progress, with the tracker state needed to REOPEN it.
+ *
+ * The record alone is not enough: duration is a delta from the dryer's elapsed
+ * counter at the start of the run, so without that origin a resumed batch
+ * cannot say how long it has been going. Both are stored beside the record
+ * rather than inside it, so the CSV format on disk is unaffected.
+ */
+bool hr_batchstore_save_open(const hr_batch_t *b, int32_t start_elapsed,
+                             int32_t last_elapsed);
+
+/* Load it back. `start_elapsed`/`last_elapsed` may be NULL if not wanted; they
+ * are left untouched when the checkpoint predates this format. */
+bool hr_batchstore_load_open(hr_batch_t *out, int32_t *start_elapsed,
+                             int32_t *last_elapsed);
 void hr_batchstore_clear_open(void);
 
 /* ---- clock -------------------------------------------------------------- */

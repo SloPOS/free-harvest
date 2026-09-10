@@ -122,7 +122,6 @@ typedef struct {
      */
     int32_t    start_elapsed;
     int32_t    phase_start_elapsed;
-    int        phase_of_start;
 
     /* Pull-down timing: when drying began, and whether 500um was reached. */
     int32_t    dry_start_elapsed;
@@ -163,6 +162,22 @@ hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
  * left open by a power cut. Returns false when nothing was open.
  */
 bool hr_batch_abandon(hr_batch_tracker_t *t, hr_batch_t *out);
+
+/*
+ * Reopen a run that was interrupted by the adapter losing power.
+ *
+ * The adapter is powered from the dryer's USB port, so the dryer browning out
+ * that rail - most visibly when it switches a heavy load - restarts the
+ * adapter mid-run. That is external and no firmware change prevents it; what
+ * the firmware can do is not turn one physical run into three records.
+ *
+ * `rec` is the checkpoint written by the store, `start_elapsed` and
+ * `last_elapsed` the tracker state saved with it. The caller resumes only when
+ * the dryer has come back in a running phase whose elapsed continues from
+ * `last_elapsed`; this function does not re-check that.
+ */
+void hr_batch_resume(hr_batch_tracker_t *t, const hr_batch_t *rec,
+                     int32_t start_elapsed, int32_t last_elapsed, int phase);
 
 /* Seconds of drying added during this run, for the record and the UI. */
 void hr_batch_set_extra_dry(hr_batch_tracker_t *t, int32_t seconds);

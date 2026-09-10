@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "esp_spiffs.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
@@ -634,6 +635,43 @@ void hr_capture_mount_now(void)
                   "%u per segment",
              (unsigned)s_used, (unsigned)s_total, (unsigned)s_seg,
              (unsigned)s_seg_max);
+
+    /*
+     * First line after every mount: why we restarted.
+     *
+     * The capture mounts several seconds into the boot - long enough that the
+     * handshake is usually over before recording starts - so a restart shows
+     * in the log only as the timestamp jumping back to zero, with nothing to
+     * say whether the adapter crashed or simply lost power. Working that out
+     * afterwards meant querying a live device for a reason that is gone the
+     * moment it restarts again. Now the log answers it.
+     */
+    char boot[160];
+    int bn = snprintf(boot, sizeof(boot),
+                      "~boot reset=%s heap=%u seg%u used=%u",
+                      hr_reset_reason_str(),
+                      (unsigned)esp_get_free_heap_size(),
+                      (unsigned)s_seg, (unsigned)s_used);
+    if (bn > 0) {
+        hr_capture_append((uint32_t)(esp_timer_get_time() / 1000), boot);
+    }
+}
+
+const char *hr_reset_reason_str(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "poweron";   /* rail dropped and came back */
+    case ESP_RST_EXT:       return "external";
+    case ESP_RST_SW:        return "sw";        /* esp_restart(), e.g. OTA    */
+    case ESP_RST_PANIC:     return "panic";     /* crashed - look for a dump  */
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT:  return "brownout";  /* USB rail sagged            */
+    case ESP_RST_SDIO:      return "sdio";
+    default:                return "unknown";
+    }
 }
 
 bool hr_capture_ready(void)

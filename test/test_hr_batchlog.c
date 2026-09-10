@@ -299,33 +299,47 @@ static void test_prep_countdown_is_not_a_new_run(void)
 }
 
 /* Each phase is timed on the dryer's own counter, for estimating the next run. */
+/*
+ * Each phase is timed on the dryer's own counter, sample by sample.
+ *
+ * Ten-second samples, which is roughly how the machine polls. The frame that
+ * ENTERS a phase is not credited to it - there is no previous sample in that
+ * phase to measure from - so each total is the walk minus one step.
+ */
 static void test_phase_durations_are_recorded(void)
 {
     hr_batch_tracker_t t;
     hr_batch_t rec;
     hr_batch_tracker_reset(&t);
 
-    hr_batch_observe(&t, FREEZE, 1, 59, 0, "Auto", 100, &rec);
-    hr_batch_observe(&t, FREEZE, 31818, -16, 0, "Auto", 100, &rec);
-    hr_batch_observe(&t, DRY, 31826, -16, 440, "Auto", 100, &rec);
-    hr_batch_observe(&t, DRY, 64065, 110, 440, "Auto", 100, &rec);
-    hr_batch_observe(&t, FINAL, 64069, 110, 499, "Auto", 100, &rec);
-    hr_batch_observe(&t, FINAL, 102224, 119, 284, "Auto", 100, &rec);
-    CHECK_INT(hr_batch_observe(&t, DONE, 102230, 119, 284, "Auto", 100, &rec),
+    hr_batch_observe(&t, FREEZE, 0, 59, 0, "Auto", 100, &rec);
+    for (int32_t e = 10; e <= 3600; e += 10) {
+        hr_batch_observe(&t, FREEZE, e, 20, 0, "Auto", 100, &rec);
+    }
+    hr_batch_observe(&t, DRY, 3610, -16, 440, "Auto", 100, &rec);
+    for (int32_t e = 3620; e <= 7200; e += 10) {
+        hr_batch_observe(&t, DRY, e, 50, 440, "Auto", 100, &rec);
+    }
+    hr_batch_observe(&t, FINAL, 7210, 110, 499, "Auto", 100, &rec);
+    for (int32_t e = 7220; e <= 9000; e += 10) {
+        hr_batch_observe(&t, FINAL, e, 119, 284, "Auto", 100, &rec);
+    }
+    CHECK_INT(hr_batch_observe(&t, DONE, 9010, 119, 284, "Auto", 100, &rec),
               HR_BATCH_FINISHED);
 
-    CHECK_INT((int)rec.freeze_s, 31817);
-    CHECK_INT((int)rec.dry_s, 32239);
-    CHECK_INT((int)rec.final_s, 38155);
+    CHECK_INT((int)rec.freeze_s, 3600);
+    CHECK_INT((int)rec.dry_s, 3590);
+    CHECK_INT((int)rec.final_s, 1790);
+    CHECK_INT((int)rec.duration_s, 9010);
 
-    /* And the record survives a trip through the file format. */
+    /* and the record survives a trip through the file format */
     char line[HR_BATCH_LINE_MAX];
     hr_batch_t back;
     CHECK(hr_batch_encode(&rec, line, sizeof(line)) > 0);
     CHECK(hr_batch_decode(line, &back));
-    CHECK_INT((int)back.freeze_s, 31817);
-    CHECK_INT((int)back.dry_s, 32239);
-    CHECK_INT((int)back.final_s, 38155);
+    CHECK_INT((int)back.freeze_s, 3600);
+    CHECK_INT((int)back.dry_s, 3590);
+    CHECK_INT((int)back.final_s, 1790);
 }
 
 static void test_estimate_seeds_then_learns(void)
@@ -384,6 +398,109 @@ static void test_estimate_ignores_unfinished_runs(void)
     CHECK_INT((int)e.total_s, 31817 + 32239 + 38155);
 }
 
+/*
+ * Phase time is ACCUMULATED, not recomputed from a single start point.
+ *
+ * Taken from a real run: Final Dry ran elapsed 64646..85353, and a momentary
+ * excursion late in the phase made the recomputed form report the last 1966
+ * seconds as the whole 20707-second phase. The estimate it fed was five hours
+ * short and nothing about it looked wrong.
+ */
+static void test_phase_time_survives_a_late_excursion(void)
+{
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+
+    hr_batch_observe(&t, FREEZE, 50, 37, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FINAL, 64646, 119, 484, "Auto", 100, &rec);
+    /* walk final dry in 10s steps to 83387 */
+    for (int32_t e = 64656; e <= 83387; e += 10) {
+        hr_batch_observe(&t, FINAL, e, 120, 400, "Auto", 100, &rec);
+    }
+    /*
+     * One frame on another RUNNING screen, then straight back. A stray
+     * screen-2 frame exactly like this appears in the real capture. It must
+     * not end the run, and it must not discard the phase total either.
+     */
+    hr_batch_observe(&t, START, 83397, 120, 400, "Auto", 100, &rec);
+    for (int32_t e = 83407; e <= 85353; e += 10) {
+        hr_batch_observe(&t, FINAL, e, 121, 380, "Auto", 100, &rec);
+    }
+    /* the excursion costs only the steps either side of it, not the phase */
+    CHECK(t.active);
+    CHECK(t.cur.final_s > 20000);
+    CHECK(t.cur.final_s <= 20707);
+}
+
+/*
+ * A nonsense elapsed value is not credited as phase time.
+ *
+ * The bound here is deliberately loose, because the dryer's reporting rate is
+ * wildly uneven - drying has a median gap of 320 seconds and reaches 2222 -
+ * and an earlier five-minute cap silently discarded over half of the drying
+ * time on a real run. Time lost while the adapter was off is excluded by
+ * resuming, not by this bound; see the resume test below.
+ */
+static void test_a_nonsense_jump_is_not_counted_as_phase_time(void)
+{
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+    hr_batch_observe(&t, FREEZE, 100, 40, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FREEZE, 110, 40, 0, "Auto", 100, &rec);
+    CHECK_INT((int)t.cur.freeze_s, 10);
+
+    /* a slow but real stretch - drying does this - is still counted */
+    hr_batch_observe(&t, FREEZE, 2332, 39, 0, "Auto", 100, &rec);
+    CHECK_INT((int)t.cur.freeze_s, 2232);
+
+    /* a jump no cadence explains is not */
+    hr_batch_observe(&t, FREEZE, 999999, 39, 0, "Auto", 100, &rec);
+    CHECK_INT((int)t.cur.freeze_s, 2232);
+}
+
+/*
+ * One physical run interrupted by power loss is ONE record.
+ *
+ * The adapter is powered from the dryer's USB rail; the dryer browning it out
+ * restarted us twice inside one 26-hour run, and closing the record at boot
+ * turned that run into three logbook entries.
+ */
+static void test_a_run_resumes_across_a_power_loss(void)
+{
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+
+    hr_batch_observe(&t, FREEZE, 50, 40, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FREEZE, 60, 40, 0, "Auto", 100, &rec);
+    CHECK(t.active);
+    /* the checkpoint the store would hold */
+    hr_batch_t saved = t.cur;
+    int32_t saved_start = t.start_elapsed;
+    CHECK_INT((int)saved_start, 50);
+
+    /* power cut: tracker state is gone */
+    hr_batch_tracker_reset(&t);
+    CHECK(!t.active);
+
+    /* dryer comes back still freezing, 45s further on */
+    hr_batch_resume(&t, &saved, saved_start, 105, FREEZE);
+    CHECK(t.active);
+    CHECK_INT((int)t.cur.freeze_s, 10);        /* carried over, not restarted */
+
+    hr_batch_observe(&t, FREEZE, 115, 39, 0, "Auto", 100, &rec);
+    CHECK_INT((int)t.cur.freeze_s, 20);
+    /* duration still measures from the ORIGINAL start, not the resume */
+    CHECK_INT((int)t.cur.duration_s, 115 - 50);
+
+    CHECK_INT(hr_batch_observe(&t, DONE, 120, 60, 0, "Auto", 100, &rec),
+              HR_BATCH_FINISHED);
+    CHECK_INT(rec.outcome, HR_OUTCOME_COMPLETE);
+    CHECK_INT((int)rec.duration_s, 70);
+}
+
 int main(void)
 {
     test_round_trip();
@@ -401,5 +518,8 @@ int main(void)
     test_phase_durations_are_recorded();
     test_estimate_seeds_then_learns();
     test_estimate_ignores_unfinished_runs();
+    test_phase_time_survives_a_late_excursion();
+    test_a_nonsense_jump_is_not_counted_as_phase_time();
+    test_a_run_resumes_across_a_power_loss();
     return TEST_REPORT();
 }

@@ -64,8 +64,37 @@ static long s_last_batch_elapsed = -1;
 static hr_batch_tracker_t s_batch;
 static hr_batch_t         s_batch_done;
 static bool               s_last_running;
+static int                s_last_type = -1;
 static volatile bool      s_batch_done_pending;
 static bool               s_batch_boot_checked;
+/*
+ * A run left open by the adapter losing power, held until telemetry says
+ * whether the dryer is still running it. Deciding at boot is too early: the
+ * dryer has not been heard from yet.
+ */
+static hr_batch_t         s_open_rec;
+static int32_t            s_open_start;
+static int32_t            s_open_last;
+static bool               s_open_pending;
+
+/*
+ * How far the dryer's elapsed counter may have moved while we were dark and
+ * still count as the same run. A restart costs under a minute; ten minutes is
+ * generous. Beyond it, treat the run as lost rather than glue together two
+ * things that may not belong together.
+ */
+#define RESUME_MAX_GAP_S 600
+
+/*
+ * How far it may have moved BACKWARDS and still be the same run.
+ *
+ * The counter is not perfectly monotonic. A real run reported 86385 for a
+ * single frame and then came back at 85375 - a thousand seconds backwards -
+ * and requiring monotonicity meant one stray frame either side of a power cut
+ * cost the whole resume. A new run is not mistaken for this: it restarts the
+ * counter near zero, tens of thousands of seconds below where we left off.
+ */
+#define RESUME_BACK_S 1800
 static uint32_t           s_batch_saved_ms;
 
 /*
@@ -223,6 +252,7 @@ static void on_inbound(const hr_frame_t *f, void *user)
             hr_capture_trend_reset();
         }
         s_last_running = running_now;
+        s_last_type = (int)tel.type;
         s_last_batch_elapsed = tel.batch_elapsed_s;
         hr_trend_add(&s_trend, now_ms(), (int)tel.temperature_f,
                      (uint32_t)tel.pressure_microns, tel.pressure_valid);
@@ -478,14 +508,53 @@ void app_main(void)
              */
             if (!s_batch_boot_checked) {
                 s_batch_boot_checked = true;
-                hr_batch_t open;
-                if (hr_batchstore_load_open(&open)) {
-                    open.outcome = HR_OUTCOME_INTERRUPTED;
-                    hr_batchstore_append(&open);
-                    hr_batchstore_clear_open();
-                    ESP_LOGW(TAG, "recovered an interrupted batch: %s, %us",
-                             open.name, (unsigned)open.duration_s);
+                s_open_start = 0;
+                s_open_last = -1;
+                if (hr_batchstore_load_open(&s_open_rec, &s_open_start,
+                                            &s_open_last)) {
+                    s_open_pending = true;
+                    ESP_LOGW(TAG, "a batch was open when we lost power: "
+                                  "%s, %us so far - waiting for the dryer to "
+                                  "say whether it is still running",
+                             s_open_rec.name,
+                             (unsigned)s_open_rec.duration_s);
                 }
+            }
+
+            /*
+             * Resume or close the run that power loss interrupted, once the
+             * dryer has actually been heard from.
+             *
+             * The adapter runs off the dryer's USB rail, so the dryer browning
+             * that rail out restarts us mid-batch - twice inside one real
+             * 26-hour run. Closing the record at boot and opening a fresh one
+             * turned that single run into three logbook entries, none of them
+             * describing what happened.
+             */
+            if (s_open_pending && s_last_batch_elapsed >= 0) {
+                const bool running = s_last_running;
+                const int32_t now_el = (int32_t)s_last_batch_elapsed;
+                const int32_t gap = now_el - s_open_last;
+
+                if (running && s_open_last >= 0 &&
+                    gap <= RESUME_MAX_GAP_S && gap >= -RESUME_BACK_S) {
+                    hr_batch_resume(&s_batch, &s_open_rec, s_open_start,
+                                    now_el, s_last_type);
+                    ESP_LOGW(TAG, "resumed the batch across a restart: %s, "
+                                  "%us so far, %ds of it unobserved",
+                             s_batch.cur.name,
+                             (unsigned)s_batch.cur.duration_s, (int)gap);
+                } else {
+                    s_open_rec.outcome = HR_OUTCOME_INTERRUPTED;
+                    hr_batchstore_append(&s_open_rec);
+                    hr_batchstore_clear_open();
+                    ESP_LOGW(TAG, "recorded an interrupted batch: %s, %us "
+                                  "(dryer came back %s)",
+                             s_open_rec.name,
+                             (unsigned)s_open_rec.duration_s,
+                             running ? "on a different run" : "idle");
+                }
+                s_open_pending = false;
             }
 
             if (s_batch_done_pending) {
@@ -500,7 +569,8 @@ void app_main(void)
                  * enough not to wear out the NVS partition.
                  */
                 s_batch_saved_ms = (uint32_t)now_ms();
-                hr_batchstore_save_open(&s_batch.cur);
+                hr_batchstore_save_open(&s_batch.cur, s_batch.start_elapsed,
+                                        s_batch.last_elapsed);
             }
         }
 

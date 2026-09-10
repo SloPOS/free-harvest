@@ -13,6 +13,22 @@
 #define SCR_COMPLETE  7
 #define SCR_PREPARING 17
 
+/*
+ * Largest gap between two samples that still counts as time spent in a phase.
+ *
+ * This is a CORRUPTION guard, not an absence guard, and it has to be generous.
+ * The dryer's reporting rate varies enormously by phase: freezing and final
+ * dry arrive every 5-15 seconds, but measured across a real run DRYING has a
+ * median gap of 320 seconds and reaches 2222. An earlier five-minute cap
+ * looked reasonable and silently discarded more than half of the drying time.
+ *
+ * Time lost while the adapter was off is excluded by a different mechanism -
+ * resuming sets the last-seen sample to the present one, so the dark stretch
+ * is never a step. What is left to reject here is a nonsense value, so the
+ * bound only has to sit above the slowest real cadence.
+ */
+#define PHASE_STEP_MAX_S 7200
+
 /* Vacuum considered "pulled down". Inferred from captures, not measured. */
 #define PULLDOWN_UM   500
 
@@ -293,19 +309,35 @@ hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
         int32_t ran = elapsed_s - t->start_elapsed;
         t->cur.duration_s = (uint32_t)(ran > 0 ? ran : 0);
 
-        /* Time in each phase, for estimating the next run. */
-        if (phase != t->last_phase && phase_is_running(phase)) {
-            t->phase_start_elapsed = elapsed_s;
-        }
-        if (phase_is_running(phase)) {
-            int32_t in_phase = elapsed_s - t->phase_start_elapsed;
-            if (in_phase > 0) {
+        /*
+         * Time in each phase, ACCUMULATED a sample at a time.
+         *
+         * It used to be recomputed as (now - phase_start) on every frame,
+         * which is destroyed by anything that moves phase_start late in a
+         * phase - a momentary excursion to another screen, or re-entering
+         * Final Dry after More Dry Time. The last stretch then gets reported
+         * as the whole phase, and nothing about the number looks wrong. One
+         * real run recorded 1966s of final dry against 20707s actually spent
+         * in it, and the estimate it fed was five hours short.
+         *
+         * Adding deltas is immune to all of that, and to the adapter losing
+         * power mid-run: the totals resume from the checkpoint rather than
+         * restarting from a new origin.
+         */
+        if (t->have_last && phase == t->last_phase && phase_is_running(phase)) {
+            int32_t step = elapsed_s - t->last_elapsed;
+            /*
+             * Credit only a plausible step. A restart leaves a gap the dryer
+             * counted but we did not observe; crediting an arbitrary jump
+             * would silently invent phase time, so a long gap is dropped.
+             */
+            if (step > 0 && step <= PHASE_STEP_MAX_S) {
                 if (phase == SCR_FREEZING) {
-                    t->cur.freeze_s = (uint32_t)in_phase;
+                    t->cur.freeze_s += (uint32_t)step;
                 } else if (phase == SCR_DRYING) {
-                    t->cur.dry_s = (uint32_t)in_phase;
+                    t->cur.dry_s += (uint32_t)step;
                 } else if (phase == SCR_FINAL_DRY) {
-                    t->cur.final_s = (uint32_t)in_phase;
+                    t->cur.final_s += (uint32_t)step;
                 }
             }
         }
@@ -357,6 +389,29 @@ hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
     t->last_elapsed = elapsed_s;
     t->have_last = true;
     return ev;
+}
+
+void hr_batch_resume(hr_batch_tracker_t *t, const hr_batch_t *rec,
+                     int32_t start_elapsed, int32_t last_elapsed, int phase)
+{
+    if (t == NULL || rec == NULL) {
+        return;
+    }
+    t->cur = *rec;
+    t->cur.outcome = HR_OUTCOME_RUNNING;
+    t->active = true;
+    t->start_elapsed = start_elapsed;
+    t->phase_start_elapsed = last_elapsed;
+    t->last_elapsed = last_elapsed;
+    t->last_phase = phase;
+    t->have_last = true;
+    /*
+     * Pull-down was either already measured before the outage or is no longer
+     * measurable - drying began while we were not watching - so do not start
+     * hunting for it again and report a second, wrong figure.
+     */
+    t->dry_start_elapsed = -1;
+    t->pulldown_done = (rec->pulldown_s > 0);
 }
 
 bool hr_batch_abandon(hr_batch_tracker_t *t, hr_batch_t *out)

@@ -24,6 +24,13 @@
  * background task after a short delay, because doing it synchronously on the
  * boot path breaks USB (see hr_capture.c for the full explanation).
  */
+/*
+ * Why the chip last restarted, as a short word: "poweron", "panic",
+ * "brownout", "sw", ... Lives here because the capture log records it, and
+ * both this and /api/state need the same answer from one place.
+ */
+const char *hr_reset_reason_str(void);
+
 void hr_capture_init(void);
 
 /* How long to wait before mounting, so USB enumeration finishes untouched. */
