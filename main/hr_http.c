@@ -312,14 +312,29 @@ static esp_err_t h_history(httpd_req_t *req)
 /* -------------------------------------------------------------------- */
 static esp_err_t h_verbs(httpd_req_t *req)
 {
+    /*
+     * Snapshot under the lock, stream outside it - the same shape as
+     * h_history(). This handler used to hold s_lock across up to 48
+     * httpd_resp_send_chunk() calls, each of which can sit in a 5 s send
+     * timeout on a slow or vanished client. The USB RX task takes the same
+     * lock with portMAX_DELAY for every frame, so one stuck browser stalled
+     * the TinyUSB task, which the dryer's host stack treats as a dead device.
+     */
+    static hr_hist_verb_t snap[HR_HIST_VERBS]; /* static: ~10 KB */
+    LOCK();
+    int nv = s_history->nverbs;
+    if (nv > HR_HIST_VERBS) {
+        nv = HR_HIST_VERBS;
+    }
+    memcpy(snap, s_history->verbs, (size_t)nv * sizeof(snap[0]));
+    UNLOCK();
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr_chunk(req, "[");
 
-    LOCK();
-    int nv = s_history->nverbs;
     for (int i = 0; i < nv; i++) {
-        const hr_hist_verb_t *v = &s_history->verbs[i];
+        const hr_hist_verb_t *v = &snap[i];
         char body[HR_HIST_BODY * 2], verb[HR_MAX_VERB * 2];
         hr_json_escape(v->last_body, body, sizeof(body));
         hr_json_escape(v->verb, verb, sizeof(verb));
@@ -330,9 +345,13 @@ static esp_err_t h_verbs(httpd_req_t *req)
                          PRIu32 ",\"last\":\"%s\"}",
                          i ? "," : "", verb, v->count, v->last_seq,
                          (unsigned)v->nfields, v->changed_mask, body);
-        httpd_resp_send_chunk(req, obj, n);
+        if (n < 0 || (size_t)n >= sizeof(obj)) {
+            continue;
+        }
+        if (httpd_resp_send_chunk(req, obj, n) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
-    UNLOCK();
 
     httpd_resp_sendstr_chunk(req, "]");
     return httpd_resp_sendstr_chunk(req, NULL);
