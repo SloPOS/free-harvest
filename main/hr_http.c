@@ -654,20 +654,57 @@ static esp_err_t h_scan(httpd_req_t *req)
     return send_json(req, json, n);
 }
 
-static esp_err_t h_wifi_post(httpd_req_t *req)
+/*
+ * Reads a small form body whole, or fails. `cap` must cover the largest legal
+ * body: the previous version silently clipped the body to its buffer and
+ * ignored ESP_ERR_HTTPD_RESULT_TRUNC from httpd_query_key_value(), so a
+ * 63-character passphrase with a few percent-encoded characters was saved
+ * truncated and the adapter sat at "connecting…" for good.
+ */
+static int read_form(httpd_req_t *req, char *buf, size_t cap)
 {
-    char buf[160];
-    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
-                                                        : (int)sizeof(buf) - 1;
+    int total = req->content_len;
+    if (total < 0 || total >= (int)cap) {
+        return -1;
+    }
     int got = 0;
     while (got < total) {
         int r = httpd_req_recv(req, buf + got, total - got);
         if (r <= 0) {
-            return httpd_resp_send_500(req);
+            return -1;
         }
         got += r;
     }
     buf[got] = '\0';
+    return got;
+}
+
+/* A form field, or false if it is longer than `cap` allows (never clipped). */
+static bool form_field(const char *body, const char *key, char *out,
+                       size_t cap)
+{
+    esp_err_t e = httpd_query_key_value(body, key, out, cap);
+    if (e == ESP_ERR_NOT_FOUND) {
+        out[0] = '\0';
+        return true;
+    }
+    if (e != ESP_OK) {
+        out[0] = '\0';
+        return false; /* ESP_ERR_HTTPD_RESULT_TRUNC or worse */
+    }
+    hr_url_decode(out);
+    return true;
+}
+
+static esp_err_t h_wifi_post(httpd_req_t *req)
+{
+    /* SSID 32 bytes and passphrase 64, each up to 3x when percent-encoded,
+     * plus keys and a PIN. */
+    char buf[400];
+    if (read_form(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
+    }
 
     /* Pointing the adapter at another network is a takeover primitive, so it
      * sits behind the same PIN as the control endpoints. */
@@ -675,13 +712,13 @@ static esp_err_t h_wifi_post(httpd_req_t *req)
         return ESP_OK;
     }
 
-    char ssid[64] = {0}, pw[96] = {0};
-    httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
-    httpd_query_key_value(buf, "password", pw, sizeof(pw));
-    /* httpd_query_key_value does NOT percent-decode; do it ourselves so
-     * passwords with %-escaped characters (!, @, #, &, =, spaces) work. */
-    hr_url_decode(ssid);
-    hr_url_decode(pw);
+    char ssid[33 * 3 + 1] = {0}, pw[64 * 3 + 1] = {0};
+    if (!form_field(buf, "ssid", ssid, sizeof(ssid)) ||
+        !form_field(buf, "password", pw, sizeof(pw))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"value too long\"}");
+    }
 
     if (!hr_wifi_set_credentials(ssid, pw)) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -1162,31 +1199,33 @@ static esp_err_t h_mqtt_get(httpd_req_t *req)
 /* POST /api/mqtt  body: host=..&port=..&user=..&password=.. */
 static esp_err_t h_mqtt_post(httpd_req_t *req)
 {
-    char buf[320];
-    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
-                                                        : (int)sizeof(buf) - 1;
-    int got = 0;
-    while (got < total) {
-        int r = httpd_req_recv(req, buf + got, total - got);
-        if (r <= 0) {
-            return httpd_resp_send_500(req);
-        }
-        got += r;
+    char buf[640];
+    if (read_form(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
     }
-    buf[got] = '\0';
 
     if (!pin_guard(req, buf)) {
         return ESP_OK;
     }
 
-    char host[80] = {0}, ports[8] = {0}, user[64] = {0}, pass[96] = {0};
-    httpd_query_key_value(buf, "host", host, sizeof(host));
-    httpd_query_key_value(buf, "port", ports, sizeof(ports));
-    httpd_query_key_value(buf, "user", user, sizeof(user));
-    httpd_query_key_value(buf, "password", pass, sizeof(pass));
-    hr_url_decode(host);
-    hr_url_decode(user);
-    hr_url_decode(pass);
+    /* Sized to what hr_mqtt stores (host 64, user 64, pass 96) times the
+     * percent-encoding expansion, so a legal value is never clipped. */
+    char host[64 * 3] = {0}, ports[8] = {0}, user[64 * 3] = {0},
+         pass[96 * 3] = {0};
+    if (!form_field(buf, "host", host, sizeof(host)) ||
+        !form_field(buf, "port", ports, sizeof(ports)) ||
+        !form_field(buf, "user", user, sizeof(user)) ||
+        !form_field(buf, "password", pass, sizeof(pass))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"value too long\"}");
+    }
+    if (strlen(host) >= 64 || strlen(user) >= 64 || strlen(pass) >= 96) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"value too long\"}");
+    }
     int port = ports[0] ? atoi(ports) : 1883;
 
     if (!hr_mqtt_set_broker(host, port, user, pass)) {
