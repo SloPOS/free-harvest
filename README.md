@@ -138,10 +138,13 @@ Screens whose buttons have never been captured offer **nothing at all** rather t
 guesses. Anything that starts, ends or skips part of a cycle asks first, and names
 the cost: *"You will lose 18h 04m of progress on this batch."*
 
-**A PIN is available** and gates every endpoint that can change the machine —
-control, recipes, raw commands, firmware updates. Monitoring stays completely
-open. Five wrong attempts lock control for a minute, which turns guessing a
-four-digit PIN from seconds into weeks.
+**A PIN is available** and gates every endpoint that can change the machine or
+the adapter — control, recipes, raw commands, firmware updates, Wi-Fi and MQTT
+settings, clearing or formatting stored data, the USB re-attach. Monitoring
+stays completely open. Five wrong attempts lock control for a minute, which
+turns guessing a four-digit PIN from seconds into weeks. Scripts can pass it
+as `pin=` in the form body or in an `X-HR-Pin` header (the OTA upload, whose
+body is the image, uses the header).
 
 It is not a login system, and the UI says so: no accounts, no sessions. The
 threat it addresses is a housemate or a guest tapping Start, not a determined

@@ -11,6 +11,7 @@
 #include "hr_wifi.h"
 
 #include "esp_app_desc.h"
+#include "esp_app_format.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -153,6 +154,7 @@ static bool pin_is_set(char *out, size_t cap);
  * Returns true when the request may proceed, and has already sent the
  * refusal when it returns false. */
 static bool pin_guard(httpd_req_t *req, const char *body);
+static bool pin_guard_small(httpd_req_t *req);
 
 static esp_err_t h_state(httpd_req_t *req)
 {
@@ -449,6 +451,9 @@ static esp_err_t h_capture_info(httpd_req_t *req)
 /* POST /api/capture/clear -> erase the persistent log */
 static esp_err_t h_capture_clear(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_capture_clear();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
                      ok ? 11 : 12);
@@ -584,6 +589,9 @@ static esp_err_t h_trend(httpd_req_t *req)
 
 static esp_err_t h_usb_reattach(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_usb_bus_reattach();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
                      ok ? 11 : 12);
@@ -640,6 +648,12 @@ static esp_err_t h_wifi_post(httpd_req_t *req)
     }
     buf[got] = '\0';
 
+    /* Pointing the adapter at another network is a takeover primitive, so it
+     * sits behind the same PIN as the control endpoints. */
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
     char ssid[64] = {0}, pw[96] = {0};
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "password", pw, sizeof(pw));
@@ -657,6 +671,9 @@ static esp_err_t h_wifi_post(httpd_req_t *req)
 
 static esp_err_t h_forget(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     hr_wifi_forget();
     return send_json(req, "{\"ok\":true}", 11);
 }
@@ -804,6 +821,16 @@ static void ota_reboot_task(void *arg)
 
 static esp_err_t h_ota(httpd_req_t *req)
 {
+    /*
+     * Firmware replacement is the one action that can undo every other
+     * safeguard in this file - a hostile image is free to send DUTY/HCS/SPC.
+     * The README has always said the PIN gates updates; now it does. The body
+     * is the raw image, so the PIN arrives in the X-HR-Pin header.
+     */
+    if (!pin_guard(req, NULL)) {
+        return ESP_OK;
+    }
+
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (target == NULL) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -825,6 +852,18 @@ static esp_err_t h_ota(httpd_req_t *req)
     int written = 0;
     int stalls = 0;
     bool checked = false;
+    /*
+     * The first bytes of an ESP image are the image header (24 bytes), the
+     * first segment header (8 bytes) and then esp_app_desc_t - the same
+     * structure esp_app_get_description() returns for the running build. The
+     * head of the upload is accumulated here until that much has arrived, so
+     * the project name can be compared before the image is accepted. A
+     * random ESP32 binary starts with 0xE9 too; the name is what tells
+     * "another build of this firmware" from "some other project".
+     */
+    uint8_t head[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) +
+                 sizeof(esp_app_desc_t)];
+    size_t head_len = 0;
     while (remaining > 0) {
         int r = httpd_req_recv(req, buf, remaining < (int)sizeof(buf)
                                               ? remaining
@@ -866,6 +905,33 @@ static esp_err_t h_ota(httpd_req_t *req)
                     req, "{\"ok\":false,\"reason\":\"not a firmware image\"}");
             }
         }
+        if (head_len < sizeof(head)) {
+            size_t take = sizeof(head) - head_len;
+            if ((size_t)r < take) {
+                take = (size_t)r;
+            }
+            memcpy(head + head_len, buf, take);
+            head_len += take;
+            if (head_len == sizeof(head)) {
+                const esp_app_desc_t *incoming =
+                    (const esp_app_desc_t *)(head + sizeof(esp_image_header_t) +
+                                             sizeof(esp_image_segment_header_t));
+                const esp_app_desc_t *running = esp_app_get_description();
+                if (incoming->magic_word != ESP_APP_DESC_MAGIC_WORD ||
+                    strncmp(incoming->project_name, running->project_name,
+                            sizeof(incoming->project_name)) != 0) {
+                    esp_ota_abort(ota);
+                    ESP_LOGE(TAG, "OTA image is not this project (magic 0x%08lx, "
+                                  "name \"%.32s\")",
+                             (unsigned long)incoming->magic_word,
+                             incoming->project_name);
+                    httpd_resp_set_status(req, "400 Bad Request");
+                    return httpd_resp_sendstr(
+                        req, "{\"ok\":false,\"reason\":\"image is not this "
+                             "project\"}");
+                }
+            }
+        }
         err = esp_ota_write(ota, buf, r);
         if (err != ESP_OK) {
             esp_ota_abort(ota);
@@ -878,6 +944,14 @@ static esp_err_t h_ota(httpd_req_t *req)
         remaining -= r;
     }
     ESP_LOGI(TAG, "OTA received %d bytes, verifying image", written);
+
+    if (head_len < sizeof(head)) {
+        /* Too short to even carry an app descriptor - not a firmware image. */
+        esp_ota_abort(ota);
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"image too short\"}");
+    }
 
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
@@ -964,6 +1038,10 @@ static esp_err_t h_wififlags(httpd_req_t *req)
         got += r;
     }
     buf[got] = '\0';
+
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
 
     char reg[4] = {0}, cld[4] = {0};
     httpd_query_key_value(buf, "registered", reg, sizeof(reg));
@@ -1058,6 +1136,10 @@ static esp_err_t h_mqtt_post(httpd_req_t *req)
         got += r;
     }
     buf[got] = '\0';
+
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
 
     char host[80] = {0}, ports[8] = {0}, user[64] = {0}, pass[96] = {0};
     httpd_query_key_value(buf, "host", host, sizeof(host));
@@ -1285,6 +1367,10 @@ static esp_err_t h_control_enable(httpd_req_t *req)
         got += r;
     }
     buf[got] = '\0';
+    /* Switching control on is itself a control action. */
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
     char on_s[8] = {0};
     httpd_query_key_value(buf, "on", on_s, sizeof(on_s));
     bool on = (on_s[0] == '1');
@@ -1404,6 +1490,9 @@ static esp_err_t h_recipe_save(httpd_req_t *req)
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
     }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
     char slot_s[8] = {0}, fam_s[8] = {0}, nums[256] = {0};
     hr_recipe_t r;
     memset(&r, 0, sizeof(r));
@@ -1459,6 +1548,9 @@ static esp_err_t h_recipe_delete(httpd_req_t *req)
     if (read_body(req, buf, sizeof(buf)) < 0) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
     }
     char slot_s[8] = {0};
     httpd_query_key_value(buf, "slot", slot_s, sizeof(slot_s));
@@ -1720,12 +1812,19 @@ static pin_result_t pin_check(const char *supplied)
 /*
  * Guard for a control endpoint. Returns true when the request may proceed;
  * otherwise it has already sent the refusal.
+ *
+ * The PIN is read from the form body (pin=...) or, for requests whose body is
+ * not a form - the OTA upload is a raw binary - from an X-HR-Pin header.
  */
 static bool pin_guard(httpd_req_t *req, const char *body)
 {
     char supplied[PIN_MAX + 1] = {0};
     if (body != NULL) {
         httpd_query_key_value(body, "pin", supplied, sizeof(supplied));
+    }
+    if (supplied[0] == '\0') {
+        httpd_req_get_hdr_value_str(req, "X-HR-Pin", supplied,
+                                    sizeof(supplied));
     }
     switch (pin_check(supplied)) {
     case PIN_OK:
@@ -1742,6 +1841,29 @@ static bool pin_guard(httpd_req_t *req, const char *body)
             "{\"ok\":false,\"reason\":\"PIN required\",\"pin\":true}");
         return false;
     }
+}
+
+/*
+ * pin_guard() for handlers that carry no form fields of their own (forget,
+ * clear, format, reattach). Reads whatever small body the client sent so the
+ * PIN can travel in it, then applies the same check.
+ */
+static bool pin_guard_small(httpd_req_t *req)
+{
+    char buf[64] = {0};
+    int total = req->content_len;
+    if (total > 0 && total < (int)sizeof(buf)) {
+        int got = 0;
+        while (got < total) {
+            int r = httpd_req_recv(req, buf + got, total - got);
+            if (r <= 0) {
+                break;
+            }
+            got += r;
+        }
+        buf[got > 0 ? got : 0] = '\0';
+    }
+    return pin_guard(req, buf);
 }
 
 /* GET /api/pin -> whether one is set. Never returns the PIN itself. */
@@ -1970,6 +2092,9 @@ static esp_err_t h_batches(httpd_req_t *req)
  */
 static esp_err_t h_storage_format(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_capture_format();
     if (ok) {
         hr_batchstore_init();
@@ -1982,6 +2107,9 @@ static esp_err_t h_storage_format(httpd_req_t *req)
 /* POST /api/batches/clear */
 static esp_err_t h_batches_clear(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_batchstore_clear();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
 }
