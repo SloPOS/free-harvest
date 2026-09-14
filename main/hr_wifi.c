@@ -593,6 +593,19 @@ void hr_wifi_scan_start(void)
     if (s_status == HR_WIFI_CONNECTING) {
         return; /* can't scan mid-connect; UI keeps last results */
     }
+    /*
+     * Rate-limit. Each scan parks the single httpd worker for 1-2 s and takes
+     * the radio off-channel, which stalls MQTT keep-alives and an OTA upload
+     * in progress. /api/scan is an unauthenticated GET that the setup page
+     * polls by itself, so anyone on the LAN could keep the radio scanning
+     * continuously. Within the window the last results are served instead.
+     */
+    static uint32_t last_scan_ms;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (last_scan_ms != 0 && (uint32_t)(now - last_scan_ms) < 10000u) {
+        return;
+    }
+    last_scan_ms = now;
     s_scanning = true;
 
     wifi_scan_config_t cfg = {.show_hidden = false};
