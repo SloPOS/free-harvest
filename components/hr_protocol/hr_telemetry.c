@@ -1,4 +1,5 @@
 #include "hr_telemetry.h"
+#include "hr_history.h" /* hr_json_escape */
 
 #include <stdio.h>
 #include <string.h>
@@ -408,13 +409,17 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap)
     if (t == NULL || buf == NULL) {
         return 0;
     }
+    /* mode comes off the wire; a quote or backslash in it would break the
+     * retained MQTT state document and every HA template reading it. */
+    char mode[sizeof(t->mode) * 2 + 1];
+    hr_json_escape(t->mode, mode, sizeof(mode));
     int n = snprintf(buf, cap,
                      "{\"type\":%d,\"temp_f\":%ld,\"pressure\":%ld,"
                      "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld,"
                      "\"freeze_pct\":%ld,\"phase_pct\":%ld,"
                      "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s}",
                      t->type, t->temperature_f, t->pressure_raw,
-                     t->batch_elapsed_s, t->mode, t->prep_remaining_s,
+                     t->batch_elapsed_s, mode, t->prep_remaining_s,
                      t->freeze_pct, t->phase_pct, t->phase_elapsed_s,
                      t->pressure_microns, t->pressure_valid ? "true" : "false");
     if (n < 0 || (size_t)n >= cap) {
