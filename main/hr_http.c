@@ -2130,10 +2130,71 @@ static esp_err_t h_batches_clear(httpd_req_t *req)
  */
 static int s_routes;
 
+/*
+ * Cross-site request forgery.
+ *
+ * Every POST here is a "simple request" in browser terms - form body, no
+ * custom header - so a page in another tab can fetch("http://<adapter>/api/…",
+ * {method:"POST", body}) without a CORS preflight, and the browser sends it.
+ * With no PIN configured that is the whole control surface, driven from any
+ * website the owner's phone happens to open on the same LAN.
+ *
+ * Browsers attach an Origin header to every cross-origin POST (and modern ones
+ * to same-origin POSTs as well). If it is present it has to name this host; if
+ * the client is a script with no Origin at all - curl, Home Assistant - it is
+ * not a browser and CSRF does not apply. Only the host part is compared, so
+ * reaching the adapter by IP or by a DHCP hostname both work, and the port is
+ * whatever the browser put in both headers.
+ */
+static bool same_origin(httpd_req_t *req)
+{
+    char origin[128];
+    if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) !=
+        ESP_OK) {
+        return true; /* no Origin header: not a browser cross-site POST */
+    }
+    if (strcmp(origin, "null") == 0) {
+        return false; /* sandboxed / file:// page */
+    }
+    char host[96];
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+        return false;
+    }
+    const char *p = strstr(origin, "://");
+    if (p == NULL) {
+        return false;
+    }
+    p += 3;
+    return strcmp(p, host) == 0;
+}
+
+typedef esp_err_t (*route_fn_t)(httpd_req_t *);
+static route_fn_t s_post_fns[40];
+static int s_post_count;
+
+static esp_err_t h_post_guarded(httpd_req_t *req)
+{
+    route_fn_t fn = *(route_fn_t *)req->user_ctx;
+    if (!same_origin(req)) {
+        ESP_LOGW(TAG, "refused cross-origin POST to %s", req->uri);
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"cross-origin request refused\"}");
+    }
+    return fn(req);
+}
+
 static void reg(const char *uri, httpd_method_t method,
                 esp_err_t (*fn)(httpd_req_t *))
 {
     httpd_uri_t u = {.uri = uri, .method = method, .handler = fn};
+    if (method == HTTP_POST &&
+        s_post_count < (int)(sizeof(s_post_fns) / sizeof(s_post_fns[0]))) {
+        s_post_fns[s_post_count] = fn;
+        u.handler = h_post_guarded;
+        u.user_ctx = &s_post_fns[s_post_count];
+        s_post_count++;
+    }
     esp_err_t err = httpd_register_uri_handler(s_httpd, &u);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ROUTE LOST: %s (#%d) - %s. Raise max_uri_handlers.",
