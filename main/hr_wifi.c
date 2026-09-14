@@ -608,11 +608,26 @@ void hr_wifi_scan_start(void)
     s_scanning = false;
 }
 
+/*
+ * Build the JSON array. Every write is checked against the space left: the
+ * previous version added snprintf's *desired* length to the offset even when
+ * the output had been truncated, and with enough long SSIDs in range the
+ * offset ran past the caller's buffer, the final "]" was written beyond it and
+ * the caller sent that many bytes to the client. An entry that does not fit
+ * is left out rather than truncated, so the result is always valid JSON.
+ */
 size_t hr_wifi_scan_result_json(char *out, size_t cap)
 {
+    if (out == NULL || cap < 3) {
+        if (out != NULL && cap > 0) {
+            out[0] = '\0';
+        }
+        return 0;
+    }
     size_t o = 0;
-    o += snprintf(out + o, cap - o, "[");
-    for (uint16_t i = 0; i < s_scan_count && o < cap - 96; i++) {
+    out[o++] = '[';
+    bool first = true;
+    for (uint16_t i = 0; i < s_scan_count; i++) {
         char ssid_esc[64];
         /* SSIDs can contain quotes/backslashes; escape for JSON. */
         size_t e = 0;
@@ -625,11 +640,20 @@ size_t hr_wifi_scan_result_json(char *out, size_t cap)
         }
         ssid_esc[e] = '\0';
         bool secure = s_scan[i].authmode != WIFI_AUTH_OPEN;
-        o += snprintf(out + o, cap - o,
-                      "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
-                      i ? "," : "", ssid_esc, s_scan[i].rssi,
-                      secure ? "true" : "false");
+        /* Leave room for the closing bracket and the NUL. */
+        size_t room = cap - o - 2;
+        int w = snprintf(out + o, room,
+                         "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+                         first ? "" : ",", ssid_esc, s_scan[i].rssi,
+                         secure ? "true" : "false");
+        if (w < 0 || (size_t)w >= room) {
+            out[o] = '\0'; /* undo the partial entry */
+            break;
+        }
+        o += (size_t)w;
+        first = false;
     }
-    o += snprintf(out + o, cap - o, "]");
+    out[o++] = ']';
+    out[o] = '\0';
     return o;
 }
