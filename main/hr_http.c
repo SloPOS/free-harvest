@@ -65,18 +65,40 @@ static hr_dry_tracker_t s_dry = {-1, 0};
 
 int32_t hr_http_extra_dry_s(void)
 {
+    /* Called from on_inbound() on the USB task, outside the lock; the
+     * tracker is two ints and the read is racy only against itself. */
     return hr_dry_extra_s(&s_dry);
 }
+
+/*
+ * The frame history is written from the USB RX task and read from httpd
+ * tasks, so guard it. The app supplies this mutex (it is the writer) via
+ * hr_http_use_lock() so both sides serialise on one lock.
+ *
+ * The same lock covers s_tel / s_tracker / s_dry: they are ~80-100 byte
+ * structs written by the USB task (and s_tracker by the main loop every
+ * 250 ms) and read by httpd. Without it a reader could see half of one STAT
+ * and half of the next - and live_screen() is what decides whether a CLICK
+ * goes out. The setters may run before hr_http_use_lock(); they skip locking
+ * until it exists.
+ */
+static SemaphoreHandle_t s_lock;
+#define LOCK() xSemaphoreTake(s_lock, portMAX_DELAY)
+#define UNLOCK() xSemaphoreGive(s_lock)
+#define LOCK_IF() do { if (s_lock) LOCK(); } while (0)
+#define UNLOCK_IF() do { if (s_lock) UNLOCK(); } while (0)
 
 void hr_http_set_telemetry(const hr_telemetry_t *t)
 {
     if (t != NULL && t->valid) {
+        LOCK_IF();
         s_tel = *t;
         s_tel_valid = true;
         s_tel_ms = (uint32_t)(esp_timer_get_time() / 1000);
         /* Watch the SCREEN rather than our own commands: most
          * More Dry Time presses happen on the panel by hand. */
         hr_dry_observe(&s_dry, (int)t->type);
+        UNLOCK_IF();
     }
 }
 
@@ -88,19 +110,12 @@ void hr_http_set_trend(hr_trend_t *tr)
 void hr_http_set_tracker(const hr_phase_tracker_t *tr)
 {
     if (tr != NULL) {
+        LOCK_IF();
         s_tracker = *tr;
         s_tracker_ready = true;
+        UNLOCK_IF();
     }
 }
-
-/*
- * The frame history is written from the USB RX task and read from httpd
- * tasks, so guard it. The app supplies this mutex (it is the writer) via
- * hr_http_use_lock() so both sides serialise on one lock.
- */
-static SemaphoreHandle_t s_lock;
-#define LOCK() xSemaphoreTake(s_lock, portMAX_DELAY)
-#define UNLOCK() xSemaphoreGive(s_lock)
 
 /* -------------------------------------------------------------------- */
 /* Small helpers                                                         */
@@ -177,15 +192,20 @@ static esp_err_t h_state(httpd_req_t *req)
     unsigned long bad = s_session->stream.frames_bad;
     const char *link = s_session->link == HR_LINK_UP ? "up" : "down";
     uint32_t latest = hr_history_latest_seq(s_history);
+    /* Snapshot the telemetry under the same lock its writers take. */
+    hr_telemetry_t tel = s_tel;
+    bool tel_valid = s_tel_valid;
+    hr_phase_tracker_t tracker = s_tracker;
+    bool tracker_ready = s_tracker_ready;
     UNLOCK();
 
     /* Cycle phase + live readings (empty/idle values when nothing seen yet). */
-    hr_phase_t ph = s_tel_valid
-                        ? hr_phase_of_tracked(&s_tel,
-                                              s_tracker_ready ? &s_tracker : NULL)
+    hr_phase_t ph = tel_valid
+                        ? hr_phase_of_tracked(&tel,
+                                              tracker_ready ? &tracker : NULL)
                         : HR_PHASE_UNKNOWN;
     char mode_esc[32];
-    hr_json_escape(s_tel_valid ? s_tel.mode : "", mode_esc, sizeof(mode_esc));
+    hr_json_escape(tel_valid ? tel.mode : "", mode_esc, sizeof(mode_esc));
 
     /*
      * The actions the machine is offering RIGHT NOW. The UI renders from this
@@ -196,7 +216,7 @@ static esp_err_t h_state(httpd_req_t *req)
     size_t ai = 0;
     acts[ai++] = '[';
     const hr_action_t *av[8];
-    size_t an = hr_control_for_screen(s_tel_valid ? (int)s_tel.type : -1, av, 8);
+    size_t an = hr_control_for_screen(tel_valid ? (int)tel.type : -1, av, 8);
     for (size_t i = 0; i < an; i++) {
         int w = snprintf(acts + ai, sizeof(acts) - ai,
                          "%s{\"name\":\"%s\",\"label\":\"%s\",\"sev\":%d}",
@@ -241,20 +261,20 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, dryer_sn, fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
-                     (int)ph, hr_phase_label(ph), s_tel_valid ? "true" : "false",
-                     s_tel_valid ? s_tel.temperature_f : 0,
-                     s_tel_valid ? s_tel.pressure_raw : 0,
-                     s_tel_valid ? s_tel.batch_elapsed_s : 0,
-                     s_tel_valid ? s_tel.prep_remaining_s : 0,
-                     mode_esc, s_tel_valid ? s_tel.type : 0,
-                     s_tel_valid ? s_tel.freeze_pct : 0,
-                     (s_tel_valid && s_tracker_ready)
-                         ? hr_freeze_eta_s(&s_tracker, &s_tel)
+                     (int)ph, hr_phase_label(ph), tel_valid ? "true" : "false",
+                     tel_valid ? tel.temperature_f : 0,
+                     tel_valid ? tel.pressure_raw : 0,
+                     tel_valid ? tel.batch_elapsed_s : 0,
+                     tel_valid ? tel.prep_remaining_s : 0,
+                     mode_esc, tel_valid ? tel.type : 0,
+                     tel_valid ? tel.freeze_pct : 0,
+                     (tel_valid && tracker_ready)
+                         ? hr_freeze_eta_s(&tracker, &tel)
                          : -1,
-                     s_tel_valid ? s_tel.phase_pct : 0,
-                     s_tel_valid ? s_tel.phase_elapsed_s : 0,
-                     s_tel_valid ? s_tel.pressure_microns : 0,
-                     (s_tel_valid && s_tel.pressure_valid) ? "true" : "false",
+                     tel_valid ? tel.phase_pct : 0,
+                     tel_valid ? tel.phase_elapsed_s : 0,
+                     tel_valid ? tel.pressure_microns : 0,
+                     (tel_valid && tel.pressure_valid) ? "true" : "false",
                      hr_usb_mounted() ? "true" : "false",
                      hr_usb_suspended() ? "true" : "false",
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
