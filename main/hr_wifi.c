@@ -553,6 +553,28 @@ void hr_wifi_forget(void)
         nvs_commit(nh);
         nvs_close(nh);
     }
+    /*
+     * Erasing the stored network used to be all this did: the station stayed
+     * associated, the retry logic kept its SSID, and after the AP window had
+     * closed start_ap_mode() refused to bring the AP back - so "Forget" did
+     * nothing visible until the next reboot.
+     *
+     * Leave the network for real, drop the STA config so nothing reconnects
+     * to it, and treat the explicit (PIN-guarded) request as permission for
+     * one more setup window: the user just asked for setup mode.
+     */
+    cancel_sta_retry();
+    s_sta_retries = 0;
+    s_ssid[0] = '\0';
+    esp_wifi_disconnect();
+    wifi_config_t empty = {0};
+    esp_wifi_set_config(WIFI_IF_STA, &empty);
+    s_ap_window_expired = false;
+    esp_err_t merr = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (merr != ESP_OK) {
+        ESP_LOGW(TAG, "could not re-enable the setup AP: %s",
+                 esp_err_to_name(merr));
+    }
     start_ap_mode();
 }
 
