@@ -49,6 +49,7 @@ static httpd_handle_t s_httpd;
 /* Latest decoded telemetry, published by the frame observer in main.c. */
 static hr_telemetry_t s_tel;
 static bool s_tel_valid;
+static uint32_t s_tel_ms; /* when it arrived, for the staleness check */
 /*
  * Running/idle is decided by whether the dryer's elapsed counter is actually
  * ADVANCING - it retains the previous batch's value when idle, so a non-zero
@@ -72,6 +73,7 @@ void hr_http_set_telemetry(const hr_telemetry_t *t)
     if (t != NULL && t->valid) {
         s_tel = *t;
         s_tel_valid = true;
+        s_tel_ms = (uint32_t)(esp_timer_get_time() / 1000);
         /* Watch the SCREEN rather than our own commands: most
          * More Dry Time presses happen on the panel by hand. */
         hr_dry_observe(&s_dry, (int)t->type);
@@ -1293,10 +1295,44 @@ static uint32_t ctrl_next_seq(void)
     return seq;
 }
 
-/* The screen currently on the panel, or -1 when we genuinely do not know. */
+/*
+ * The screen currently on the panel, or -1 when we genuinely do not know.
+ *
+ * "Know" means: a STAT has been decoded, the protocol link is up, the host has
+ * us enumerated, and the STAT is recent. s_tel_valid alone is not enough - it
+ * is set by the first STAT ever and never cleared, so after the dryer rebooted
+ * or an hour of silence a CLICK was still built against the screen last seen.
+ * Call under LOCK(); s_session->link is read here.
+ */
 static int live_screen(void)
 {
-    return s_tel_valid ? (int)s_tel.type : -1;
+    if (!s_tel_valid) {
+        return -1;
+    }
+    if (s_session == NULL || s_session->link != HR_LINK_UP) {
+        return -1;
+    }
+    if (!hr_usb_mounted()) {
+        return -1;
+    }
+    uint32_t age = (uint32_t)(esp_timer_get_time() / 1000) - s_tel_ms;
+    if (age > HR_LINK_TIMEOUT_MS) {
+        return -1;
+    }
+    return (int)s_tel.type;
+}
+
+/*
+ * Screens from which a recipe frame may carry the start flag. Ready (1) is
+ * where the genuine app is used; the recipe editors (31 Custom, 43 Candy) are
+ * where the setup panel seeds itself from. A run in progress (17, 2, 4-7),
+ * diagnostics, or no live telemetry at all are refused: the effect of a
+ * "start now" recipe on a machine already running is undocumented, and
+ * without a live screen we cannot tell which case we are in.
+ */
+static bool recipe_start_allowed(int live)
+{
+    return live == 1 || live == 31 || live == 43;
 }
 
 /*
@@ -1669,6 +1705,23 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
             req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
     }
 
+    LOCK();
+    int live = live_screen();
+    UNLOCK();
+    if (live < 0) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"no live telemetry from the dryer\"}");
+    }
+    if (start && !recipe_start_allowed(live)) {
+        char body[128];
+        int n = snprintf(body, sizeof(body),
+                         "{\"ok\":false,\"reason\":\"dryer is not on the Ready "
+                         "screen\",\"live_screen\":%d}", live);
+        httpd_resp_set_status(req, "409 Conflict");
+        return send_json(req, body, n);
+    }
+
     hr_recipe_t r;
     if (!rcp_load(atoi(slot_s), &r)) {
         httpd_resp_set_status(req, "404 Not Found");
@@ -1691,8 +1744,10 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
     LOCK();
     bool ok = hr_session_send_raw(s_session, frame);
     UNLOCK();
-    ESP_LOGW(TAG, "recipe %s sent%s: %s", r.name, start ? " WITH START" : "",
-             ok ? "ok" : "failed");
+    /* The full frame and the live screen, so a capture can be matched to
+     * what the machine did next. */
+    ESP_LOGW(TAG, "recipe %s sent%s (live screen %d): %s -> %s", r.name,
+             start ? " WITH START" : "", live, frame, ok ? "ok" : "failed");
 
     char out[160];
     int n = snprintf(out, sizeof(out),
@@ -1748,6 +1803,23 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
             req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
     }
 
+    LOCK();
+    int live = live_screen();
+    UNLOCK();
+    if (live < 0) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"no live telemetry from the dryer\"}");
+    }
+    if (start && !recipe_start_allowed(live)) {
+        char out[128];
+        int n = snprintf(out, sizeof(out),
+                         "{\"ok\":false,\"reason\":\"dryer is not on the Ready "
+                         "screen\",\"live_screen\":%d}", live);
+        httpd_resp_set_status(req, "409 Conflict");
+        return send_json(req, out, n);
+    }
+
     r.family = (hr_family_t)atoi(fam_s);
     r.used = true;
     char *p = nums;
@@ -1779,8 +1851,8 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
     LOCK();
     bool ok = hr_session_send_raw(s_session, frame);
     UNLOCK();
-    ESP_LOGW(TAG, "recipe applied %s%s: %s", r.name,
-             start ? " WITH START" : "", ok ? "ok" : "failed");
+    ESP_LOGW(TAG, "recipe applied %s%s (live screen %d): %s -> %s", r.name,
+             start ? " WITH START" : "", live, frame, ok ? "ok" : "failed");
 
     char out[160];
     int n = snprintf(out, sizeof(out),
