@@ -24,6 +24,12 @@ static const char *TAG = "hr_wifi";
  * the device broadcasting an open setup network indefinitely for attackers.
  */
 #define AP_OPEN_WINDOW_US (5 * 60 * 1000000ULL)
+/*
+ * Once the fast retries are used up, keep trying the stored network at this
+ * interval for as long as we are powered. The adapter is fed by the dryer's
+ * USB port, so "reboot to reconnect" means a trip to the machine mid-batch.
+ */
+#define STA_RETRY_BACKOFF_US (30 * 1000000ULL)
 
 static hr_wifi_status_t s_status;
 static esp_netif_t *s_sta_netif;
@@ -31,6 +37,7 @@ static esp_netif_t *s_ap_netif;
 static int s_sta_retries;
 static char s_ssid[33];
 static esp_timer_handle_t s_ap_timeout_timer;
+static esp_timer_handle_t s_sta_retry_timer;
 static bool s_ap_window_expired; /* true once the 5-min window has closed */
 
 static wifi_ap_record_t s_scan[MAX_SCAN];
@@ -109,6 +116,40 @@ static void cancel_ap_timeout(void)
 {
     if (s_ap_timeout_timer != NULL) {
         esp_timer_stop(s_ap_timeout_timer);
+    }
+}
+
+/* Slow retry of the stored network. Runs in the esp_timer task. */
+static void sta_retry_cb(void *arg)
+{
+    (void)arg;
+    if (s_status == HR_WIFI_CONNECTED || s_ssid[0] == '\0') {
+        return;
+    }
+    ESP_LOGI(TAG, "retrying \"%s\" (attempt %d)", s_ssid, s_sta_retries + 1);
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
+    }
+}
+
+static void arm_sta_retry(void)
+{
+    if (s_sta_retry_timer == NULL) {
+        const esp_timer_create_args_t a = {.callback = sta_retry_cb,
+                                           .name = "sta_retry"};
+        if (esp_timer_create(&a, &s_sta_retry_timer) != ESP_OK) {
+            return;
+        }
+    }
+    esp_timer_stop(s_sta_retry_timer);
+    esp_timer_start_once(s_sta_retry_timer, STA_RETRY_BACKOFF_US);
+}
+
+static void cancel_sta_retry(void)
+{
+    if (s_sta_retry_timer != NULL) {
+        esp_timer_stop(s_sta_retry_timer);
     }
 }
 
@@ -255,16 +296,33 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                      s_sta_retries, d->reason);
             esp_wifi_connect();
         } else {
-            ESP_LOGW(TAG, "join failed %d times (reason %d); staying in setup "
-                          "AP - re-submit credentials from the page to retry",
-                     s_sta_retries, d->reason);
-            s_status = HR_WIFI_AP_SETUP;
+            /*
+             * The fast retries are spent. This used to stop here for good:
+             * no further esp_wifi_connect(), and - once the setup-AP window
+             * had closed and the mode had been forced to STA - no AP either.
+             * A router reboot longer than eight quick attempts (well under
+             * two minutes) left the adapter unreachable on every interface
+             * until someone unplugged it from the dryer.
+             *
+             * Keep trying, slowly. If the AP window is still open the user
+             * can also re-submit credentials from the setup page meanwhile.
+             */
+            if (s_sta_retries == STA_RETRY_LIMIT) {
+                ESP_LOGW(TAG, "join failed %d times (reason %d); will keep "
+                              "retrying every %us",
+                         s_sta_retries, d->reason,
+                         (unsigned)(STA_RETRY_BACKOFF_US / 1000000ULL));
+            }
+            s_status = s_ap_window_expired ? HR_WIFI_CONNECTING
+                                           : HR_WIFI_AP_SETUP;
+            arm_sta_retry();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "connected, ip " IPSTR, IP2STR(&e->ip_info.ip));
         s_status = HR_WIFI_CONNECTED;
         s_sta_retries = 0;
+        cancel_sta_retry();
         cancel_ap_timeout(); /* connected in time; no need to force-close AP */
         /*
          * Security: once we're on the home network, shut the setup AP down
@@ -466,6 +524,7 @@ bool hr_wifi_set_credentials(const char *ssid, const char *password)
      * any, stay in NVS and keep working across the next reboot.
      */
     s_sta_retries = 0;
+    cancel_sta_retry();
     esp_wifi_disconnect();
     if (!start_sta_connect(ssid, password)) {
         return false;
