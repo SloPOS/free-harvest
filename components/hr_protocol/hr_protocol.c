@@ -68,6 +68,25 @@ void hr_stream_init(hr_stream_t *s)
     s->overflowed = false;
     s->frames_ok = 0;
     s->frames_bad = 0;
+    s->reject = NULL;
+    s->reject_user = NULL;
+}
+
+void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->reject = cb;
+    s->reject_user = user;
+}
+
+static void reject(hr_stream_t *s, const char *why)
+{
+    s->frames_bad++;
+    if (s->reject != NULL) {
+        s->reject(s->buf, s->len, why, s->reject_user);
+    }
 }
 
 void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
@@ -94,7 +113,7 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
 
         /* Terminator reached: close out whatever we accumulated. */
         if (s->overflowed) {
-            s->frames_bad++;
+            reject(s, "too long");
         } else if (s->len > 0) {
             s->buf[s->len] = '\0';
             hr_frame_t frame;
@@ -104,7 +123,7 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
                     cb(&frame, user);
                 }
             } else {
-                s->frames_bad++;
+                reject(s, "unparsable");
             }
         }
         /* len == 0 with no overflow: empty frame, silently ignored. */

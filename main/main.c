@@ -286,6 +286,30 @@ static void on_inbound(const hr_frame_t *f, void *user)
 #endif
 }
 
+/*
+ * Lines the parser refused. Until now they only bumped frames_bad; for a
+ * protocol still being decoded those bytes are the interesting ones, so put
+ * them in the log (printable as-is, everything else as \xNN, capped).
+ */
+static void on_reject(const char *bytes, size_t n, const char *why, void *user)
+{
+    (void)user;
+    char shown[3 * 64 + 4];
+    size_t o = 0;
+    size_t lim = n < 64 ? n : 64;
+    for (size_t i = 0; i < lim && o + 5 < sizeof(shown); i++) {
+        unsigned char c = (unsigned char)bytes[i];
+        if (c >= 0x20 && c < 0x7f) {
+            shown[o++] = (char)c;
+        } else {
+            o += (size_t)snprintf(shown + o, sizeof(shown) - o, "\\x%02x", c);
+        }
+    }
+    shown[o] = '\0';
+    ESP_LOGW(TAG, "RX rejected (%s, %u bytes): %s%s", why, (unsigned)n, shown,
+             n > lim ? "..." : "");
+}
+
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -307,6 +331,7 @@ void app_main(void)
 
     hr_session_init(&s_session, hr_usb_tx, NULL);
     hr_session_set_observer(&s_session, on_inbound, NULL);
+    hr_stream_set_reject_cb(&s_session.stream, on_reject, NULL);
     hr_session_set_ack_payload(&s_session, CONFIG_HR_ACK_PAYLOAD);
 
     hr_usb_init(&s_session);

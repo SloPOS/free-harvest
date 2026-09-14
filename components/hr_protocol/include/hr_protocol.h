@@ -59,6 +59,18 @@ size_t hr_frame_tostring(const hr_frame_t *f, char *out, size_t cap);
 typedef void (*hr_frame_cb)(const hr_frame_t *frame, void *user);
 
 /*
+ * Invoked for every line the reassembler could NOT turn into a frame: too
+ * long for the buffer (`bytes` is the head that did fit), verb missing or
+ * over HR_MAX_VERB, more than HR_MAX_FIELDS fields. `bytes` is not
+ * NUL-terminated and may contain anything. `why` is a short constant string.
+ *
+ * For a protocol still being decoded, the lines the parser rejects are the
+ * ones worth recording; without this hook they only bumped frames_bad.
+ */
+typedef void (*hr_reject_cb)(const char *bytes, size_t n, const char *why,
+                             void *user);
+
+/*
  * Accumulates bytes arriving in arbitrary chunk sizes (USB CDC reads do not
  * respect frame boundaries) and emits whole frames.
  */
@@ -68,9 +80,14 @@ typedef struct {
     bool overflowed;          /* current frame exceeded the buffer */
     unsigned long frames_ok;  /* frames delivered to the callback */
     unsigned long frames_bad; /* frames dropped (oversized / unparsable) */
+    hr_reject_cb reject;      /* optional; see hr_reject_cb */
+    void *reject_user;
 } hr_stream_t;
 
 void hr_stream_init(hr_stream_t *s);
+
+/* Register (or clear, with NULL) the rejected-line observer. */
+void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user);
 
 /* Feed `n` bytes; `cb` fires for each complete frame found. */
 void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
