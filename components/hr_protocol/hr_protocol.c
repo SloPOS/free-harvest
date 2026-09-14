@@ -203,7 +203,29 @@ void hr_build_str(hr_builder_t *b, const char *s)
         build_append(b, "\"\"", 2);
         return;
     }
-    build_append(b, s, strlen(s));
+    /*
+     * A field with a space in it has to be quoted for the same reason: the
+     * genuine adapter sends WIFIINFO 5 81 "My Network" ..., and SETBNAME with
+     * an unquoted "My Batch" arrives as two arguments. Callers that already
+     * quote (send_wifiinfo) are left alone. A stray quote inside an unquoted
+     * field has no known escape on this wire, so the frame is refused rather
+     * than sent in a shape the dryer might read as something else.
+     */
+    size_t n = strlen(s);
+    bool quoted = (n >= 2 && s[0] == '"' && s[n - 1] == '"');
+    if (!quoted) {
+        if (memchr(s, '"', n) != NULL) {
+            b->ok = false;
+            return;
+        }
+        if (memchr(s, ' ', n) != NULL) {
+            build_append(b, "\"", 1);
+            build_append(b, s, n);
+            build_append(b, "\"", 1);
+            return;
+        }
+    }
+    build_append(b, s, n);
 }
 
 void hr_build_int(hr_builder_t *b, long v)
