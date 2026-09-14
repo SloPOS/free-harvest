@@ -1445,41 +1445,72 @@ static int read_body(httpd_req_t *req, char *buf, size_t cap)
 }
 
 /* GET /api/recipes */
+/*
+ * One slot serialises to at most ~650 bytes (escaped 191-byte notes, ten
+ * numbers). Each slot is rendered into its own buffer first and appended only
+ * if it fits whole, so the static body can never be overrun. The earlier
+ * version added snprintf's return value unchecked and tested the size *after*
+ * writing a slot; a slot begun near the end of the buffer wrote past it and
+ * send_json() then shipped the following .bss to the client.
+ */
 static esp_err_t h_recipes(httpd_req_t *req)
 {
-    static char body[2048];
+    static char body[RCP_SLOTS * 700 + 64];
     size_t at = 0;
-    at += (size_t)snprintf(body + at, sizeof(body) - at,
-                           "{\"extra_dry_s\":%ld,\"slots\":[",
-                           (long)hr_dry_extra_s(&s_dry));
+    int w = snprintf(body, sizeof(body), "{\"extra_dry_s\":%ld,\"slots\":[",
+                     (long)hr_dry_extra_s(&s_dry));
+    if (w < 0 || (size_t)w >= sizeof(body)) {
+        return httpd_resp_send_500(req);
+    }
+    at = (size_t)w;
     bool first = true;
     for (int i = 0; i < RCP_SLOTS; i++) {
         hr_recipe_t r;
         if (!rcp_load(i, &r)) {
             continue;
         }
-        char nm[64], nt[400];
+        char nm[HR_RECIPE_NAME_MAX * 2 + 2], nt[HR_RECIPE_NOTES_MAX * 2 + 2];
         hr_json_escape(r.name, nm, sizeof(nm));
         hr_json_escape(r.notes, nt, sizeof(nt));
-        at += (size_t)snprintf(body + at, sizeof(body) - at,
-                               "%s{\"slot\":%d,\"family\":%d,\"name\":\"%s\","
-                               "\"notes\":\"%s\",\"runs\":%lu,\"nnum\":%u,"
-                               "\"suggest_dry_s\":%ld,\"num\":[",
-                               first ? "" : ",", i, (int)r.family, nm, nt,
-                               (unsigned long)r.runs, (unsigned)r.nnum,
-                               (long)hr_recipe_suggested_dry_s(&r, &s_dry));
-        for (uint8_t k = 0; k < r.nnum && at < sizeof(body) - 16; k++) {
-            at += (size_t)snprintf(body + at, sizeof(body) - at, "%s%ld",
-                                   k ? "," : "", (long)r.num[k]);
+        char slot[700];
+        int n = snprintf(slot, sizeof(slot),
+                         "%s{\"slot\":%d,\"family\":%d,\"name\":\"%s\","
+                         "\"notes\":\"%s\",\"runs\":%lu,\"nnum\":%u,"
+                         "\"suggest_dry_s\":%ld,\"num\":[",
+                         first ? "" : ",", i, (int)r.family, nm, nt,
+                         (unsigned long)r.runs, (unsigned)r.nnum,
+                         (long)hr_recipe_suggested_dry_s(&r, &s_dry));
+        if (n < 0 || (size_t)n >= sizeof(slot)) {
+            continue;
         }
-        at += (size_t)snprintf(body + at, sizeof(body) - at, "]}");
-        first = false;
-        if (at > sizeof(body) - 320) {
+        bool fits = true;
+        for (uint8_t k = 0; k < r.nnum && k < HR_RECIPE_MAX_NUM; k++) {
+            int m = snprintf(slot + n, sizeof(slot) - (size_t)n, "%s%ld",
+                             k ? "," : "", (long)r.num[k]);
+            if (m < 0 || (size_t)m >= sizeof(slot) - (size_t)n) {
+                fits = false;
+                break;
+            }
+            n += m;
+        }
+        if (!fits || (size_t)n + 2 >= sizeof(slot)) {
+            continue;
+        }
+        slot[n++] = ']';
+        slot[n++] = '}';
+        slot[n] = '\0';
+        /* Reserve the closing "]}" and the NUL. */
+        if (at + (size_t)n + 3 > sizeof(body)) {
             break;
         }
+        memcpy(body + at, slot, (size_t)n);
+        at += (size_t)n;
+        first = false;
     }
-    at += (size_t)snprintf(body + at, sizeof(body) - at, "]}");
-    return send_json(req, body, (int)at);
+    body[at++] = ']';
+    body[at++] = '}';
+    body[at] = '\0';
+    return send_json(req, body, at);
 }
 
 /* POST /api/recipes/save   slot,family,name,notes,num=csv */
