@@ -263,6 +263,9 @@ static void on_inbound(const hr_frame_t *f, void *user)
          * handed to the main loop to write, never written from here.
          */
         hr_batch_t finished;
+        /* s_batch is also touched by the main loop (resume, checkpoint) and
+         * s_batch_done is read there; a 90-byte struct is not atomic. */
+        xSemaphoreTake(s_hist_lock, portMAX_DELAY);
         if (hr_batch_observe(&s_batch, (int)tel.type,
                              (int32_t)tel.batch_elapsed_s,
                              (int32_t)tel.temperature_f,
@@ -276,6 +279,7 @@ static void on_inbound(const hr_frame_t *f, void *user)
                 s_batch_done_pending = true;
             }
         }
+        xSemaphoreGive(s_hist_lock);
     }
 
 #if CONFIG_HR_HTTP_LOG_TO_UART
@@ -563,12 +567,14 @@ void app_main(void)
 
                 if (running && s_open_last >= 0 &&
                     gap <= RESUME_MAX_GAP_S && gap >= -RESUME_BACK_S) {
+                    xSemaphoreTake(s_hist_lock, portMAX_DELAY);
                     hr_batch_resume(&s_batch, &s_open_rec, s_open_start,
                                     now_el, s_last_type);
+                    hr_batch_t cur = s_batch.cur;
+                    xSemaphoreGive(s_hist_lock);
                     ESP_LOGW(TAG, "resumed the batch across a restart: %s, "
                                   "%us so far, %ds of it unobserved",
-                             s_batch.cur.name,
-                             (unsigned)s_batch.cur.duration_s, (int)gap);
+                             cur.name, (unsigned)cur.duration_s, (int)gap);
                 } else {
                     s_open_rec.outcome = HR_OUTCOME_INTERRUPTED;
                     hr_batchstore_append(&s_open_rec);
@@ -582,10 +588,22 @@ void app_main(void)
                 s_open_pending = false;
             }
 
+            /*
+             * Copy out under the lock, write to flash outside it. The flag
+             * used to be cleared BEFORE the record was read, so a second
+             * HR_BATCH_FINISHED from the USB task could overwrite s_batch_done
+             * while hr_batchstore_append() was still encoding it.
+             */
+            hr_batch_t done;
+            bool have_done = false;
+            hr_batch_t open_cur;
+            int32_t open_start = 0, open_last = 0;
+            bool checkpoint = false;
+            xSemaphoreTake(s_hist_lock, portMAX_DELAY);
             if (s_batch_done_pending) {
+                done = s_batch_done;
+                have_done = true;
                 s_batch_done_pending = false;
-                hr_batchstore_append(&s_batch_done);
-                hr_batchstore_clear_open();
             } else if (s_batch.active &&
                        (uint32_t)now_ms() - s_batch_saved_ms > 60000u) {
                 /*
@@ -594,8 +612,17 @@ void app_main(void)
                  * enough not to wear out the NVS partition.
                  */
                 s_batch_saved_ms = (uint32_t)now_ms();
-                hr_batchstore_save_open(&s_batch.cur, s_batch.start_elapsed,
-                                        s_batch.last_elapsed);
+                open_cur = s_batch.cur;
+                open_start = s_batch.start_elapsed;
+                open_last = s_batch.last_elapsed;
+                checkpoint = true;
+            }
+            xSemaphoreGive(s_hist_lock);
+            if (have_done) {
+                hr_batchstore_append(&done);
+                hr_batchstore_clear_open();
+            } else if (checkpoint) {
+                hr_batchstore_save_open(&open_cur, open_start, open_last);
             }
         }
 
