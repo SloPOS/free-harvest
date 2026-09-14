@@ -13,8 +13,17 @@
 /* Install the TinyUSB driver and bind RX to `session`. */
 void hr_usb_init(hr_session_t *session);
 
-/* hr_tx_fn implementation - pass as the session's transmit callback. */
-void hr_usb_tx(const char *data, size_t len, void *user);
+/*
+ * hr_tx_fn implementation - pass as the session's transmit callback.
+ *
+ * Serialised: frames come from the USB task (WIFIINFO), the main loop (hello,
+ * heartbeat), httpd (CLICK, recipes) and MQTT, and the CDC FIFO is a
+ * single-producer queue. Returns true only if the whole frame was queued AND
+ * flushed to the host; false when the host has not enumerated us, the FIFO
+ * refused bytes, the flush timed out, or another sender held the transport for
+ * too long. Nothing is left behind in the FIFO on failure.
+ */
+bool hr_usb_tx(const char *data, size_t len, void *user);
 
 /*
  * True once the host has asserted DTR (port opened).

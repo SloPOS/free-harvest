@@ -258,7 +258,9 @@ bool hr_session_send(hr_session_t *s, hr_builder_t *b)
     if (wire == NULL) {
         return false;
     }
-    s->tx(wire, len, s->tx_user);
+    if (!s->tx(wire, len, s->tx_user)) {
+        return false; /* the transport did not deliver it; say so */
+    }
     s->frames_out++;
     return true;
 }
@@ -424,7 +426,9 @@ bool hr_session_send_raw(hr_session_t *s, const char *frame)
     char buf[HR_MAX_FRAME];
     memcpy(buf, frame, len);
     buf[len] = '\r';          /* same terminator every outbound frame uses */
-    s->tx(buf, len + 1, s->tx_user);
+    if (!s->tx(buf, len + 1, s->tx_user)) {
+        return false;
+    }
     s->frames_out++;
     return true;
 }

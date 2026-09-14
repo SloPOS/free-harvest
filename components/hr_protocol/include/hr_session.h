@@ -36,8 +36,12 @@ typedef enum {
     HR_LINK_UP,
 } hr_link_state_t;
 
-/* Transport write callback. Must transmit all `len` bytes. */
-typedef void (*hr_tx_fn)(const char *data, size_t len, void *user);
+/*
+ * Transport write callback. Returns true only if all `len` bytes were handed
+ * to the host, so the caller (and the web UI behind it) can tell "sent" from
+ * "queued into a FIFO nobody is draining".
+ */
+typedef bool (*hr_tx_fn)(const char *data, size_t len, void *user);
 
 /* Optional observer invoked for every inbound frame (logging, WiFi relay). */
 typedef void (*hr_observer_fn)(const hr_frame_t *f, void *user);

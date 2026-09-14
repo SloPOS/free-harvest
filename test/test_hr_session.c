@@ -8,7 +8,7 @@ typedef struct {
     int frames;
 } tx_log_t;
 
-static void tx_capture(const char *data, size_t len, void *user)
+static bool tx_capture(const char *data, size_t len, void *user)
 {
     tx_log_t *t = (tx_log_t *)user;
     if (t->len + len < sizeof(t->buf)) {
@@ -17,6 +17,38 @@ static void tx_capture(const char *data, size_t len, void *user)
         t->buf[t->len] = '\0';
     }
     t->frames++;
+    return true;
+}
+
+/* A transport with nobody on the other end: accepts nothing. */
+static bool tx_refuse(const char *data, size_t len, void *user)
+{
+    (void)data;
+    (void)len;
+    (void)user;
+    return false;
+}
+
+static void test_send_reports_transport_failure(void)
+{
+    /*
+     * hr_session_send() used to return true and count the frame as sent
+     * whatever the transport did with it. hr_usb_tx() logged "short write" /
+     * "flush failed" and the web UI still showed {"ok":true} for a CLICK that
+     * never left the FIFO. The transport's verdict is now the session's.
+     */
+    TEST_CASE("send reports transport failure");
+    hr_session_t s;
+    hr_session_init(&s, tx_refuse, NULL);
+
+    CHECK(!hr_session_send_simple(&s, "REQSTAT"));
+    CHECK(!hr_session_send_raw(&s, "SENDCANDY \"4,70,140,150,160,300,7200,300,C,0,\" 1"));
+    CHECK_INT(s.frames_out, 0);
+
+    tx_log_t log = {0};
+    hr_session_init(&s, tx_capture, &log);
+    CHECK(hr_session_send_simple(&s, "REQSTAT"));
+    CHECK_INT(s.frames_out, 1);
 }
 
 static void feed(hr_session_t *s, const char *frame, unsigned long t_ms)
@@ -511,5 +543,6 @@ int main(void)
     test_unknown_verb_is_counted_not_fatal();
     test_send_simple_emits_terminated_frame();
     test_observer_sees_inbound_frames();
+    test_send_reports_transport_failure();
     return TEST_REPORT();
 }
