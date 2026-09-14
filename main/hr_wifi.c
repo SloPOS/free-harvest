@@ -441,6 +441,15 @@ void hr_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     configure_ap();
     ESP_ERROR_CHECK(esp_wifi_start());
+    /*
+     * The open setup AP is on the air from this moment, whatever happens with
+     * the stored network, so its five-minute window has to start now as well.
+     * It used to be armed only from start_ap_mode() (no credentials) and from
+     * the reconnect path - so a boot with stored credentials and the router
+     * down broadcast the open AP indefinitely, which is the exact case the
+     * window exists for. A successful connection cancels it on GOT_IP.
+     */
+    arm_ap_timeout();
 
     /*
      * No power save. The adapter is mains-powered off the dryer's USB port, so
