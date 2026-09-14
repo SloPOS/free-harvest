@@ -1931,10 +1931,27 @@ static pin_result_t pin_check(const char *supplied)
     if (!pin_is_set(want, sizeof(want))) {
         return PIN_OK;              /* no PIN configured: nothing to enforce */
     }
-    if (s_pin_locked_until != 0 && ms_now() < s_pin_locked_until) {
-        return PIN_LOCKED;
+    /*
+     * Signed difference so the comparison survives the 32-bit millisecond
+     * wrap at 49.7 days of uptime; `now < until` there either ends the lock
+     * early or extends it for another 49 days.
+     */
+    if (s_pin_locked_until != 0) {
+        if ((int32_t)(ms_now() - s_pin_locked_until) < 0) {
+            return PIN_LOCKED;
+        }
+        s_pin_locked_until = 0; /* lock expired: start counting afresh */
+        s_pin_fails = 0;
     }
-    if (supplied != NULL && supplied[0] && pin_equal(supplied, want)) {
+    if (supplied == NULL || supplied[0] == '\0') {
+        /*
+         * No PIN offered at all. The web UI's first request in a session is
+         * exactly this - it asks for the PIN only after being told one is
+         * needed - so it must not spend one of the five attempts.
+         */
+        return PIN_WRONG;
+    }
+    if (pin_equal(supplied, want)) {
         s_pin_fails = 0;
         return PIN_OK;
     }
