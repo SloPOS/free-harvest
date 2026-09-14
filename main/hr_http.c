@@ -1279,20 +1279,45 @@ static bool ctrl_set_enabled(bool on)
  * Next counter value, persisted so it does not restart after a reboot and
  * collide with values the dryer has already seen this power cycle.
  */
+/*
+ * Returns 0 if the counter could not be persisted. Callers must then refuse
+ * to send: the dryer treats a repeated counter as a retry of the previous
+ * press and ignores it, so a counter that silently restarted at HR_SEQ_START
+ * on every call (the old behaviour when nvs_open failed) made every CLICK
+ * after the first a no-op while the API kept answering ok:true.
+ */
 static uint32_t ctrl_next_seq(void)
 {
     nvs_handle_t nh;
     uint32_t seq = HR_SEQ_START;
-    if (nvs_open(CTRL_NVS_NS, NVS_READWRITE, &nh) == ESP_OK) {
-        if (nvs_get_u32(nh, "seq", &seq) != ESP_OK) {
-            seq = HR_SEQ_START;
-        }
-        seq++;
-        nvs_set_u32(nh, "seq", seq);
-        nvs_commit(nh);
-        nvs_close(nh);
+    esp_err_t err = nvs_open(CTRL_NVS_NS, NVS_READWRITE, &nh);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "click counter: nvs_open %s", esp_err_to_name(err));
+        return 0;
+    }
+    if (nvs_get_u32(nh, "seq", &seq) != ESP_OK) {
+        seq = HR_SEQ_START;
+    }
+    seq++;
+    err = nvs_set_u32(nh, "seq", seq);
+    if (err == ESP_OK) {
+        err = nvs_commit(nh);
+    }
+    nvs_close(nh);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "click counter: could not persist %lu: %s",
+                 (unsigned long)seq, esp_err_to_name(err));
+        return 0;
     }
     return seq;
+}
+
+static esp_err_t refuse_no_counter(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(
+        req, "{\"ok\":false,\"reason\":\"could not persist the command "
+             "counter (NVS)\"}");
 }
 
 /*
@@ -1404,6 +1429,9 @@ static esp_err_t h_control(httpd_req_t *req)
     /* One counter per press. Taken once - calling ctrl_next_seq() twice would
      * burn a value and, worse, send a different number than we logged. */
     uint32_t seq = ctrl_next_seq();
+    if (seq == 0) {
+        return refuse_no_counter(req);
+    }
 
     LOCK();
     hr_builder_t b;
@@ -1730,6 +1758,9 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
 
     char frame[320];
     uint32_t seq = ctrl_next_seq();
+    if (seq == 0) {
+        return refuse_no_counter(req);
+    }
     if (hr_recipe_build(&r, start, seq, frame, sizeof(frame)) == 0) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(
@@ -1844,7 +1875,11 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
     }
 
     char frame[320];
-    if (hr_recipe_build(&r, start, ctrl_next_seq(), frame, sizeof(frame)) == 0) {
+    uint32_t seq = ctrl_next_seq();
+    if (seq == 0) {
+        return refuse_no_counter(req);
+    }
+    if (hr_recipe_build(&r, start, seq, frame, sizeof(frame)) == 0) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"build failed\"}");
     }
