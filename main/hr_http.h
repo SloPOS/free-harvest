@@ -68,4 +68,11 @@ int32_t hr_http_extra_dry_s(void);
  */
 void hr_http_set_tracker(const hr_phase_tracker_t *tr);
 
+/*
+ * Whether the owner has switched remote control on (Settings). Off until set,
+ * and off if the setting cannot be read. Every path that can change the
+ * dryer's state - HTTP or MQTT - must consult this, not only /api/control.
+ */
+bool hr_http_control_enabled(void);
+
 #endif /* HR_HTTP_H */

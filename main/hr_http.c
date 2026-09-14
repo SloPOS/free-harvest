@@ -1239,6 +1239,11 @@ static bool ctrl_enabled(void)
     return v != 0;
 }
 
+bool hr_http_control_enabled(void)
+{
+    return ctrl_enabled();
+}
+
 static bool ctrl_set_enabled(bool on)
 {
     nvs_handle_t nh;

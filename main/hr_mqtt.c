@@ -1,4 +1,5 @@
 #include "hr_mqtt.h"
+#include "hr_http.h"
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -253,7 +254,16 @@ static void publish_discovery(void)
  * Everything routes through the tested allow-list, so hardware/unknown verbs
  * are refused here regardless of payload.
  */
-static void handle_cmd(const char *topic, const char *data, int len)
+static bool topic_ends_with(const char *topic, int topic_len,
+                            const char *suffix)
+{
+    int sl = (int)strlen(suffix);
+    return topic != NULL && topic_len >= sl &&
+           memcmp(topic + topic_len - sl, suffix, (size_t)sl) == 0;
+}
+
+static void handle_cmd(const char *topic, int topic_len, const char *data,
+                       int len)
 {
     char buf[256];
     if (len <= 0 || len >= (int)sizeof(buf)) {
@@ -262,11 +272,21 @@ static void handle_cmd(const char *topic, const char *data, int len)
     memcpy(buf, data, len);
     buf[len] = '\0';
 
-    bool is_config_set = strstr(topic, "/config/set") != NULL;
+    /*
+     * esp-mqtt's topic is NOT NUL-terminated - it has topic_len - and it is
+     * only present in the first fragment of a message. strstr() over it read
+     * past the topic into the payload, and a NULL topic (later fragment of an
+     * oversized message) would have crashed the adapter.
+     */
+    bool is_config_set = topic_ends_with(topic, topic_len, "/config/set");
 
     if (is_config_set) {
         /* Batch-name text entity -> SETBNAME,<payload> (buf is already the
          * NUL-terminated payload). */
+        if (!hr_http_control_enabled()) {
+            ESP_LOGW(TAG, "MQTT SETBNAME refused: control is disabled");
+            return;
+        }
         bool ok = hr_session_send_config(s_session, "SETBNAME", buf);
         ESP_LOGI(TAG, "MQTT SETBNAME '%s' -> %s", buf, ok ? "sent" : "refused");
         return;
@@ -279,6 +299,17 @@ static void handle_cmd(const char *topic, const char *data, int len)
     if (comma) {
         *comma = '\0';
         args = comma + 1;
+    }
+    /*
+     * SAFE verbs (reads, BEEP) are always allowed - that is what the HA
+     * buttons send. CONFIG verbs change the dryer's settings, clock or names,
+     * so they follow the same "control enabled" switch as the web UI. MQTT
+     * has no PIN and no confirmation dialog; the switch is the only gate the
+     * owner has over it.
+     */
+    if (hr_cmd_classify(verb) != HR_CMD_SAFE && !hr_http_control_enabled()) {
+        ESP_LOGW(TAG, "MQTT cmd '%s' refused: control is disabled", verb);
+        return;
     }
     bool ok = hr_session_send_config(s_session, verb, args);
     ESP_LOGI(TAG, "MQTT cmd '%s' args '%s' -> %s", verb, args ? args : "",
@@ -313,7 +344,16 @@ static void on_mqtt(void *handler_args, esp_event_base_t base, int32_t id,
         ESP_LOGW(TAG, "broker disconnected (will retry)");
         break;
     case MQTT_EVENT_DATA:
-        handle_cmd(e->topic, e->data, e->data_len);
+        /*
+         * A retained message on cmd/ or config/set is re-delivered on EVERY
+         * reconnect, so one stray retained "SETDATE" would be re-executed
+         * each time the broker link flapped. Commands are live requests;
+         * ignore retained ones. Fragments after the first carry no topic.
+         */
+        if (e->retain || e->current_data_offset != 0 || e->topic == NULL) {
+            break;
+        }
+        handle_cmd(e->topic, e->topic_len, e->data, e->data_len);
         break;
     case MQTT_EVENT_ERROR:
         /*
