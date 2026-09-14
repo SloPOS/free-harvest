@@ -746,12 +746,20 @@ void hr_capture_shutdown(void)
     if (!s_ready) {
         return;
     }
-    if (s_lock != NULL) {
-        xSemaphoreTake(s_lock, pdMS_TO_TICKS(1000));
+    bool locked = true;
+    if (s_lock != NULL &&
+        xSemaphoreTake(s_lock, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        /* A writer is still inside a file operation. The reboot is coming
+         * regardless, so unmount anyway - but say so, because this is the
+         * situation that produces a log whose metadata and data disagree. */
+        ESP_LOGW(TAG, "shutdown: writer still busy after 3 s; unmounting "
+                      "underneath it");
+        locked = false;
     }
     s_ready = false;
     esp_vfs_spiffs_unregister("capture");
-    ESP_LOGI(TAG, "capture filesystem unmounted cleanly");
+    ESP_LOGI(TAG, "capture filesystem unmounted%s",
+             locked ? " cleanly" : " (unclean)");
 }
 
 /*
@@ -769,8 +777,14 @@ void hr_capture_shutdown(void)
 bool hr_capture_format(void)
 {
     ESP_LOGW(TAG, "reformatting the capture partition; stored data is lost");
-    if (s_lock != NULL) {
-        xSemaphoreTake(s_lock, pdMS_TO_TICKS(2000));
+    if (s_lock != NULL &&
+        xSemaphoreTake(s_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        /* Formatting under an open file is how the metadata/data mismatch
+         * this function exists to cure gets created. Refuse; the user can
+         * try again in a moment. (Also: giving a mutex we do not hold, as
+         * the old code did on this path, is not a no-op in FreeRTOS.) */
+        ESP_LOGE(TAG, "format refused: a writer still holds the filesystem");
+        return false;
     }
     s_ready = false;
     esp_vfs_spiffs_unregister("capture");
