@@ -808,6 +808,16 @@ static esp_err_t h_cmd(httpd_req_t *req)
         httpd_resp_set_status(req, "403 Forbidden");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"not allowed\"}");
     }
+    /*
+     * CONFIG verbs change the dryer's settings, clock and names. Settings says
+     * nothing changes the machine until control is switched on; make that true
+     * here as well, not only for /api/control. SAFE verbs are reads.
+     */
+    if (cls == HR_CMD_CONFIG && !ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
 
     /* send_config carries the args and re-checks the class itself, so the
      * allow-list stays enforced in the tested core rather than here. */
@@ -1098,6 +1108,13 @@ static esp_err_t h_wififlags(httpd_req_t *req)
  */
 static esp_err_t h_dryer_reboot(httpd_req_t *req)
 {
+    /* Rebooting the dryer mid-batch is about as state-changing as it gets;
+     * it was the one control route that skipped the control switch. */
+    if (!ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
     char buf[96];
     int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
                                                         : (int)sizeof(buf) - 1;
