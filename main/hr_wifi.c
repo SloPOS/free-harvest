@@ -164,11 +164,16 @@ static void start_ap_mode(void)
  * The AP is deliberately kept up so the status page remains reachable and can
  * report the new station IP.
  */
-static void start_sta_connect(const char *ssid, const char *pw)
+/*
+ * Returns false if the driver refused the configuration. This used to be
+ * ESP_ERROR_CHECK, i.e. abort() on data that came in over HTTP: a password the
+ * driver rejects (ESP_ERR_WIFI_PASSWORD) had already been written to NVS by the
+ * caller, so the next boot loaded it, hit the same abort, and the adapter
+ * boot-looped until reflashed with a wiped NVS.
+ */
+static bool start_sta_connect(const char *ssid, const char *pw)
 {
     ESP_LOGI(TAG, "connecting to \"%s\"", ssid);
-    s_status = HR_WIFI_CONNECTING;
-    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
 
     wifi_config_t sta = {0};
     snprintf((char *)sta.sta.ssid, sizeof(sta.sta.ssid), "%s", ssid);
@@ -177,11 +182,39 @@ static void start_sta_connect(const char *ssid, const char *pw)
     sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
     sta.sta.pmf_cfg.capable = true;
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-    esp_err_t err = esp_wifi_connect();
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_config(STA) rejected \"%s\": %s", ssid,
+                 esp_err_to_name(err));
+        return false;
+    }
+    s_status = HR_WIFI_CONNECTING;
+    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
+    err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
     }
+    return true;
+}
+
+/*
+ * What the driver will accept: an SSID of 1..32 bytes and a passphrase that is
+ * either empty (open network) or 8..63 characters (WPA/WPA2 PSK). Checked
+ * before anything is stored so a bad value is answered with HTTP 400 rather
+ * than persisted.
+ */
+static bool credentials_plausible(const char *ssid, const char *pw)
+{
+    size_t sl = ssid ? strlen(ssid) : 0;
+    size_t pl = pw ? strlen(pw) : 0;
+    if (sl == 0 || sl > 32) {
+        return false;
+    }
+    /* 64 hex digits is a raw PSK; the driver takes it as well. */
+    if (pl != 0 && (pl < 8 || pl > 64)) {
+        return false;
+    }
+    return true;
 }
 
 /* -------------------------------------------------------------------- */
@@ -361,9 +394,12 @@ void hr_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     char ssid[33] = {0}, pw[65] = {0};
-    if (load_credentials(ssid, sizeof(ssid), pw, sizeof(pw))) {
-        start_sta_connect(ssid, pw); /* safe now: driver is started */
+    if (load_credentials(ssid, sizeof(ssid), pw, sizeof(pw)) &&
+        credentials_plausible(ssid, pw) && start_sta_connect(ssid, pw)) {
+        /* connecting; driver is started so esp_wifi_connect() is legal */
     } else {
+        /* Nothing stored, or the stored values are ones the driver will not
+         * take: stay reachable on the setup AP instead of aborting. */
         start_ap_mode();
     }
 
@@ -418,18 +454,26 @@ void hr_wifi_current_ssid(char *out, size_t cap)
 
 bool hr_wifi_set_credentials(const char *ssid, const char *password)
 {
-    if (ssid == NULL || ssid[0] == '\0' || strlen(ssid) > 32) {
-        return false;
-    }
     if (password == NULL) {
         password = "";
     }
-    if (!store_credentials(ssid, password)) {
+    if (!credentials_plausible(ssid, password)) {
         return false;
     }
+    /*
+     * Apply first, store second. If the driver refuses the configuration the
+     * caller gets a 400 and nothing has been written - the old credentials, if
+     * any, stay in NVS and keep working across the next reboot.
+     */
     s_sta_retries = 0;
     esp_wifi_disconnect();
-    start_sta_connect(ssid, password);
+    if (!start_sta_connect(ssid, password)) {
+        return false;
+    }
+    if (!store_credentials(ssid, password)) {
+        ESP_LOGE(TAG, "credentials accepted by the driver but not saved");
+        return false;
+    }
     return true;
 }
 
