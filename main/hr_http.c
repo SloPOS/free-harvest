@@ -61,6 +61,8 @@ static hr_phase_tracker_t s_tracker;
 static bool s_tracker_ready;
 /* 30s graph series, owned by main.c and guarded by the shared s_lock. */
 static hr_trend_t *s_trend;
+/* Recent encoded frames, owned by main.c, guarded by the shared s_lock. */
+static hr_encring_t *s_encring;
 
 /* Learns how often drying had to be extended - see hr_recipe.h. */
 static hr_dry_tracker_t s_dry = {-1, 0};
@@ -109,6 +111,11 @@ void hr_http_set_trend(hr_trend_t *tr)
     s_trend = tr;
 }
 
+void hr_http_set_encring(hr_encring_t *r)
+{
+    s_encring = r;
+}
+
 void hr_http_set_tracker(const hr_phase_tracker_t *tr)
 {
     if (tr != NULL) {
@@ -151,6 +158,7 @@ static union {
     char            recipes[RCP_SLOTS * 700 + 64]; /* h_recipes */
     hr_batch_t      batches[BATCH_SHOW];       /* h_batches */
     char            bytes[1024];               /* h_capture, h_batches_csv */
+    hr_encring_t    enc;                       /* h_enc snapshot, ~5.4 KB */
 } s_scratch;
 
 /* -------------------------------------------------------------------- */
@@ -218,6 +226,12 @@ static esp_err_t h_state(httpd_req_t *req)
     unsigned long fin = s_session->frames_in, fout = s_session->frames_out;
     unsigned long unk = s_session->unknown_verbs;
     unsigned long bad = s_session->stream.frames_bad;
+    /* The 6.0.644170 encoded transport: how much of it, and how recently. */
+    unsigned long enc_frames = s_session->stream.enc_frames;
+    unsigned long enc_bytes = s_session->stream.enc_bytes;
+    unsigned long enc_bad = s_session->stream.enc_bad;
+    unsigned long enc_last_ms = s_session->last_enc_ms;
+    unsigned enc_last_len = (unsigned)s_session->last_enc_len;
     const char *link = s_session->link == HR_LINK_UP ? "up" : "down";
     uint32_t latest = hr_history_latest_seq(s_history);
     /* Snapshot the telemetry under the same lock its writers take. */
@@ -263,7 +277,14 @@ static esp_err_t h_state(httpd_req_t *req)
     multi_heap_info_t heap;
     heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL);
 
-    char body[2048];
+    /* Age of the last encoded frame in ms; -1 when none has arrived. */
+    long enc_age_ms = -1;
+    if (enc_frames > 0) {
+        unsigned long now = (unsigned long)(esp_timer_get_time() / 1000);
+        enc_age_ms = (long)(now - enc_last_ms);
+    }
+
+    char body[2304];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"dryer_sn\":\"%s\","
@@ -272,6 +293,12 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"fw_version\":\"%s\",\"compat644170\":%s,"
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
                      "\"unknown_verbs\":%lu,\"frames_bad\":%lu,"
+                     /* Encoded transport (")S" + length, 6.0.644170 after
+                      * "UNIQUE lH"): complete frames framed and stored,
+                      * their bytes, frames abandoned as partial/cut, and the
+                      * length and age of the most recent one. See /api/enc. */
+                     "\"enc_frames\":%lu,\"enc_bytes\":%lu,\"enc_bad\":%lu,"
+                     "\"enc_last_len\":%u,\"enc_last_age_ms\":%ld,"
                      "\"latest_seq\":%" PRIu32 ",\"wifi\":\"%s\",\"ip\":\"%s\","
                      "\"ssid\":\"%s\","
                      "\"phase\":%d,\"phase_label\":\"%s\",\"have_tel\":%s,"
@@ -301,7 +328,9 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
                      link, serial, uid, dryer_sn, fwver,
                      hr_compat_644170() ? "true" : "false",
-                     fin, fout, unk, bad, latest,
+                     fin, fout, unk, bad,
+                     enc_frames, enc_bytes, enc_bad, enc_last_len, enc_age_ms,
+                     latest,
                      wifi_status_str(), ip, ssid,
                      (int)ph, hr_phase_label(ph), tel_valid ? "true" : "false",
                      tel_valid ? tel.temperature_f : 0,
@@ -555,6 +584,91 @@ static esp_err_t h_capture_clear(httpd_req_t *req)
  * protocol exposes no cycle control at all), and the dryer already handles
  * detach/attach - that is exactly what it sees whenever we reboot for an OTA.
  */
+/* -------------------------------------------------------------------- */
+/* GET /api/enc -> the last encoded frames (6.0.644170 transport)         */
+/* -------------------------------------------------------------------- */
+/*
+ * Read-only view of the ring main.c fills from the USB task:
+ *
+ *   {"frames":N,"bytes":B,"bad":X,"last_len":L,"last_age_ms":A,"held":K,
+ *    "items":[{"ms":123456,"len":80,"raw":")S$3..."},...]}
+ *
+ * `frames`/`bytes`/`bad` are the stream's lifetime counters (same as
+ * /api/state), `held` is how many frames the ring has, oldest first in
+ * `items`. `raw` is the frame exactly as received, header included; `trunc`
+ * appears (true) only if the ring kept fewer bytes than `len` - the capture
+ * log always has the whole frame. Nothing here decodes anything.
+ *
+ * Snapshot under the lock, stream outside it - the same shape as h_verbs(),
+ * for the same reason: a stuck client must never hold the USB task.
+ */
+static esp_err_t h_enc(httpd_req_t *req)
+{
+    if (s_encring == NULL || s_session == NULL) {
+        const char *empty = "{\"frames\":0,\"bytes\":0,\"bad\":0,"
+                            "\"last_len\":0,\"last_age_ms\":-1,\"held\":0,"
+                            "\"items\":[]}";
+        return send_json(req, empty, strlen(empty));
+    }
+
+    hr_encring_t *snap = &s_scratch.enc;
+    unsigned long frames, bytes, bad, last_ms;
+    unsigned last_len;
+    LOCK();
+    *snap = *s_encring;
+    frames = s_session->stream.enc_frames;
+    bytes = s_session->stream.enc_bytes;
+    bad = s_session->stream.enc_bad;
+    last_ms = s_session->last_enc_ms;
+    last_len = (unsigned)s_session->last_enc_len;
+    UNLOCK();
+
+    long age_ms = -1;
+    if (frames > 0) {
+        age_ms = (long)((unsigned long)(esp_timer_get_time() / 1000) - last_ms);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char head[192];
+    int n = snprintf(head, sizeof(head),
+                     "{\"frames\":%lu,\"bytes\":%lu,\"bad\":%lu,"
+                     "\"last_len\":%u,\"last_age_ms\":%ld,\"held\":%u,"
+                     "\"items\":[",
+                     frames, bytes, bad, last_len, age_ms,
+                     hr_encring_count(snap));
+    if (n < 0 || (size_t)n >= sizeof(head) ||
+        httpd_resp_send_chunk(req, head, n) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    unsigned held = hr_encring_count(snap);
+    for (unsigned i = 0; i < held; i++) {
+        hr_enc_rec_t rec;
+        if (!hr_encring_get(snap, i, &rec)) {
+            break;
+        }
+        /* Worst case every byte escapes to \uXXXX (6x) - the alphabet is
+         * printable so in practice only backslash and quote ever do. */
+        char raw[HR_ENCRING_RAW * 6 + 8];
+        hr_json_escape(rec.raw, raw, sizeof(raw));
+        char obj[sizeof(raw) + 80];
+        int w = snprintf(obj, sizeof(obj),
+                         "%s{\"ms\":%" PRIu32 ",\"len\":%u,%s\"raw\":\"%s\"}",
+                         i ? "," : "", rec.t_ms, (unsigned)rec.len,
+                         rec.kept < rec.len ? "\"trunc\":true," : "", raw);
+        if (w < 0 || (size_t)w >= sizeof(obj)) {
+            continue;
+        }
+        if (httpd_resp_send_chunk(req, obj, w) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    httpd_resp_sendstr_chunk(req, "]}");
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
 /* -------------------------------------------------------------------- */
 /* GET /api/trend -> the 30s temperature/pressure series                 */
 /* -------------------------------------------------------------------- */
@@ -2637,6 +2751,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/capture/clear", HTTP_POST, h_capture_clear);
     reg("/api/usb/reattach", HTTP_POST, h_usb_reattach);
     reg("/api/trend", HTTP_GET, h_trend);
+    reg("/api/enc", HTTP_GET, h_enc);
     reg("/api/scan", HTTP_GET, h_scan);
     reg("/api/wifi", HTTP_POST, h_wifi_post);
     reg("/api/forget", HTTP_POST, h_forget);

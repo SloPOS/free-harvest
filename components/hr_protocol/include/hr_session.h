@@ -56,6 +56,15 @@ typedef bool (*hr_tx_fn)(const char *data, size_t len, void *user);
 /* Optional observer invoked for every inbound frame (logging, WiFi relay). */
 typedef void (*hr_observer_fn)(const hr_frame_t *f, void *user);
 
+/*
+ * Optional observer for every complete ENCODED frame (the 6.0.644170
+ * transport - see hr_protocol.h). Gets the whole frame, header included,
+ * verbatim. The session itself does nothing with the contents: it counts the
+ * frame, notes its length and time, and treats it as proof the dryer is
+ * still there.
+ */
+typedef void (*hr_enc_observer_fn)(const char *frame, size_t len, void *user);
+
 /* Everything we have learned about the attached dryer. */
 typedef struct {
     /*
@@ -93,9 +102,22 @@ typedef struct {
     unsigned long now_ms;
     unsigned long last_rx_ms;   /* last complete frame */
     unsigned long last_byte_ms; /* last byte of any kind, for stale partials */
-    unsigned long frames_in;
+    unsigned long frames_in;    /* plaintext frames parsed */
     unsigned long frames_out;
     unsigned long unknown_verbs;
+
+    /*
+     * Encoded transport, as seen by the session. Counts live in the stream
+     * (stream.enc_frames / enc_bytes / enc_bad); these are the "when" and
+     * "how big" of the most recent one, for /api/state. Encoded frames are
+     * NOT counted in frames_in - that stays the plaintext count - but they do
+     * refresh last_rx_ms, so the link stays up and the heartbeat and re-ask
+     * keep going while the dryer talks this way.
+     */
+    unsigned long last_enc_ms;  /* now_ms when the last encoded frame completed; 0 = never */
+    size_t        last_enc_len; /* its declared (= actual) total length */
+    hr_enc_observer_fn enc_observer;
+    void *enc_observer_user;
 
     /*
      * Payload placed in the GOTIT ack. UNVERIFIED - the genuine adapter's
@@ -152,6 +174,10 @@ void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user);
 
 /* Register an observer for inbound frames (may be NULL). */
 void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user);
+
+/* Register an observer for complete encoded frames (may be NULL). */
+void hr_session_set_enc_observer(hr_session_t *s, hr_enc_observer_fn fn,
+                                 void *user);
 
 /*
  * Tell the session what to report in WIFIINFO.

@@ -70,6 +70,48 @@ typedef void (*hr_frame_cb)(const hr_frame_t *frame, void *user);
 typedef void (*hr_reject_cb)(const char *bytes, size_t n, const char *why,
                              void *user);
 
+/* ------------------------------------------------------------------ */
+/* Encoded transport (dryer firmware 6.0.644170, after "UNIQUE lH")    */
+/* ------------------------------------------------------------------ */
+/*
+ * Once a 6.0.644170 dryer has been sent "UNIQUE lH" it stops writing the
+ * CR-terminated plaintext frames above and switches its OUTBOUND side to a
+ * length-prefixed framing (observed on a real machine, 2026-09-15):
+ *
+ *     ')' 'S' <L1> <L2> <payload ...>          no terminator at all
+ *
+ * L1 and L2 are two base-64 digits in the alphabet '#'..'b' (0x23..0x62,
+ * values 0..63), most significant first, and give the TOTAL frame length in
+ * characters INCLUDING the four header characters:
+ *
+ *     "#7" -> 20    "#G" -> 36    "$+" -> 72    "$3" -> 80    "$C" -> 96
+ *
+ * so the payload is (length - 4) characters, all printable (0x21..0x62 seen).
+ * The payload is opaque here: this layer only frames it, counts it and hands
+ * it on verbatim. Nothing in it is interpreted or transformed.
+ *
+ * The plaintext parser is untouched by this: a frame is only treated as
+ * encoded when its first four bytes are a valid header, which no plaintext
+ * verb can produce.
+ */
+#define HR_ENC_HDR        4
+#define HR_ENC_DIGIT_MIN  '#'
+#define HR_ENC_DIGIT_MAX  'b'
+/* Longest encoded frame accepted (total, incl. header). The header can
+ * declare up to 4095; anything above this is not a frame we can hold and is
+ * discarded. Observed maximum is 96. */
+#define HR_ENC_MAX_FRAME  (HR_MAX_FRAME - 1)
+
+/*
+ * Decode the four-byte header. Returns the declared total length (>= 4), or
+ * -1 if `hdr` is not a ")S" header with two digits in the alphabet.
+ */
+int hr_enc_decode_len(const char *hdr);
+
+/* Invoked once per complete encoded frame. `frame` is the whole frame -
+ * header and payload, `len` bytes, NUL-terminated for convenience. */
+typedef void (*hr_enc_cb)(const char *frame, size_t len, void *user);
+
 /*
  * Accumulates bytes arriving in arbitrary chunk sizes (USB CDC reads do not
  * respect frame boundaries) and emits whole frames.
@@ -83,12 +125,28 @@ typedef struct {
     unsigned long noise_bytes;/* non-printable bytes discarded, never framed */
     hr_reject_cb reject;      /* optional; see hr_reject_cb */
     void *reject_user;
+
+    /*
+     * Encoded transport state - see the block above. While enc_need is
+     * non-zero, `buf` holds the head of an encoded frame and the plaintext
+     * rules are suspended until exactly enc_need bytes have arrived.
+     */
+    size_t enc_need;          /* declared total length being collected; 0 = plaintext */
+    bool enc_seen;            /* at least one valid header has been seen */
+    unsigned long enc_frames; /* complete encoded frames delivered */
+    unsigned long enc_bytes;  /* bytes in them, headers included */
+    unsigned long enc_bad;    /* encoded frames abandoned (partial, cut, oversize) */
+    hr_enc_cb enc;            /* optional; see hr_enc_cb */
+    void *enc_user;
 } hr_stream_t;
 
 void hr_stream_init(hr_stream_t *s);
 
 /* Register (or clear, with NULL) the rejected-line observer. */
 void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user);
+
+/* Register (or clear, with NULL) the encoded-frame observer. */
+void hr_stream_set_enc_cb(hr_stream_t *s, hr_enc_cb cb, void *user);
 
 /*
  * Throw away a frame that began but never got its terminator, reporting it
@@ -98,6 +156,10 @@ void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user);
  * anything - they are whatever a host sent before it began speaking the
  * protocol, and without this they were glued to the front of the first
  * real frame. Returns true if something was pending.
+ *
+ * An encoded frame whose declared length never arrived is dropped by the same
+ * call: it is reported to the observer as "enc partial", counted in enc_bad
+ * rather than frames_bad, and the next ")S" header starts clean.
  */
 bool hr_stream_discard_partial(hr_stream_t *s, const char *why);
 

@@ -239,6 +239,27 @@ static void on_frame(const hr_frame_t *f, void *user)
     }
 }
 
+/*
+ * A complete encoded frame (6.0.644170 transport). It is not parsed - nothing
+ * here knows what is inside - but it is unmistakably the dryer talking, so it
+ * keeps the link up exactly as a plaintext frame would. Before this, a dryer
+ * in that mode was "silent" to the session: link down after 45 s, heartbeat
+ * and re-ask stopped, and the stream was recorded only as rejected debris.
+ */
+static void on_enc(const char *frame, size_t len, void *user)
+{
+    hr_session_t *s = (hr_session_t *)user;
+
+    s->last_rx_ms = s->now_ms;
+    s->link = HR_LINK_UP;
+    s->last_enc_ms = s->now_ms;
+    s->last_enc_len = len;
+
+    if (s->enc_observer != NULL) {
+        s->enc_observer(frame, len, s->enc_observer_user);
+    }
+}
+
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user)
 {
     if (s == NULL) {
@@ -246,6 +267,7 @@ void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user)
     }
     memset(s, 0, sizeof(*s));
     hr_stream_init(&s->stream);
+    hr_stream_set_enc_cb(&s->stream, on_enc, s);
     s->tx = tx;
     s->tx_user = tx_user;
     s->link = HR_LINK_DOWN;
@@ -259,6 +281,16 @@ void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user)
     }
     s->observer = fn;
     s->observer_user = user;
+}
+
+void hr_session_set_enc_observer(hr_session_t *s, hr_enc_observer_fn fn,
+                                 void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->enc_observer = fn;
+    s->enc_observer_user = user;
 }
 
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload)

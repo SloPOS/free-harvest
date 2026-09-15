@@ -56,6 +56,18 @@ bool hr_capture_ready(void);
  */
 void hr_capture_append(uint32_t t_ms, const char *body);
 
+/*
+ * Record one complete ENCODED frame (the 6.0.644170 transport, see
+ * hr_protocol.h) verbatim, header included:
+ *
+ *     <millis>\t~enc <len> )S$3...
+ *
+ * The "~" prefix is the log's existing marker for a line that is not a
+ * plaintext frame ("~repeat", "~boot"), so tooling that splits frame bodies
+ * on commas skips it. Same queue and rules as hr_capture_append().
+ */
+void hr_capture_enc(uint32_t t_ms, const char *frame, size_t len);
+
 /* Frame lines discarded because the write queue was full. */
 unsigned long hr_capture_dropped(void);
 

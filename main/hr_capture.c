@@ -334,6 +334,26 @@ void hr_capture_append(uint32_t t_ms, const char *body)
     }
 }
 
+void hr_capture_enc(uint32_t t_ms, const char *frame, size_t len)
+{
+    if (frame == NULL || len == 0) {
+        return;
+    }
+    char line[HR_CAPTURE_LINE_MAX];
+    int o = snprintf(line, sizeof(line), "~enc %u ", (unsigned)len);
+    if (o < 0 || (size_t)o >= sizeof(line)) {
+        return;
+    }
+    /* The frame is bounded by HR_ENC_MAX_FRAME (511) at the source and the
+     * line by HR_CAPTURE_LINE_MAX (544), so this never actually truncates;
+     * the clamp is there so it cannot overrun if either constant moves. */
+    size_t room = sizeof(line) - 1 - (size_t)o;
+    size_t take = len < room ? len : room;
+    memcpy(line + o, frame, take);
+    line[(size_t)o + take] = '\0';
+    hr_capture_append(t_ms, line);
+}
+
 unsigned long hr_capture_dropped(void) { return s_dropped; }
 
 size_t hr_capture_trend_load(hr_trend_t *tr, uint32_t *last_elapsed)

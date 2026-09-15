@@ -14,6 +14,7 @@
 #include "hr_capture.h"
 #include "hr_batchstore.h"
 #include "hr_compat.h"
+#include "hr_encring.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
@@ -39,6 +40,9 @@ static const char *TAG = "hr_main";
 static hr_session_t s_session;
 static hr_history_t s_history;
 static SemaphoreHandle_t s_hist_lock;
+/* The last few encoded frames (6.0.644170 transport) for /api/enc. Written
+ * from the USB RX task, read by HTTP - under s_hist_lock like history. */
+static hr_encring_t s_encring;
 /* Tracks whether the batch-elapsed counter is actually advancing, so an idle
  * dryer isn't reported as "running" using last batch's leftover elapsed. */
 static hr_phase_tracker_t s_tracker;
@@ -343,6 +347,35 @@ static void on_reject(const char *bytes, size_t n, const char *why, void *user)
              n > lim ? "..." : "");
 }
 
+/*
+ * A complete encoded frame from a 6.0.644170 dryer. Stored, not decoded:
+ * into the RAM ring for /api/enc and into the capture log for download. The
+ * session has already refreshed the link on it. Runs on the USB RX task, so
+ * the same rules as on_inbound: no flash work here, the capture queues.
+ */
+static void on_enc_frame(const char *frame, size_t len, void *user)
+{
+    (void)user;
+    uint32_t t = (uint32_t)now_ms();
+
+    xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+    hr_encring_push(&s_encring, t, frame, len);
+    xSemaphoreGive(s_hist_lock);
+
+    hr_capture_enc(t, frame, len);
+
+    /* Once, so the operator sees the transport switch in /api/log without
+     * the log filling with frames nobody can read yet. */
+    if (s_session.stream.enc_frames == 1) {
+        ESP_LOGW(TAG, "dryer switched to the encoded transport (\")S\" + "
+                      "length, first frame %u chars); framing it and keeping "
+                      "the link - see /api/enc", (unsigned)len);
+    }
+#if CONFIG_HR_HTTP_LOG_TO_UART
+    ESP_LOGI(TAG, "RX <- enc %u %.*s", (unsigned)len, (int)len, frame);
+#endif
+}
+
 void app_main(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -365,6 +398,8 @@ void app_main(void)
     hr_session_init(&s_session, hr_usb_tx, NULL);
     hr_session_set_observer(&s_session, on_inbound, NULL);
     hr_stream_set_reject_cb(&s_session.stream, on_reject, NULL);
+    hr_encring_init(&s_encring);
+    hr_session_set_enc_observer(&s_session, on_enc_frame, NULL);
     hr_session_set_ack_payload(&s_session, CONFIG_HR_ACK_PAYLOAD);
     /* The 6.0.644170 handshake switch, NVS-backed; applied in the loop below
      * so a runtime change also restarts the handshake. */
@@ -392,6 +427,7 @@ void app_main(void)
      * Must be set before hr_http_start(). */
     hr_http_use_lock(s_hist_lock);
     hr_http_set_trend(&s_trend);
+    hr_http_set_encring(&s_encring);
     hr_http_start(&s_session, &s_history);
 
     /* MQTT connects only if a broker is configured (via the web setup page);
@@ -740,12 +776,13 @@ void app_main(void)
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
                      "frames_in=%lu frames_out=%lu bad=%lu noise=%lu "
-                     "unknown=%lu link=%s | heap=%u",
+                     "unknown=%lu enc=%lu/%luB link=%s | heap=%u",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in, s_session.frames_out,
                      s_session.stream.frames_bad,
                      s_session.stream.noise_bytes, s_session.unknown_verbs,
+                     s_session.stream.enc_frames, s_session.stream.enc_bytes,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
                      (unsigned)esp_get_free_heap_size());
             ESP_LOGI(TAG,

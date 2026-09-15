@@ -634,8 +634,179 @@ static void test_stale_partial_frame_does_not_prefix_reqinfo(void)
     CHECK_INT(s.frames_in, 2);
 }
 
+/* --- the 6.0.644170 encoded transport, as the session sees it ------------ */
+
+/* Real frames from the 2026-09-15 dryer session (see test_hr_enc.c). */
+static const char ENC_20[] = ")S#7':CP`QB*MBJKUZab";
+static const char ENC_36[] = ")S#GSIY84F/ObJG2E6:MW\\QO^]H'bJB5@M!!";
+
+typedef struct {
+    int count;
+    size_t last_len;
+    char last[128];
+} enc_seen_t;
+
+static void enc_observer(const char *frame, size_t len, void *user)
+{
+    enc_seen_t *e = (enc_seen_t *)user;
+    e->count++;
+    e->last_len = len;
+    snprintf(e->last, sizeof(e->last), "%.*s", (int)len, frame);
+}
+
+static void test_encoded_frames_keep_the_link_up(void)
+{
+    /*
+     * Dryer 2026-09-15, compat ON: after "UNIQUE lH" the machine answered
+     * every request and volunteered a status frame every 15 s - all in the
+     * ")S" transport. The session saw none of it as a frame, so 45 s later
+     * the link went DOWN and with it the heartbeat and the re-ask. A
+     * complete encoded frame is the dryer talking: it must hold the link
+     * exactly as a plaintext frame does, while counting separately and
+     * never as bad.
+     */
+    TEST_CASE("encoded frames keep the link up and are counted apart");
+    tx_log_t log = {0};
+    enc_seen_t seen = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_compat(&s, true, true);
+    hr_session_set_enc_observer(&s, enc_observer, &seen);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    feed(&s, "REQINFO,\r", 1000);              /* plaintext brings it up */
+    CHECK_INT(s.link, HR_LINK_UP);
+    CHECK_INT(s.frames_in, 1);
+
+    /* 40 s of nothing but encoded frames, every 10-15 s */
+    unsigned long t = 1000;
+    for (int i = 0; i < 4; i++) {
+        t += 10000;
+        hr_session_tick(&s, t);
+        feed(&s, ENC_20, t);
+        CHECK_INT(s.link, HR_LINK_UP);
+    }
+    hr_session_tick(&s, t + 30000);              /* 30 s after the last one */
+    CHECK_INT(s.link, HR_LINK_UP);
+    CHECK_INT(s.last_rx_ms, t);
+    CHECK_INT(s.last_enc_ms, t);
+    CHECK_INT(s.last_enc_len, 20);
+
+    /* counted as encoded - not as frames_in, not as bad, not as unknown */
+    CHECK_INT(s.stream.enc_frames, 4);
+    CHECK_INT(s.stream.enc_bytes, 80);
+    CHECK_INT(s.stream.enc_bad, 0);
+    CHECK_INT(s.frames_in, 1);
+    CHECK_INT(s.stream.frames_bad, 0);
+    CHECK_INT(s.unknown_verbs, 0);
+    CHECK_INT(seen.count, 4);
+    CHECK_INT(seen.last_len, 20);
+    CHECK_STR(seen.last, ENC_20);
+
+    /* nothing was sent in reply to them - the session does not speak the
+     * encoded transport, it only listens */
+    CHECK_INT(log.frames, 1);                    /* the one WIFIINFO */
+
+    /* the re-ask keeps going: FDNAME/REQCFG/STATUS are still unanswered in
+     * plaintext, and the heartbeat is what the main loop runs while UP */
+    memset(&log, 0, sizeof(log));
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 4);
+    CHECK(strstr(log.buf, "FDNAME\r") != NULL);
+    CHECK(strstr(log.buf, "REQCFG\r") != NULL);
+    CHECK(strstr(log.buf, "STATUS\r") != NULL);
+
+    /* and the link still drops when the dryer is really gone */
+    hr_session_tick(&s, t + HR_LINK_TIMEOUT_MS + 1000);
+    CHECK_INT(s.link, HR_LINK_DOWN);
+}
+
+static void test_encoded_partial_is_stale_like_any_other(void)
+{
+    /*
+     * The declared length never completes. The session's stale rule (1.5 s
+     * with nothing pending finished) throws it away as "enc partial" and the
+     * next header is taken clean - no frames_bad, no lost frame after it.
+     */
+    TEST_CASE("encoded partial frame times out and the next one is clean");
+    tx_log_t log = {0};
+    enc_seen_t seen = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_enc_observer(&s, enc_observer, &seen);
+
+    hr_session_rx(&s, ENC_36, 20, 10000);       /* 16 short */
+    CHECK_INT((int)s.stream.enc_need, 36);
+    CHECK_INT(seen.count, 0);
+
+    feed(&s, ENC_20, 12000);                    /* two seconds later */
+    CHECK_INT(seen.count, 1);
+    CHECK_STR(seen.last, ENC_20);
+    CHECK_INT(s.stream.enc_bad, 1);
+    CHECK_INT(s.stream.frames_bad, 0);
+    CHECK_INT(s.link, HR_LINK_UP);              /* the complete one counts */
+
+    /* a frame split across two transfers milliseconds apart is one frame */
+    hr_session_rx(&s, ENC_36, 20, 13000);
+    hr_session_rx(&s, ENC_36 + 20, 16, 13020);
+    CHECK_INT(seen.count, 2);
+    CHECK_STR(seen.last, ENC_36);
+    CHECK_INT(s.stream.enc_bad, 1);
+}
+
+static void test_compat_on_still_answers_plaintext_reqinfo(void)
+{
+    /*
+     * Regression guard for the WIFIINFO path. On the dryer, compat ON left
+     * the machine's WiFi screen showing the adapter disconnected - because
+     * REQINFO itself had moved into the encoded transport, so there was no
+     * plaintext REQINFO to answer. The switch must not have suppressed the
+     * answer itself: a 6.0.641041 machine with the option ON, or a 644170
+     * machine before "UNIQUE lH" takes effect, still sends REQINFO in
+     * plaintext and must still get WIFIINFO - with encoded frames arriving
+     * around it or not.
+     */
+    TEST_CASE("compat ON: a plaintext REQINFO is still answered with WIFIINFO");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_compat(&s, true, true);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    feed(&s, "REQINFO,\r", 37000);
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
+
+    /* between encoded frames, even glued to one in the same transfer */
+    memset(&log, 0, sizeof(log));
+    feed(&s, ENC_20, 47000);
+    char glued[80];
+    snprintf(glued, sizeof(glued), "%sREQINFO,\r", ENC_20);
+    feed(&s, glued, 57000);
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 57\r");
+    CHECK_INT(s.stream.enc_frames, 2);
+    CHECK_INT(s.frames_in, 2);
+    CHECK_INT(s.stream.frames_bad, 0);
+
+    /* and with the switch OFF, unchanged - the pinned 641041 behaviour */
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_compat(&s, false, false);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+    memset(&log, 0, sizeof(log));
+    feed(&s, "REQINFO,\r", 37000);
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
+}
+
 int main(void)
 {
+    test_encoded_frames_keep_the_link_up();
+    test_encoded_partial_is_stale_like_any_other();
+    test_compat_on_still_answers_plaintext_reqinfo();
     test_stale_partial_frame_does_not_prefix_reqinfo();
     test_link_survives_normal_idle_frame_gap();
     test_link_still_drops_when_dryer_really_gone();
