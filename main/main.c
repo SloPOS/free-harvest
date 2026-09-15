@@ -15,6 +15,7 @@
 #include "hr_batchstore.h"
 #include "hr_compat.h"
 #include "hr_encring.h"
+#include "hr_enc.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
@@ -365,12 +366,27 @@ static void on_enc_frame(const char *frame, size_t len, void *user)
 
     hr_capture_enc(t, frame, len);
 
-    /* Once, so the operator sees the transport switch in /api/log without
-     * the log filling with frames nobody can read yet. */
+    /*
+     * Decode it and run the plaintext through the ordinary inbound path, so
+     * telemetry, the logbook, the graph, MQTT and the UI all work on a
+     * 6.0.644170 dryer exactly as on the plaintext firmware. on_enc_frame
+     * only ever fires for a real ")S" frame, so nothing plaintext is touched
+     * and an older dryer never reaches this at all.
+     */
+    char plain[HR_MAX_FRAME];
+    int pn = hr_enc_decode(frame, len, plain, sizeof(plain));
+    if (pn > 0) {
+        hr_frame_t pf;
+        if (hr_frame_parse(plain, &pf)) {
+            on_inbound(&pf, NULL);
+        }
+    }
+
+    /* Once, so the operator sees the transport switch in /api/log. */
     if (s_session.stream.enc_frames == 1) {
         ESP_LOGW(TAG, "dryer switched to the encoded transport (\")S\" + "
-                      "length, first frame %u chars); framing it and keeping "
-                      "the link - see /api/enc", (unsigned)len);
+                      "length, first frame %u chars); decoding it - see "
+                      "/api/enc for the raw frames", (unsigned)len);
     }
 #if CONFIG_HR_HTTP_LOG_TO_UART
     ESP_LOGI(TAG, "RX <- enc %u %.*s", (unsigned)len, (int)len, frame);
