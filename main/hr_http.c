@@ -12,6 +12,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -127,6 +128,30 @@ static esp_err_t send_json(httpd_req_t *req, const char *json, size_t len)
     return httpd_resp_send(req, json, len);
 }
 
+/*
+ * One scratch area for every handler that needs more than the 8 KB httpd
+ * stack can carry.
+ *
+ * esp_http_server runs every handler on its single worker task, one after
+ * another, so no two of these can ever be live at the same time - yet each
+ * handler used to own a static buffer of its own: two 12.5 KB history
+ * snapshots, a 9.6 KB verb table, a 5.7 KB recipe body, a 4.5 KB batch ring
+ * and a 1 KB stream buffer, 46 KB of DRAM for a peak need of 12.5 KB. On a
+ * board without PSRAM that difference is the whole Wi-Fi stack's working
+ * heap. A union costs the largest member once. Nothing here survives the
+ * handler that filled it, and nothing may: a handler that returns still
+ * holding a pointer into s_scratch is a bug.
+ */
+#define RCP_SLOTS  8    /* recipe slots in NVS - see the recipe code below */
+#define BATCH_SHOW 40   /* logbook entries /api/batches renders */
+static union {
+    hr_hist_entry_t hist[HR_HIST_CAP];         /* h_history, h_capture */
+    hr_hist_verb_t  verbs[HR_HIST_VERBS];      /* h_verbs */
+    char            recipes[RCP_SLOTS * 700 + 64]; /* h_recipes */
+    hr_batch_t      batches[BATCH_SHOW];       /* h_batches */
+    char            bytes[1024];               /* h_capture, h_batches_csv */
+} s_scratch;
+
 /* -------------------------------------------------------------------- */
 /* GET /  -> embedded HTML                                               */
 /* -------------------------------------------------------------------- */
@@ -232,6 +257,9 @@ static esp_err_t h_state(httpd_req_t *req)
     }
     acts[ai] = '\0';
 
+    multi_heap_info_t heap;
+    heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL);
+
     char body[2048];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
@@ -251,6 +279,12 @@ static esp_err_t h_state(httpd_req_t *req)
                       * console is not. See hr_usb.h for how to read them. */
                      "\"usb_mounted\":%s,\"usb_suspended\":%s,"
                      "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
+                     /* Internal heap: free now, the low-water mark since
+                      * boot, and the largest block still allocatable. The
+                      * last two are what a slow leak and fragmentation
+                      * look like from outside - see the 60 s heap line in
+                      * main.c. */
+                     "\"heap_free\":%u,\"heap_min\":%u,\"heap_largest\":%u,"
                      "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
                      "\"control\":%s,\"actions\":%s,\"pin\":%s,"
                      /* Raw frame: the config screens carry the live
@@ -278,6 +312,9 @@ static esp_err_t h_state(httpd_req_t *req)
                      hr_usb_mounted() ? "true" : "false",
                      hr_usb_suspended() ? "true" : "false",
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
+                     (unsigned)heap.total_free_bytes,
+                     (unsigned)heap.minimum_free_bytes,
+                     (unsigned)heap.largest_free_block,
                      (unsigned long)(esp_timer_get_time() / 1000000),
                      reset_reason_str(), ctrl_enabled() ? "true" : "false",
                      acts, pin_is_set(pinbuf, sizeof(pinbuf))
@@ -304,7 +341,7 @@ static uint32_t query_since(httpd_req_t *req)
 static esp_err_t h_history(httpd_req_t *req)
 {
     uint32_t since = query_since(req);
-    static hr_hist_entry_t out[HR_HIST_CAP]; /* static: too big for stack */
+    hr_hist_entry_t *out = s_scratch.hist; /* too big for the stack */
     int n;
 
     LOCK();
@@ -342,7 +379,7 @@ static esp_err_t h_verbs(httpd_req_t *req)
      * lock with portMAX_DELAY for every frame, so one stuck browser stalled
      * the TinyUSB task, which the dryer's host stack treats as a dead device.
      */
-    static hr_hist_verb_t snap[HR_HIST_VERBS]; /* static: ~10 KB */
+    hr_hist_verb_t *snap = s_scratch.verbs; /* ~10 KB */
     LOCK();
     int nv = s_history->nverbs;
     if (nv > HR_HIST_VERBS) {
@@ -399,9 +436,10 @@ static esp_err_t h_capture(httpd_req_t *req)
                  (int)hr_capture_ready(), (unsigned)hr_capture_size(),
                  h ? "ok" : "FAILED");
         if (h != NULL) {
-            static char buf[1024];
+            char *buf = s_scratch.bytes;
+            const size_t bufsz = sizeof(s_scratch.bytes);
             int n;
-            int first = hr_capture_read(h, buf, sizeof(buf));
+            int first = hr_capture_read(h, buf, bufsz);
             if (first <= 0) {
                 /*
                  * stat() said there were bytes and the file opened, yet it
@@ -421,7 +459,7 @@ static esp_err_t h_capture(httpd_req_t *req)
                 hr_capture_close(h);
                 return ESP_FAIL;
             }
-            while ((n = hr_capture_read(h, buf, sizeof(buf))) > 0) {
+            while ((n = hr_capture_read(h, buf, bufsz)) > 0) {
                 if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
                     hr_capture_close(h);
                     return ESP_FAIL;
@@ -452,7 +490,7 @@ ram_fallback:;
         httpd_resp_send_chunk(req, k_warn, sizeof(k_warn) - 1);
     }
 
-    static hr_hist_entry_t out[HR_HIST_CAP];
+    hr_hist_entry_t *out = s_scratch.hist;
     int n;
     LOCK();
     n = hr_history_since(s_history, 0, out, HR_HIST_CAP);
@@ -1548,7 +1586,7 @@ static esp_err_t h_control_enable(httpd_req_t *req)
 /* Recipes                                                               */
 /* -------------------------------------------------------------------- */
 #define RCP_NVS_NS "hrrcp"
-#define RCP_SLOTS  8
+/* RCP_SLOTS is defined with s_scratch near the top of the file. */
 
 static bool rcp_load(int slot, hr_recipe_t *out)
 {
@@ -1619,11 +1657,12 @@ static int read_body(httpd_req_t *req, char *buf, size_t cap)
  */
 static esp_err_t h_recipes(httpd_req_t *req)
 {
-    static char body[RCP_SLOTS * 700 + 64];
+    char *body = s_scratch.recipes;
+    const size_t bodysz = sizeof(s_scratch.recipes);
     size_t at = 0;
-    int w = snprintf(body, sizeof(body), "{\"extra_dry_s\":%ld,\"slots\":[",
+    int w = snprintf(body, bodysz, "{\"extra_dry_s\":%ld,\"slots\":[",
                      (long)hr_dry_extra_s(&s_dry));
-    if (w < 0 || (size_t)w >= sizeof(body)) {
+    if (w < 0 || (size_t)w >= bodysz) {
         return httpd_resp_send_500(req);
     }
     at = (size_t)w;
@@ -1664,7 +1703,7 @@ static esp_err_t h_recipes(httpd_req_t *req)
         slot[n++] = '}';
         slot[n] = '\0';
         /* Reserve the closing "]}" and the NUL. */
-        if (at + (size_t)n + 3 > sizeof(body)) {
+        if (at + (size_t)n + 3 > bodysz) {
             break;
         }
         memcpy(body + at, slot, (size_t)n);
@@ -2226,9 +2265,9 @@ static esp_err_t h_batches_csv(httpd_req_t *req)
     if (h == NULL) {
         return httpd_resp_sendstr(req, "");
     }
-    static char buf[512];
+    char *buf = s_scratch.bytes;
     int n;
-    while ((n = hr_batchstore_read(h, buf, sizeof(buf))) > 0) {
+    while ((n = hr_batchstore_read(h, buf, sizeof(s_scratch.bytes))) > 0) {
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
             hr_batchstore_close(h);
             return ESP_FAIL;
@@ -2244,12 +2283,11 @@ static esp_err_t h_batches_csv(httpd_req_t *req)
  * Streamed a record at a time. With no PSRAM there is no holding a thousand
  * batches in memory to sort them, so the file is read once into a bounded
  * ring of the most recent entries and only those are rendered.
+ * BATCH_SHOW is defined with s_scratch near the top of the file.
  */
-#define BATCH_SHOW 40
-
 static esp_err_t h_batches(httpd_req_t *req)
 {
-    static hr_batch_t ring[BATCH_SHOW];
+    hr_batch_t *ring = s_scratch.batches;
     size_t have = 0, next = 0;
 
     void *h = hr_batchstore_open();
