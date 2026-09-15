@@ -2949,9 +2949,25 @@ $("#usbreattach").addEventListener("click",async()=>{
 });
 
 /* ---------- OTA ---------- */
-$("#otago").addEventListener("click",()=>{
+$("#otago").addEventListener("click",async ()=>{
   const f=$("#otafile").files[0], st=$("#otastatus");
   if(!f){ note(st,"Choose a .bin file first","bad"); return; }
+  /*
+   * Ask for the PIN BEFORE the upload. The firmware image is the POST body, so
+   * a rejected upload means pushing the whole 1.3 MB again just to be told the
+   * adapter is locked. Check /api/pin first and prompt up front; only send once
+   * we hold a PIN (or the adapter has none set). The post-upload check below
+   * still stands, for a stored PIN that turns out to be wrong.
+   */
+  if(!pinGet()){
+    let needs=false;
+    try{ needs = !!(await (await fetch("/api/pin")).json()).set; }catch(e){}
+    if(needs){
+      const entered = prompt("Control PIN");
+      if(!entered){ note(st,"Update needs the control PIN.","bad"); return; }
+      pinPut(entered);
+    }
+  }
   const bar=$("#otabar"), fill=$("#otafill");
   bar.style.display="block"; fill.style.width="0";
   note(st,"Uploading "+esc(f.name)+" ("+Math.round(f.size/1024)+" KB)…","info");
