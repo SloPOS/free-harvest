@@ -1,4 +1,5 @@
 #include "hr_session.h"
+#include "hr_enc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -240,11 +241,15 @@ static void on_frame(const hr_frame_t *f, void *user)
 }
 
 /*
- * A complete encoded frame (6.0.644170 transport). It is not parsed - nothing
- * here knows what is inside - but it is unmistakably the dryer talking, so it
- * keeps the link up exactly as a plaintext frame would. Before this, a dryer
- * in that mode was "silent" to the session: link down after 45 s, heartbeat
- * and re-ask stopped, and the stream was recorded only as rejected debris.
+ * A complete encoded frame (6.0.644170 transport). It is unmistakably the
+ * dryer talking, so it keeps the link up exactly as a plaintext frame would,
+ * and it is handed raw to the enc observer (RAM ring, capture). Then it is
+ * decoded (hr_enc): the plaintext line is parsed and run through on_frame,
+ * the same entry a plaintext frame takes - so REQINFO gets its WIFIINFO,
+ * SNM/CFG/UID/STAT fill in dryer info (which is what stops the re-ask), and
+ * the observer sees an ordinary frame. A frame that does not decode to a
+ * parseable line is counted and otherwise left alone: the link was already
+ * refreshed and the raw bytes are already in the ring.
  */
 static void on_enc(const char *frame, size_t len, void *user)
 {
@@ -257,6 +262,14 @@ static void on_enc(const char *frame, size_t len, void *user)
 
     if (s->enc_observer != NULL) {
         s->enc_observer(frame, len, s->enc_observer_user);
+    }
+
+    int pn = hr_enc_decode(frame, len, s->enc_plain, sizeof(s->enc_plain));
+    if (pn > 0 && hr_frame_parse(s->enc_plain, &s->enc_frame)) {
+        s->enc_decoded++;
+        on_frame(&s->enc_frame, s);
+    } else {
+        s->enc_undecoded++;
     }
 }
 

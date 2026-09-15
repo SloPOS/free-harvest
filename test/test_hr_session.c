@@ -692,23 +692,30 @@ static void test_encoded_frames_keep_the_link_up(void)
     CHECK_INT(s.last_enc_ms, t);
     CHECK_INT(s.last_enc_len, 20);
 
-    /* counted as encoded - not as frames_in, not as bad, not as unknown */
+    /* counted as encoded, never as bad or unknown; the raw observer saw
+     * each one. ENC_20 is a real REQINFO, so with the decoder in the
+     * session each also decoded and counted as a frame in. */
     CHECK_INT(s.stream.enc_frames, 4);
     CHECK_INT(s.stream.enc_bytes, 80);
     CHECK_INT(s.stream.enc_bad, 0);
-    CHECK_INT(s.frames_in, 1);
+    CHECK_INT(s.enc_decoded, 4);
+    CHECK_INT(s.enc_undecoded, 0);
+    CHECK_INT(s.frames_in, 5);
     CHECK_INT(s.stream.frames_bad, 0);
     CHECK_INT(s.unknown_verbs, 0);
     CHECK_INT(seen.count, 4);
     CHECK_INT(seen.last_len, 20);
     CHECK_STR(seen.last, ENC_20);
 
-    /* nothing was sent in reply to them - the session does not speak the
-     * encoded transport, it only listens */
-    CHECK_INT(log.frames, 1);                    /* the one WIFIINFO */
+    /* each decoded REQINFO was answered with WIFIINFO, like plaintext -
+     * this is what keeps the dryer's WiFi screen from showing the adapter
+     * as disconnected in the encoded mode */
+    CHECK_INT(log.frames, 5);
+    CHECK(strstr(log.buf, "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 41\r") != NULL);
 
-    /* the re-ask keeps going: FDNAME/REQCFG/STATUS are still unanswered in
-     * plaintext, and the heartbeat is what the main loop runs while UP */
+    /* the re-ask keeps going: FDNAME/REQCFG/STATUS are still unanswered
+     * (only REQINFO frames arrived), and the heartbeat is what the main loop
+     * runs while UP */
     memset(&log, 0, sizeof(log));
     hr_session_heartbeat(&s);
     CHECK_INT(log.frames, 4);
@@ -778,17 +785,23 @@ static void test_compat_on_still_answers_plaintext_reqinfo(void)
     CHECK_STR(log.buf,
               "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
 
-    /* between encoded frames, even glued to one in the same transfer */
+    /* between encoded frames, even glued to one in the same transfer. The
+     * encoded one is itself a REQINFO (decoded), so two answers: one per
+     * REQINFO, encoded or not. */
     memset(&log, 0, sizeof(log));
     feed(&s, ENC_20, 47000);
+    CHECK_INT(log.frames, 1);
+    memset(&log, 0, sizeof(log));
     char glued[80];
     snprintf(glued, sizeof(glued), "%sREQINFO,\r", ENC_20);
     feed(&s, glued, 57000);
-    CHECK_INT(log.frames, 1);
+    CHECK_INT(log.frames, 2);
     CHECK_STR(log.buf,
+              "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 57\r"
               "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 57\r");
     CHECK_INT(s.stream.enc_frames, 2);
-    CHECK_INT(s.frames_in, 2);
+    CHECK_INT(s.enc_decoded, 2);
+    CHECK_INT(s.frames_in, 4);
     CHECK_INT(s.stream.frames_bad, 0);
 
     /* and with the switch OFF, unchanged - the pinned 641041 behaviour */
@@ -802,8 +815,129 @@ static void test_compat_on_still_answers_plaintext_reqinfo(void)
               "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 37\r");
 }
 
+/*
+ * Synthetic frames: plaintext of the shapes the dryer sends, encoded with the
+ * same cipher hr_enc decodes (arbitrary nonces). Synthetic so no machine's
+ * UID or serial number sits in a public test; the cipher itself is covered by
+ * real captured REQINFO frames in test_hr_enc_decode.c.
+ */
+static const char SYN_UID[] =
+    ")S$C-]^F2HN8-UA#XND8.LD'JEb<>B=S0@Y=X/T$-\\E1O4-A2&;,Y1FSF=(A0^'_9*0&#6[T"
+    ":=Ca9E#\\E5bF21H$N1JOB)M$";
+    /* UID,0-00000000-11111111-22222222,5,6.0.644170,0,5,3,1,132,186,65, */
+static const char SYN_SNM[] = ")S#G.7--WJK%T+84R^6WJ=P6@0Z3(>?N;3!!";
+    /* SNM,-System Name-, */
+static const char SYN_CFG[] =
+    ")S$+.P;TY,`^<RRA=:A<V^XVC_Z5M3L^W:B]EL:M@I;G0&3Ma?IOG`X+F7'WQa4LHb)7RS!!";
+    /* CFG,0000-0000-0000,HL-6D~05,HLG0000000000000, */
+static const char SYN_STAT[] =
+    ")S$3/)J;GQ_:M_9SSA#3I#FaEK^_%(6D+<=FW?%6JL>b%AL<1@2KO9@<7JG&A=4V'1F79ZV>J@/"
+    "$3'6F";
+    /* STAT,4,0,0,0,52,48415,3494,0,45,Auto,1,20,0,0,5,0,0,, */
+
+typedef struct {
+    int count;
+    char verbs[256];
+    char last_raw[HR_MAX_FRAME];
+} frames_seen_t;
+
+static void frame_observer(const hr_frame_t *f, void *user)
+{
+    frames_seen_t *o = (frames_seen_t *)user;
+    o->count++;
+    size_t n = strlen(o->verbs);
+    snprintf(o->verbs + n, sizeof(o->verbs) - n, "%s%s", n ? " " : "", f->verb);
+    snprintf(o->last_raw, sizeof(o->last_raw), "%s", f->raw);
+}
+
+static void test_encoded_frames_decode_into_the_plaintext_path(void)
+{
+    /*
+     * The other half of the 6.0.644170 story. Framing alone kept the link up
+     * but left the dryer's answers unread: the re-ask ran forever, the
+     * plaintext observer never saw a STAT, and the encoded REQINFO went
+     * unanswered. With hr_enc in the session, an encoded frame that decodes
+     * is handled exactly as if the dryer had sent the plaintext: info
+     * fields, have_stat, WIFIINFO, the observer, frames_in.
+     */
+    TEST_CASE("encoded frames decode and take the plaintext path");
+    tx_log_t log = {0};
+    enc_seen_t raw = {0};
+    frames_seen_t seen = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_compat(&s, true, true);
+    hr_session_set_enc_observer(&s, enc_observer, &raw);
+    hr_session_set_observer(&s, frame_observer, &seen);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    /* the hello reply, one burst: UID + SNM + CFG + STAT (+ REQINFO slot) */
+    char burst[400];
+    snprintf(burst, sizeof(burst), "%s%s%s%s%s", SYN_UID, SYN_SNM, SYN_CFG,
+             SYN_STAT, ENC_20);
+    feed(&s, burst, 5000);
+
+    CHECK_INT(s.stream.enc_frames, 5);
+    CHECK_INT(s.stream.enc_bad, 0);
+    CHECK_INT(s.enc_decoded, 5);
+    CHECK_INT(s.enc_undecoded, 0);
+    CHECK_INT(raw.count, 5);                     /* raw ring/capture still fed */
+    CHECK_INT(s.frames_in, 5);
+    CHECK_INT(s.stream.frames_bad, 0);
+    CHECK_INT(s.unknown_verbs, 0);
+    CHECK_INT(s.link, HR_LINK_UP);
+
+    /* the observer saw ordinary frames, in order, with plaintext raw */
+    CHECK_INT(seen.count, 5);
+    CHECK_STR(seen.verbs, "UID SNM CFG STAT REQINFO");
+    CHECK_STR(seen.last_raw, "REQINFO,");
+
+    /* dryer info filled in from the decoded frames */
+    CHECK_STR(s.info.uid, "0-00000000-11111111-22222222");
+    CHECK_STR(s.info.fw_version, "6.0.644170");
+    CHECK_STR(s.info.serial, "-System Name-");
+    CHECK_STR(s.info.dryer_sn, "HLG0000000000000");
+    CHECK(s.info.have_stat);
+    CHECK_STR(s.info.last_stat,
+              "STAT,4,0,0,0,52,48415,3494,0,45,Auto,1,20,0,0,5,0,0,,");
+
+    /* the encoded REQINFO was answered */
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf, "WIFIINFO 5 81 \"MyNetwork\" 0 HR_aabbccddeeff 0 0 5\r");
+
+    /* and the re-ask is over: everything it asked for has arrived */
+    memset(&log, 0, sizeof(log));
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 1);
+    CHECK_STR(log.buf, "STATE 5 81\r");
+
+    /* a frame that does not decode is counted and otherwise harmless: link
+     * refreshed, raw observer fed, nothing parsed, nothing sent */
+    memset(&log, 0, sizeof(log));
+    feed(&s, ")S#7!!!!!!!!!!!!!!!!", 20000);   /* valid header, pad-only body */
+    CHECK_INT(s.stream.enc_frames, 6);
+    CHECK_INT(s.enc_decoded, 5);
+    CHECK_INT(s.enc_undecoded, 1);
+    CHECK_INT(s.frames_in, 5);
+    CHECK_INT(s.stream.frames_bad, 0);
+    CHECK_INT(raw.count, 6);
+    CHECK_INT(seen.count, 5);
+    CHECK_INT(log.frames, 0);
+    CHECK_INT(s.last_rx_ms, 20000);
+    CHECK_INT(s.link, HR_LINK_UP);
+
+    /* plaintext firmware is untouched: no ")S", no decoder */
+    feed(&s, "STAT,1,0,0,0,70,760000,0,0,0,Auto,0,0,0,0,0,0,0,,\r", 21000);
+    CHECK_INT(s.stream.enc_frames, 6);
+    CHECK_INT(s.frames_in, 6);
+    CHECK_INT(seen.count, 6);
+    CHECK_STR(s.info.last_stat,
+              "STAT,1,0,0,0,70,760000,0,0,0,Auto,0,0,0,0,0,0,0,,");
+}
+
 int main(void)
 {
+    test_encoded_frames_decode_into_the_plaintext_path();
     test_encoded_frames_keep_the_link_up();
     test_encoded_partial_is_stale_like_any_other();
     test_compat_on_still_answers_plaintext_reqinfo();

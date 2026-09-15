@@ -233,6 +233,8 @@ static esp_err_t h_state(httpd_req_t *req)
     unsigned long enc_bad = s_session->stream.enc_bad;
     unsigned long enc_last_ms = s_session->last_enc_ms;
     unsigned enc_last_len = (unsigned)s_session->last_enc_len;
+    unsigned long enc_decoded = s_session->enc_decoded;
+    unsigned long enc_undecoded = s_session->enc_undecoded;
     const char *link = s_session->link == HR_LINK_UP ? "up" : "down";
     uint32_t latest = hr_history_latest_seq(s_history);
     /* Snapshot the telemetry under the same lock its writers take. */
@@ -297,9 +299,13 @@ static esp_err_t h_state(httpd_req_t *req)
                      /* Encoded transport (")S" + length, 6.0.644170 after
                       * "UNIQUE lH"): complete frames framed and stored,
                       * their bytes, frames abandoned as partial/cut, and the
-                      * length and age of the most recent one. See /api/enc. */
+                      * length and age of the most recent one. See /api/enc.
+                      * enc_decoded / enc_undecoded: how many of those frames
+                      * decoded to a plaintext line (and went through the
+                      * normal path - they are in frames_in too) or did not. */
                      "\"enc_frames\":%lu,\"enc_bytes\":%lu,\"enc_bad\":%lu,"
                      "\"enc_last_len\":%u,\"enc_last_age_ms\":%ld,"
+                     "\"enc_decoded\":%lu,\"enc_undecoded\":%lu,"
                      "\"latest_seq\":%" PRIu32 ",\"wifi\":\"%s\",\"ip\":\"%s\","
                      "\"ssid\":\"%s\","
                      "\"phase\":%d,\"phase_label\":\"%s\",\"have_tel\":%s,"
@@ -331,6 +337,7 @@ static esp_err_t h_state(httpd_req_t *req)
                      hr_compat_644170() ? "true" : "false",
                      fin, fout, unk, bad,
                      enc_frames, enc_bytes, enc_bad, enc_last_len, enc_age_ms,
+                     enc_decoded, enc_undecoded,
                      latest,
                      wifi_status_str(), ip, ssid,
                      (int)ph, hr_phase_label(ph), tel_valid ? "true" : "false",

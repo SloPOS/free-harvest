@@ -350,10 +350,14 @@ static void on_reject(const char *bytes, size_t n, const char *why, void *user)
 }
 
 /*
- * A complete encoded frame from a 6.0.644170 dryer. Stored, not decoded:
- * into the RAM ring for /api/enc and into the capture log for download. The
- * session has already refreshed the link on it. Runs on the USB RX task, so
- * the same rules as on_inbound: no flash work here, the capture queues.
+ * A complete encoded frame from a 6.0.644170 dryer, raw: into the RAM ring
+ * for /api/enc and into the capture log for download. The session has
+ * already refreshed the link on it, and right after this returns it decodes
+ * the frame (hr_enc) and runs the plaintext through its ordinary frame path -
+ * REQINFO -> WIFIINFO, SNM/CFG/UID/STAT bookkeeping, and on_inbound() above,
+ * so telemetry, the logbook, the graph, MQTT and the UI all work on
+ * 6.0.644170 exactly as on the plaintext firmware. Runs on the USB RX task,
+ * so the same rules as on_inbound: no flash work here, the capture queues.
  */
 static void on_enc_frame(const char *frame, size_t len, void *user)
 {
@@ -366,27 +370,12 @@ static void on_enc_frame(const char *frame, size_t len, void *user)
 
     hr_capture_enc(t, frame, len);
 
-    /*
-     * Decode it and run the plaintext through the ordinary inbound path, so
-     * telemetry, the logbook, the graph, MQTT and the UI all work on a
-     * 6.0.644170 dryer exactly as on the plaintext firmware. on_enc_frame
-     * only ever fires for a real ")S" frame, so nothing plaintext is touched
-     * and an older dryer never reaches this at all.
-     */
-    char plain[HR_MAX_FRAME];
-    int pn = hr_enc_decode(frame, len, plain, sizeof(plain));
-    if (pn > 0) {
-        hr_frame_t pf;
-        if (hr_frame_parse(plain, &pf)) {
-            on_inbound(&pf, NULL);
-        }
-    }
-
     /* Once, so the operator sees the transport switch in /api/log. */
     if (s_session.stream.enc_frames == 1) {
         ESP_LOGW(TAG, "dryer switched to the encoded transport (\")S\" + "
                       "length, first frame %u chars); decoding it - see "
-                      "/api/enc for the raw frames", (unsigned)len);
+                      "/api/enc for the raw frames, enc_decoded in "
+                      "/api/state", (unsigned)len);
     }
 #if CONFIG_HR_HTTP_LOG_TO_UART
     ESP_LOGI(TAG, "RX <- enc %u %.*s", (unsigned)len, (int)len, frame);
@@ -800,13 +789,14 @@ void app_main(void)
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
                      "frames_in=%lu frames_out=%lu bad=%lu noise=%lu "
-                     "unknown=%lu enc=%lu/%luB link=%s | heap=%u",
+                     "unknown=%lu enc=%lu/%luB dec=%lu/%lu link=%s | heap=%u",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in, s_session.frames_out,
                      s_session.stream.frames_bad,
                      s_session.stream.noise_bytes, s_session.unknown_verbs,
                      s_session.stream.enc_frames, s_session.stream.enc_bytes,
+                     s_session.enc_decoded, s_session.enc_undecoded,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
                      (unsigned)esp_get_free_heap_size());
             ESP_LOGI(TAG,

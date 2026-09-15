@@ -109,15 +109,25 @@ typedef struct {
     /*
      * Encoded transport, as seen by the session. Counts live in the stream
      * (stream.enc_frames / enc_bytes / enc_bad); these are the "when" and
-     * "how big" of the most recent one, for /api/state. Encoded frames are
-     * NOT counted in frames_in - that stays the plaintext count - but they do
-     * refresh last_rx_ms, so the link stays up and the heartbeat and re-ask
-     * keep going while the dryer talks this way.
+     * "how big" of the most recent one, for /api/state. Every complete
+     * encoded frame refreshes last_rx_ms (link up, heartbeat and re-ask keep
+     * going), is handed raw to enc_observer, and is then DECODED (hr_enc):
+     * a frame that decodes to a parseable line goes through exactly the
+     * plaintext path - frames_in, REQINFO -> WIFIINFO, SNM/CFG/UID/STAT
+     * bookkeeping, the observer - so a 6.0.644170 dryer behaves like the
+     * plaintext firmware from here on. enc_decoded / enc_undecoded count the
+     * two outcomes.
      */
     unsigned long last_enc_ms;  /* now_ms when the last encoded frame completed; 0 = never */
     size_t        last_enc_len; /* its declared (= actual) total length */
+    unsigned long enc_decoded;  /* encoded frames that decoded and parsed */
+    unsigned long enc_undecoded;/* encoded frames the decoder or parser refused */
     hr_enc_observer_fn enc_observer;
     void *enc_observer_user;
+    /* Decode scratch. Kept off the USB task's stack; the session is fed from
+     * one task only. */
+    char enc_plain[HR_MAX_FRAME];
+    hr_frame_t enc_frame;
 
     /*
      * Payload placed in the GOTIT ack. UNVERIFIED - the genuine adapter's
