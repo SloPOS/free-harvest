@@ -10,6 +10,12 @@
  *     browser request is redirected to the setup page.
  *   - The HTTP layer (hr_http) calls hr_wifi_set_credentials() when the user
  *     submits the setup form; this stores them and reconnects.
+ *   - "Connected" means associated AND holding an IPv4 address. A station
+ *     whose DHCP lease lapses stays associated (the driver never reports a
+ *     disconnect), so a 2 s watchdog checks the address: after a few
+ *     seconds without one the status is HR_WIFI_NO_IP, DHCP is restarted,
+ *     and if that does not help the network is left and rejoined, with
+ *     back-off (hr_netwatch.h, CONFIG_HR_WIFI_NOIP_*).
  */
 #ifndef HR_WIFI_H
 #define HR_WIFI_H
@@ -22,6 +28,14 @@ typedef enum {
     HR_WIFI_AP_SETUP,   /* setup AP is up, waiting for credentials */
     HR_WIFI_CONNECTING, /* trying stored credentials */
     HR_WIFI_CONNECTED,  /* station connected, has IP */
+    /*
+     * Station associated, but no usable IPv4 address for longer than a few
+     * seconds: the DHCP lease was lost and not renewed, or a join never got
+     * one. The radio and RSSI look fine; nothing is reachable. hr_wifi is
+     * already restarting DHCP / rejoining (see hr_netwatch.h); callers must
+     * treat this as NOT connected.
+     */
+    HR_WIFI_NO_IP,
 } hr_wifi_status_t;
 
 void hr_wifi_start(void);
@@ -30,6 +44,23 @@ hr_wifi_status_t hr_wifi_status(void);
 
 /* Current station IP as a string ("0.0.0.0" if not connected). */
 void hr_wifi_ip(char *out, size_t cap);
+
+/*
+ * The no-IP watchdog, for /api/state. `associated` is the driver's view of
+ * the link; `noip_s` is how long the station has been associated without an
+ * address (0 when it has one or is not associated); the counters are since
+ * boot: episodes that outlived the grace period, DHCP client restarts and
+ * forced rejoins issued to get an address back.
+ */
+typedef struct {
+    bool associated;
+    unsigned long noip_s;
+    unsigned episodes;
+    unsigned dhcp_restarts;
+    unsigned reconnects;
+} hr_wifi_noip_stats_t;
+
+void hr_wifi_noip_stats(hr_wifi_noip_stats_t *out);
 
 /* The SSID we are connected to or configured for ("" if none). */
 void hr_wifi_current_ssid(char *out, size_t cap);

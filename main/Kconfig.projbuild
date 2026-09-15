@@ -14,6 +14,42 @@ config HR_AP_PASSWORD
         Password for the setup AP. Leave blank for an open network. If set,
         must be at least 8 characters (WPA2 requirement).
 
+config HR_WIFI_NOIP_DHCP_RESTART_S
+    int "No-IP watchdog: restart the DHCP client after (seconds)"
+    range 5 600
+    default 15
+    help
+        A station can stay associated - beacons, RSSI, no disconnect event -
+        after its DHCP lease expires and the router stops answering renewals;
+        lwIP then sits at 0.0.0.0 broadcasting DISCOVER. Once the station
+        has been associated without an address for this long, the DHCP
+        client is stopped and started so it begins from a clean state.
+        Must be shorter than HR_WIFI_NOIP_RECONNECT_S to matter. The status
+        (web UI, /api/state, the dryer's WIFIINFO) reports "no-ip" instead
+        of "connected" after 5 s regardless.
+
+config HR_WIFI_NOIP_RECONNECT_S
+    int "No-IP watchdog: leave and rejoin the network after (seconds)"
+    range 10 3600
+    default 45
+    help
+        If restarting DHCP did not bring an address back, the station
+        disconnects and reconnects so both the association and DHCP start
+        afresh. While the address stays missing the wait doubles on each
+        rejoin (45, 90, 180 s ...) up to HR_WIFI_NOIP_RECONNECT_MAX_S, and
+        resets as soon as an address is obtained. The setup AP is NOT
+        re-opened by these rejoins.
+
+config HR_WIFI_NOIP_RECONNECT_MAX_S
+    int "No-IP watchdog: longest wait between rejoins (seconds)"
+    range 10 7200
+    default 360
+    help
+        Cap for the doubling back-off above. Bounds how often a network
+        that never hands out an address is rejoined: at most once per this
+        many seconds, forever - the adapter is powered by the dryer and
+        must find its way back on its own.
+
 config HR_ACK_PAYLOAD
     string "GOTIT ack payload (UNVERIFIED)"
     default "ESP32ADAPTER"

@@ -2308,8 +2308,14 @@ async function refreshState(){
     lastState=st;
     const linked = st.link==="up";
     $("#dot").className = "dot" + (linked? " on":"");
+    /* "no-ip": associated with the router but without an address (DHCP lease
+       lost); the adapter is recovering on its own. Spell it out - the raw
+       token reads like a typo. */
+    const wifiText = st.wifi==="no-ip"
+      ? "Wi-Fi: no IP address (DHCP), reconnecting"+(st.noip_s? " · "+st.noip_s+"s" : "")
+      : st.wifi;
     $("#hdrsub").textContent = st.wifi==="connected"
-      ? (linked? "dryer connected" : "waiting for dryer") : st.wifi;
+      ? (linked? "dryer connected" : "waiting for dryer") : wifiText;
     /* leave the "Free Harvest" wordmark alone - it used to be overwritten here */
 
     $("#d-in").textContent=st.frames_in; $("#d-out").textContent=st.frames_out;
@@ -2369,10 +2375,10 @@ async function refreshState(){
       $("#usb-verdict").textContent = v;
     }
     $("#set-wifi-sub").textContent = st.wifi==="connected"
-      ? (st.ssid||"connected")+" · "+st.ip : st.wifi;
+      ? (st.ssid||"connected")+" · "+st.ip : wifiText;
     $("#wifiinfo").innerHTML = st.wifi==="connected"
       ? "Connected to <b>"+esc(st.ssid||"")+"</b> at <b>"+esc(st.ip||"")+"</b>"
-      : "Status: "+esc(st.wifi);
+      : "Status: "+esc(wifiText);
 
     /* onboarding gating */
     const wifiOK = st.wifi==="connected";
