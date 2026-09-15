@@ -18,10 +18,15 @@ void hr_usb_init(hr_session_t *session);
  *
  * Serialised: frames come from the USB task (WIFIINFO), the main loop (hello,
  * heartbeat), httpd (CLICK, recipes) and MQTT, and the CDC FIFO is a
- * single-producer queue. Returns true only if the whole frame was queued AND
- * flushed to the host; false when the host has not enumerated us, the FIFO
- * refused bytes, the flush timed out, or another sender held the transport for
- * too long. Nothing is left behind in the FIFO on failure.
+ * single-producer queue. Returns true only if the WHOLE frame was accepted
+ * into the FIFO and handed to the endpoint; false when the host has not
+ * enumerated us, the FIFO has no room for the whole frame, or another sender
+ * held the transport for too long. A frame is never queued in part: either
+ * every byte is in, or none is, so the wire never carries a torn frame.
+ *
+ * "Accepted" is not "acknowledged": a host that is slow to poll its IN
+ * endpoint receives the frame a little later, and the FIFO is only emptied
+ * when the host actually detaches (tud_umount_cb), never mid-frame.
  */
 bool hr_usb_tx(const char *data, size_t len, void *user);
 
