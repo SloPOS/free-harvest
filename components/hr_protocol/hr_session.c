@@ -233,6 +233,11 @@ void hr_session_rx(hr_session_t *s, const void *data, size_t n,
         return;
     }
     s->now_ms = now_ms;
+    if (s->stream.len > 0 &&
+        now_ms - s->last_byte_ms > HR_PARTIAL_STALE_MS) {
+        hr_stream_discard_partial(&s->stream, "stale");
+    }
+    s->last_byte_ms = now_ms;
     hr_stream_feed(&s->stream, data, n, on_frame, s);
 }
 

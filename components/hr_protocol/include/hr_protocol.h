@@ -80,6 +80,7 @@ typedef struct {
     bool overflowed;          /* current frame exceeded the buffer */
     unsigned long frames_ok;  /* frames delivered to the callback */
     unsigned long frames_bad; /* frames dropped (oversized / unparsable) */
+    unsigned long noise_bytes;/* non-printable bytes discarded, never framed */
     hr_reject_cb reject;      /* optional; see hr_reject_cb */
     void *reject_user;
 } hr_stream_t;
@@ -88,6 +89,17 @@ void hr_stream_init(hr_stream_t *s);
 
 /* Register (or clear, with NULL) the rejected-line observer. */
 void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user);
+
+/*
+ * Throw away a frame that began but never got its terminator, reporting it
+ * to the observer as `why`. The caller decides WHEN a partial frame is dead
+ * (the stream has no clock): the dryer writes each frame in one go, so bytes
+ * that have sat unterminated for more than a second are not the start of
+ * anything - they are whatever a host sent before it began speaking the
+ * protocol, and without this they were glued to the front of the first
+ * real frame. Returns true if something was pending.
+ */
+bool hr_stream_discard_partial(hr_stream_t *s, const char *why);
 
 /* Feed `n` bytes; `cb` fires for each complete frame found. */
 void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,

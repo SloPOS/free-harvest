@@ -68,6 +68,7 @@ void hr_stream_init(hr_stream_t *s)
     s->overflowed = false;
     s->frames_ok = 0;
     s->frames_bad = 0;
+    s->noise_bytes = 0;
     s->reject = NULL;
     s->reject_user = NULL;
 }
@@ -89,6 +90,17 @@ static void reject(hr_stream_t *s, const char *why)
     }
 }
 
+bool hr_stream_discard_partial(hr_stream_t *s, const char *why)
+{
+    if (s == NULL || (s->len == 0 && !s->overflowed)) {
+        return false;
+    }
+    reject(s, why != NULL ? why : "discarded");
+    s->len = 0;
+    s->overflowed = false;
+    return true;
+}
+
 void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
                     void *user)
 {
@@ -98,9 +110,32 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
 
     const unsigned char *p = (const unsigned char *)data;
     for (size_t i = 0; i < n; i++) {
-        char ch = (char)p[i];
+        const unsigned char uc = p[i];
+        char ch = (char)uc;
 
         if (ch != '\r' && ch != '\n') {
+            /*
+             * The wire protocol is printable ASCII, comma-separated, CR-
+             * terminated. A byte outside that range is not part of any
+             * frame - line noise, a bootloader probe (esptool's SLIP sync
+             * is 0xC0 0x00 0x08 ... 0x55 0x55), a host stack hiccup - and
+             * must not be kept: with no terminator of its own it used to
+             * sit in the buffer and glue itself to the front of the next
+             * real frame, which then parsed as an unknown verb. On the
+             * bench the frame it spoiled was the dryer's first REQINFO, so
+             * WIFIINFO was never sent for it. Drop the byte, and with it
+             * whatever partial frame it interrupted; the next printable
+             * byte starts clean.
+             */
+            if (uc < 0x20 || uc >= 0x7f) {
+                if (s->len > 0 || s->overflowed) {
+                    reject(s, "binary noise");
+                    s->len = 0;
+                    s->overflowed = false;
+                }
+                s->noise_bytes++;
+                continue;
+            }
             if (s->len < HR_MAX_FRAME - 1) {
                 s->buf[s->len++] = ch;
             } else {

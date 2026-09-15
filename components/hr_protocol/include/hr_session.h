@@ -31,6 +31,16 @@ extern "C" {
  */
 #define HR_LINK_TIMEOUT_MS 45000UL
 
+/*
+ * A frame that began but has not been terminated after this long is not a
+ * frame. Real frames are under 200 bytes and arrive in one USB transfer;
+ * REQINFO itself repeats every 1-2 s. What this catches is bytes a host sent
+ * BEFORE it spoke the protocol (a flasher probing the port, terminal noise),
+ * which otherwise sit in the buffer and prefix the next real frame - on the
+ * bench that turned the dryer's first REQINFO into an unknown verb.
+ */
+#define HR_PARTIAL_STALE_MS 1500UL
+
 typedef enum {
     HR_LINK_DOWN = 0,
     HR_LINK_UP,
@@ -81,7 +91,8 @@ typedef struct {
     hr_dryer_info_t info;
 
     unsigned long now_ms;
-    unsigned long last_rx_ms;
+    unsigned long last_rx_ms;   /* last complete frame */
+    unsigned long last_byte_ms; /* last byte of any kind, for stale partials */
     unsigned long frames_in;
     unsigned long frames_out;
     unsigned long unknown_verbs;

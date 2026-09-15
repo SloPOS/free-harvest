@@ -517,8 +517,42 @@ static void test_link_still_drops_when_dryer_really_gone(void)
     CHECK_INT(s.link, HR_LINK_DOWN);
 }
 
+static void test_stale_partial_frame_does_not_prefix_reqinfo(void)
+{
+    /*
+     * Bench, 2026-09-15: esptool probed CDC0 (SLIP sync: control bytes and
+     * a run of 'U'), then the replay sent REQINFO. The 'U's were still in
+     * the stream buffer, the frame parsed as "UUU...UREQINFO", and no
+     * WIFIINFO went out for the dryer's first request.
+     */
+    TEST_CASE("stale partial frame does not prefix REQINFO");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    static const unsigned char probe[] = {0xc0, 0x00, 0x08, 0x01, 0x00,
+                                          0x55, 0x55, 0x55, 0x55};
+    hr_session_rx(&s, probe, sizeof(probe), 10000);
+    /* Two seconds of silence, then the dryer speaks. */
+    feed(&s, "REQINFO\r", 12000);
+    CHECK_INT(log.frames, 1);
+    CHECK(strncmp(log.buf, "WIFIINFO 5 81", 13) == 0);
+    CHECK_INT(s.frames_in, 1);
+    CHECK_INT(s.unknown_verbs, 0);
+    CHECK_INT(s.stream.frames_bad, 1);          /* the "UUUU" was reported */
+
+    /* A frame legitimately split across two transfers a few ms apart is
+     * still reassembled: the rule is about seconds, not chunks. */
+    hr_session_rx(&s, "REQI", 4, 13000);
+    hr_session_rx(&s, "NFO\r", 4, 13020);
+    CHECK_INT(log.frames, 2);
+    CHECK_INT(s.frames_in, 2);
+}
+
 int main(void)
 {
+    test_stale_partial_frame_does_not_prefix_reqinfo();
     test_link_survives_normal_idle_frame_gap();
     test_link_still_drops_when_dryer_really_gone();
     test_classify_config_verbs();
