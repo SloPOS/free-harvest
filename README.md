@@ -30,10 +30,15 @@ Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 > capture. Free Harvest decodes it, and from the app a 644170 dryer behaves like
 > any other.
 >
-> On `6.0.644170`, turn on the **6.0.644170 handshake** in Settings → Debug
-> (or `POST /api/compat compat644170=1`). It is off by default so nothing
-> changes for plaintext machines. If you would rather go back to plaintext, the
-> build on
+> **There is nothing to switch on.** The adapter reads the dryer's build from
+> its `UID` reply and enables the encoded handshake by itself the first time it
+> sees `6.0.644170`, then re-introduces itself so the machine starts answering.
+> A plaintext dryer is never touched, and the decoder only ever runs on a real
+> encoded frame. The toggle is still there in Settings → Debug (or
+> `POST /api/compat compat644170=1`) if it ever gets that wrong — and a choice
+> made by hand is remembered, not overridden.
+>
+> If you would rather go back to plaintext firmware entirely, the build on
 > [harvestright.com](https://harvestright.com/pages/customer-support) is the
 > working one — get the firmware and the steps from HarvestRight, not here.
 

@@ -13,6 +13,7 @@ static const char *TAG = "hr_compat";
 
 static atomic_bool s_on;
 static atomic_bool s_changed;
+static atomic_bool s_explicit;   /* a value was stored, not just defaulted */
 
 void hr_compat_init(void)
 {
@@ -28,6 +29,7 @@ void hr_compat_init(void)
         if (nvs_get_u8(nh, COMPAT_NVS_KEY, &v) == ESP_OK) {
             on = (v != 0);
             src = "nvs";
+            atomic_store(&s_explicit, true);
         }
         nvs_close(nh);
     }
@@ -45,6 +47,9 @@ bool hr_compat_set_644170(bool on)
 {
     atomic_store(&s_on, on);
     atomic_store(&s_changed, true);
+    /* However it got here - the web UI, /api/compat, or auto-detection - this
+     * is now a decision, and auto-detection must not override it later. */
+    atomic_store(&s_explicit, true);
     nvs_handle_t nh;
     if (nvs_open(COMPAT_NVS_NS, NVS_READWRITE, &nh) != ESP_OK) {
         ESP_LOGE(TAG, "nvs_open failed; setting not persisted");
@@ -61,4 +66,9 @@ bool hr_compat_set_644170(bool on)
 bool hr_compat_take_changed(void)
 {
     return atomic_exchange(&s_changed, false);
+}
+
+bool hr_compat_explicit(void)
+{
+    return atomic_load(&s_explicit);
 }

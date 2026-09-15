@@ -59,6 +59,12 @@ static hr_phase_tracker_t s_tracker;
 static hr_trend_t s_trend;
 /* Last batch-elapsed seen, to notice a new batch and start a fresh series. */
 static long s_last_batch_elapsed = -1;
+/*
+ * Set from the USB RX task when a UID reports 6.0.644170 and no handshake has
+ * been chosen. The main loop does the NVS write and the re-handshake, because
+ * this callback must not touch flash.
+ */
+static volatile bool s_compat_auto_req;
 
 /*
  * Batch logbook.
@@ -225,17 +231,17 @@ static void on_inbound(const hr_frame_t *f, void *user)
     hr_http_notify(seq);
 
     /*
-     * The one dryer build known to stop after UID. Say so where the operator
-     * will look, and point at the switch - once per UID, which the dryer sends
-     * only when asked.
+     * 6.0.644170 answers a bare UNIQUE with this UID and then says nothing
+     * useful ever again - it wants the tagged handshake before it will talk.
+     * The dryer names its own build here, so detect it and switch rather than
+     * asking the owner to know. Only when nobody has chosen already, so a
+     * deliberate "off" is not undone on the next UID.
      */
     if (strcmp(f->verb, "UID") == 0) {
         const char *fw = hr_frame_field(f, 2);
-        if (fw != NULL && strcmp(fw, "6.0.644170") == 0) {
-            ESP_LOGW(TAG, "dryer firmware 6.0.644170: expect UID only unless "
-                          "the 644170 handshake is on (now %s) - Settings > "
-                          "Debug or POST /api/compat",
-                     hr_compat_644170() ? "ON" : "off");
+        if (fw != NULL && strcmp(fw, "6.0.644170") == 0 &&
+            !hr_compat_644170() && !hr_compat_explicit()) {
+            s_compat_auto_req = true;
         }
     }
 
@@ -564,6 +570,19 @@ void app_main(void)
                 /* Fresh CDC session: the dryer has forgotten us. */
                 s_hello_mounts = mounts;
                 s_hello_step = 0;
+            }
+            /*
+             * Auto-detected 6.0.644170. Done here rather than in the RX
+             * callback because it writes NVS; hr_compat_set_644170() then
+             * marks the choice explicit, so this fires once and a later
+             * manual "off" is respected.
+             */
+            if (s_compat_auto_req) {
+                s_compat_auto_req = false;
+                ESP_LOGW(TAG, "dryer reports 6.0.644170: enabling the encoded "
+                              "handshake automatically - override in "
+                              "Settings > Debug");
+                hr_compat_set_644170(true);
             }
             if (hr_compat_take_changed()) {
                 /*

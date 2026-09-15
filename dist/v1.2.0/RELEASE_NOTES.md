@@ -22,10 +22,13 @@ session and then take **exactly the path a plaintext frame takes** — so
 telemetry, the logbook, the graph, MQTT, the web UI and the dryer's own Wi-Fi
 panel all work unchanged.
 
-Turn on the **6.0.644170 handshake** in Settings → Debug (or
-`POST /api/compat compat644170=1`). It is off by default, so nothing changes for
-a plaintext machine, and the decoder only ever runs on a real `)S` frame — a
-`6.0.641041` dryer never touches it.
+**There is nothing to turn on.** The adapter reads the dryer's build from its
+`UID` reply and enables the encoded handshake itself the first time it sees
+`6.0.644170`, then re-introduces itself so the machine starts answering. A
+plaintext dryer is never touched, and the decoder only ever runs on a real `)S`
+frame. The manual toggle stays in Settings → Debug (or `POST /api/compat
+compat644170=1`) as an override, and a choice made by hand is remembered rather
+than overridden on the next `UID`.
 
 The decoder was validated byte-for-byte against a 454-frame live capture from a
 running machine: every `REQINFO`, `SNM`, `CFG`, `STAT` and `UID` frame

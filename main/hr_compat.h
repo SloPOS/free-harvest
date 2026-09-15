@@ -24,4 +24,12 @@ bool hr_compat_set_644170(bool on);
 /* True once after every change, for the main loop to pick up. */
 bool hr_compat_take_changed(void);
 
+/*
+ * True when a setting has actually been CHOSEN - stored in NVS - rather than
+ * merely inherited from the Kconfig default. Auto-detection uses this so it
+ * only ever acts on a machine nobody has decided about, and so turning the
+ * handshake off by hand is not undone on the next UID.
+ */
+bool hr_compat_explicit(void);
+
 #endif /* HR_COMPAT_H */
