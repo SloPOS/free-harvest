@@ -697,17 +697,27 @@ void app_main(void)
          */
         if (t - last_beat >= 10000UL) {
             last_beat = t;
+            /*
+             * Two lines, not one: the log ring keeps HR_LOG_LINE_MAX (144)
+             * characters per line and this was ~185 with the prefix, so
+             * everything after "heap=" - the trend and capture counters, the
+             * part that says whether recording works - never reached
+             * /api/log or the bench port. Only the UART saw it.
+             */
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
-                     "frames_in=%lu frames_out=%lu bad=%lu unknown=%lu link=%s | heap=%u | "
-                     "trend pts=%u persisted=%u "
-                     "bytes=%u writes=%lu fails=%lu drops=%lu",
+                     "frames_in=%lu frames_out=%lu bad=%lu noise=%lu "
+                     "unknown=%lu link=%s | heap=%u",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in, s_session.frames_out,
-                     s_session.stream.frames_bad, s_session.unknown_verbs,
+                     s_session.stream.frames_bad,
+                     s_session.stream.noise_bytes, s_session.unknown_verbs,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
-                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)esp_get_free_heap_size());
+            ESP_LOGI(TAG,
+                     "trend pts=%u persisted=%u bytes=%u writes=%lu fails=%lu "
+                     "| capture drops=%lu",
                      (unsigned)hr_trend_count(&s_trend),
                      (unsigned)s_trend_persisted,
                      (unsigned)hr_capture_trend_bytes(),
