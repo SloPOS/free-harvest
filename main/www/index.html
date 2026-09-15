@@ -1045,7 +1045,14 @@ $$("nav button").forEach(b=>b.addEventListener("click",()=>{
   const already=document.getElementById(target)?.classList.contains("active");
   show(already && target !== "v-dash" ? "v-dash" : target);
 }));
-$$(".item[data-go]").forEach(it=>it.addEventListener("click",()=>show("v-"+it.dataset.go)));
+/* Control/config screens need the PIN to OPEN; the dashboard, Live Data Feed
+   (log downloads) and About stay view-only. */
+const PIN_VIEWS = ["s-batch","s-wifi","s-mqtt","s-fw","s-debug"];
+$$(".item[data-go]").forEach(it=>it.addEventListener("click",async ()=>{
+  const go = it.dataset.go;
+  if(PIN_VIEWS.includes(go) && !await ensurePin()) return;
+  show("v-"+go);
+}));
 $$("[data-back]").forEach(b=>b.addEventListener("click",()=>show("v-set")));
 
 /* ---------- helpers ---------- */
@@ -1294,23 +1301,56 @@ function pinPut(v){ try{ v ? sessionStorage.setItem("fh_pin", v)
                           : sessionStorage.removeItem("fh_pin"); }catch(e){} }
 
 /*
+ * PIN gate. The adapter enforces the control PIN on every state-changing
+ * endpoint; this asks for it UP FRONT - before a control screen opens or
+ * anything is sent - and remembers it for the browser session. View-only
+ * paths (the dashboard, log downloads) never call this. pinVerified caches a
+ * good PIN so navigation does not re-check on every tap and walk into the
+ * adapter's five-wrong lockout.
+ */
+let pinVerified = false;
+async function pinIsSet(){
+  try{ return !!(await (await fetch("/api/pin")).json()).set; }catch(e){ return false; }
+}
+async function pinTry(pin){
+  try{ const j = await (await fetch("/api/pin/verify",
+        {method:"POST", body:"pin=" + encodeURIComponent(pin)})).json();
+       return !!j.ok; }catch(e){ return false; }
+}
+async function ensurePin(){
+  if(pinVerified) return true;
+  if(!await pinIsSet()){ pinVerified = true; return true; }   /* nothing to gate */
+  let pin = pinGet();
+  if(pin && await pinTry(pin)){ pinVerified = true; return true; }
+  for(let i=0; i<2; i++){
+    pin = prompt(i ? "PIN incorrect - try again" : "Control PIN");
+    if(!pin) return false;
+    if(await pinTry(pin)){ pinPut(pin); pinVerified = true; return true; }
+    pinPut("");
+  }
+  return false;
+}
+
+/*
  * POST to a control endpoint, attaching the PIN and asking for it once if the
  * adapter says it is needed. One retry only - repeated prompting on a wrong
  * PIN would walk straight into the lockout.
  */
 async function ctrlPost(url, body){
   body = body || "";
+  if(!await ensurePin()) return {ok:false, reason:"PIN required", pin:true};
   const withPin = b => pinGet()
     ? (b ? b + "&" : "") + "pin=" + encodeURIComponent(pinGet()) : b;
   let r = await fetch(url, {method:"POST", body: withPin(body)});
   let j = await r.json().catch(()=>({}));
   if(!j.ok && j.pin){
-    const entered = prompt("Control PIN");
-    if(!entered) return j;
-    pinPut(entered);
-    r = await fetch(url, {method:"POST", body: withPin(body)});
-    j = await r.json().catch(()=>({}));
-    if(!j.ok && j.pin) pinPut("");     /* wrong: do not keep it */
+    /* the stored PIN was refused after all (changed, or the lockout cleared) -
+       drop it, ask again, retry once */
+    pinPut(""); pinVerified = false;
+    if(await ensurePin()){
+      r = await fetch(url, {method:"POST", body: withPin(body)});
+      j = await r.json().catch(()=>({}));
+    }
   }
   return j;
 }
@@ -1818,7 +1858,7 @@ function renderRecipes(){
     const st = rcpBtn("Send + Start", function(){ askStartRecipe(r); });
     st.className = "ctrlbtn sev2";
     row.appendChild(st);
-    row.appendChild(rcpBtn("Edit", function(){ editRecipe(r); }));
+    row.appendChild(rcpBtn("Edit", async function(){ if(await ensurePin()) editRecipe(r); }));
     if(rcpState.extra_dry_s > 0 && r.family === FAM_CANDY &&
        r.suggest_dry_s > (r.num[6]||0)){
       row.appendChild(rcpBtn("Apply +" + fmtMins(rcpState.extra_dry_s) + "m",
@@ -2467,9 +2507,7 @@ async function sendCmd(verb,args,statusEl){
      */
     const body="verb="+encodeURIComponent(verb)+
       (args? "&args="+encodeURIComponent(args) : "");
-    const r=await fetch("/api/cmd",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
-    const j=await r.json();
+    const j=await ctrlPost("/api/cmd", body);
     note(el, j.ok? esc(verb)+" sent ✓" : "Refused: "+esc(j.reason||"not allowed"),
          j.ok?"ok":"bad");
   }catch(e){ note(el,"Request failed","bad"); }
@@ -2502,10 +2540,7 @@ $("#dryerreboot").addEventListener("click",async()=>{
   const el=$("#rebootstatus");
   note(el,"Sending REBOOT…","info");
   try{
-    const r=await fetch("/api/dryer/reboot",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:"confirm=REBOOT"});
-    const j=await r.json();
+    const j=await ctrlPost("/api/dryer/reboot", "confirm=REBOOT");
     note(el, j.ok? "REBOOT sent — watch the machine's panel"
                  : "Refused: "+esc(j.reason||"not allowed"), j.ok?"ok":"bad");
   }catch(e){ note(el,"Request failed","bad"); }
@@ -2744,8 +2779,8 @@ $("#setcancel").addEventListener("click", cancelSetup);
 
 $("#rcpsave").addEventListener("click", saveRecipe);
 $("#rcpcancel").addEventListener("click", hideEditor);
-$("#rcpnewcandy").addEventListener("click", ()=>newRecipe(FAM_CANDY));
-$("#rcpnewcustom").addEventListener("click", ()=>newRecipe(FAM_CUSTOM));
+$("#rcpnewcandy").addEventListener("click", async ()=>{ if(await ensurePin()) newRecipe(FAM_CANDY); });
+$("#rcpnewcustom").addEventListener("click", async ()=>{ if(await ensurePin()) newRecipe(FAM_CUSTOM); });
 refreshRecipes();
 
 /* ---------- trend chart ----------
@@ -2959,15 +2994,7 @@ $("#otago").addEventListener("click",async ()=>{
    * we hold a PIN (or the adapter has none set). The post-upload check below
    * still stands, for a stored PIN that turns out to be wrong.
    */
-  if(!pinGet()){
-    let needs=false;
-    try{ needs = !!(await (await fetch("/api/pin")).json()).set; }catch(e){}
-    if(needs){
-      const entered = prompt("Control PIN");
-      if(!entered){ note(st,"Update needs the control PIN.","bad"); return; }
-      pinPut(entered);
-    }
-  }
+  if(!await ensurePin()){ note(st,"Update needs the control PIN.","bad"); return; }
   const bar=$("#otabar"), fill=$("#otafill");
   bar.style.display="block"; fill.style.width="0";
   note(st,"Uploading "+esc(f.name)+" ("+Math.round(f.size/1024)+" KB)…","info");

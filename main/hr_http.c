@@ -2390,6 +2390,22 @@ static esp_err_t h_pin_set(httpd_req_t *req)
                      ok ? 11 : 12);
 }
 
+/*
+ * POST /api/pin/verify   pin=<pin>  (or the X-HR-Pin header)
+ *
+ * Confirms a PIN with NO side effect, so the web app can gate a control screen
+ * up front - ask for the PIN before opening it or sending anything - rather
+ * than have the user act and be refused. Same check and the same lockout as
+ * every other guarded endpoint; when no PIN is set it simply passes.
+ */
+static esp_err_t h_pin_verify(httpd_req_t *req)
+{
+    if (!pin_guard_small(req)) {
+        return ESP_OK;   /* pin_guard already sent {ok:false,pin:true} */
+    }
+    return send_json(req, "{\"ok\":true}", 11);
+}
+
 /* -------------------------------------------------------------------- */
 /* Logbook and clock                                                     */
 /* -------------------------------------------------------------------- */
@@ -2743,6 +2759,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/storage/format", HTTP_POST, h_storage_format);
     reg("/api/pin", HTTP_GET, h_pin_state);
     reg("/api/pin", HTTP_POST, h_pin_set);
+    reg("/api/pin/verify", HTTP_POST, h_pin_verify);
     reg("/api/control/enable", HTTP_POST, h_control_enable);
     reg("/api/history", HTTP_GET, h_history);
     reg("/api/verbs", HTTP_GET, h_verbs);
