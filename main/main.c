@@ -377,6 +377,7 @@ void app_main(void)
 
     hr_link_state_t last_link = HR_LINK_DOWN;
     unsigned long last_beat = 0;
+    unsigned long last_heap = 0;
     unsigned long boot_ms = now_ms();
     for (;;) {
         unsigned long t = now_ms();
@@ -685,6 +686,27 @@ void app_main(void)
                      hr_capture_trend_writes(),
                      hr_capture_trend_fails(),
                      hr_capture_dropped());
+        }
+
+        /*
+         * Heap watchdog, once a minute.
+         *
+         * "free" alone hides two things this chip actually dies of: a slow
+         * leak (visible only as min_free stepping down over hours) and
+         * fragmentation (free stays healthy while the largest block that
+         * can still be handed out shrinks below what Wi-Fi or lwIP ask for,
+         * which surfaces as a Wi-Fi reconnect, not as an out-of-memory
+         * message). One line every 60 s puts both into /api/log and the
+         * capture, where a field report can actually be read against them.
+         */
+        if (t - last_heap >= 60000UL) {
+            last_heap = t;
+            multi_heap_info_t hi;
+            heap_caps_get_info(&hi, MALLOC_CAP_INTERNAL);
+            ESP_LOGI(TAG, "heap free=%u min_free=%u largest_block=%u",
+                     (unsigned)hi.total_free_bytes,
+                     (unsigned)hi.minimum_free_bytes,
+                     (unsigned)hi.largest_free_block);
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
