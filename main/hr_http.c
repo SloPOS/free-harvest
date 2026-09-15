@@ -9,6 +9,7 @@
 #include "hr_trend.h"
 #include "hr_usb.h"
 #include "hr_wifi.h"
+#include "hr_compat.h"
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
@@ -212,6 +213,8 @@ static esp_err_t h_state(httpd_req_t *req)
     hr_json_escape(s_session->info.uid, uid, sizeof(uid));
     char dryer_sn[64];
     hr_json_escape(s_session->info.dryer_sn, dryer_sn, sizeof(dryer_sn));
+    char fwver[48];
+    hr_json_escape(s_session->info.fw_version, fwver, sizeof(fwver));
     unsigned long fin = s_session->frames_in, fout = s_session->frames_out;
     unsigned long unk = s_session->unknown_verbs;
     unsigned long bad = s_session->stream.frames_bad;
@@ -264,6 +267,9 @@ static esp_err_t h_state(httpd_req_t *req)
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"dryer_sn\":\"%s\","
+                     /* The dryer's own firmware build, from UID field 2, and
+                      * whether the 6.0.644170 handshake variant is on. */
+                     "\"fw_version\":\"%s\",\"compat644170\":%s,"
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
                      "\"unknown_verbs\":%lu,\"frames_bad\":%lu,"
                      "\"latest_seq\":%" PRIu32 ",\"wifi\":\"%s\",\"ip\":\"%s\","
@@ -293,7 +299,9 @@ static esp_err_t h_state(httpd_req_t *req)
                       * rather than from a remembered default. */
                      "\"last_stat\":\"%s\","
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
-                     link, serial, uid, dryer_sn, fin, fout, unk, bad, latest,
+                     link, serial, uid, dryer_sn, fwver,
+                     hr_compat_644170() ? "true" : "false",
+                     fin, fout, unk, bad, latest,
                      wifi_status_str(), ip, ssid,
                      (int)ph, hr_phase_label(ph), tel_valid ? "true" : "false",
                      tel_valid ? tel.temperature_f : 0,
@@ -1183,6 +1191,58 @@ static esp_err_t h_wififlags(httpd_req_t *req)
     int n = snprintf(out, sizeof(out),
                      "{\"ok\":true,\"registered\":%d,\"cloud\":%d}",
                      (int)registered, (int)cloud);
+    return send_json(req, out, (size_t)n);
+}
+
+/*
+ * GET  /api/compat                 -> {"compat644170":bool}
+ * POST /api/compat  compat644170=0|1
+ *
+ * The 6.0.644170 handshake variant (hr_session_set_compat): "UNIQUE lH" and
+ * the genuine adapter's re-ask cadence. Persisted in NVS; the main loop applies
+ * it and re-introduces the adapter to the dryer, so an A/B test on a live
+ * machine is one POST followed by a look at /api/capture for SNM / CFG / STAT.
+ */
+static esp_err_t h_compat_get(httpd_req_t *req)
+{
+    char out[48];
+    int n = snprintf(out, sizeof(out), "{\"compat644170\":%s}",
+                     hr_compat_644170() ? "true" : "false");
+    return send_json(req, out, (size_t)n);
+}
+
+static esp_err_t h_compat_post(httpd_req_t *req)
+{
+    char buf[64];
+    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
+                                                        : (int)sizeof(buf) - 1;
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
+    char v[4] = {0};
+    if (httpd_query_key_value(buf, "compat644170", v, sizeof(v)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"compat644170=0|1 required\"}");
+    }
+    bool on = (v[0] == '1');
+    bool stored = hr_compat_set_644170(on);
+
+    char out[80];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":true,\"compat644170\":%s,\"stored\":%s}",
+                     on ? "true" : "false", stored ? "true" : "false");
     return send_json(req, out, (size_t)n);
 }
 
@@ -2591,6 +2651,8 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/log", HTTP_GET, h_log);
     reg("/api/log", HTTP_POST, h_log);
     reg("/api/wififlags", HTTP_POST, h_wififlags);
+    reg("/api/compat", HTTP_GET, h_compat_get);
+    reg("/api/compat", HTTP_POST, h_compat_post);
     reg("/api/dryer/reboot", HTTP_POST, h_dryer_reboot);
     reg("/img/*", HTTP_GET, h_img);
     /* Captive-portal probes (Android/Apple/Windows). */

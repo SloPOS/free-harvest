@@ -136,6 +136,16 @@ typedef struct {
         bool cloud;             /* adapter can reach the vendor cloud  */
         bool cloud_override;    /* set by hand; stops the automatic rule */
     } wifi;
+
+    /*
+     * Handshake variants for dryer firmware 6.0.644170. Both OFF by default;
+     * see hr_session_set_compat().
+     */
+    struct {
+        bool unique_tag;   /* "UNIQUE lH" instead of a bare "UNIQUE" */
+        bool reask;        /* re-send FDNAME/REQCFG/STATUS each heartbeat
+                              until each has been answered */
+    } compat;
 } hr_session_t;
 
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user);
@@ -218,6 +228,33 @@ void hr_session_set_cloud_auto(hr_session_t *s, bool online);
 
 void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
                          const char *ssid, const char *ap_name);
+
+/*
+ * Handshake variants for a dryer running firmware 6.0.644170.
+ *
+ * On 6.0.641041 the verb dispatcher and the executor have no notion of an
+ * "adapter mode": UNIQUE answers UID, FDNAME answers SNM, STATUS answers STAT,
+ * each unconditionally (G0641041 executor at 0x2b7e4, handlers 0x2cc68 /
+ * 0x2cd20 / 0x2cdac). 6.0.644170 adds one: a mode byte that the USB layer
+ * clears on attach, that the UNIQUE handler sets to 1 only when the frame's
+ * first argument contains "lH" (the substring search runs on the parser's
+ * argument slot 0 - 0x20003b00 is line buffer 0x20003f38 minus the 12 x 90
+ * byte argument array, the same layout 641041 uses at 0x20003acc/0x20003f04),
+ * and that the dispatcher consults to drop everything except UNIQUE / STATE /
+ * WIFIINFO / FDNAME when it reads 2. A machine on that build answers a bare
+ * UNIQUE with UID and then nothing - exactly the symptom that has been seen
+ * on every 644170 machine so far, and the genuine adapter is captured sending
+ * "UNIQUE lH" unprompted at power-up.
+ *
+ * `unique_tag` sends the argument. `reask` copies the genuine adapter's other
+ * habit, measured against a simulator playing a stuck machine: FDNAME and
+ * REQCFG go out again on every ~15 s heartbeat until answered, and STATUS
+ * until a STAT has arrived. Both are verified harmless on 6.0.641041 (UID,
+ * SNM, CFG, STAT arrive exactly as with the bare form) and both default OFF,
+ * because upstream shipped them in 1.0.5.4-1.0.5.6 and backed them out again
+ * without a conclusive test on a 644170 machine.
+ */
+void hr_session_set_compat(hr_session_t *s, bool unique_tag, bool reask);
 
 /* Override the GOTIT ack payload. */
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload);

@@ -9,8 +9,11 @@
  * test/). The exact contents the dryer expects inside a GOTIT ack are NOT yet
  * confirmed - see README and decoded/PROTOCOL_NOTES.md.
  */
+#include <string.h>
+
 #include "hr_capture.h"
 #include "hr_batchstore.h"
+#include "hr_compat.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
@@ -215,6 +218,21 @@ static void on_inbound(const hr_frame_t *f, void *user)
 
     hr_http_notify(seq);
 
+    /*
+     * The one dryer build known to stop after UID. Say so where the operator
+     * will look, and point at the switch - once per UID, which the dryer sends
+     * only when asked.
+     */
+    if (strcmp(f->verb, "UID") == 0) {
+        const char *fw = hr_frame_field(f, 2);
+        if (fw != NULL && strcmp(fw, "6.0.644170") == 0) {
+            ESP_LOGW(TAG, "dryer firmware 6.0.644170: expect UID only unless "
+                          "the 644170 handshake is on (now %s) - Settings > "
+                          "Debug or POST /api/compat",
+                     hr_compat_644170() ? "ON" : "off");
+        }
+    }
+
     /* Persist every frame so a full cycle can be recovered later - the RAM
      * ring only holds a few minutes. */
     {
@@ -348,6 +366,9 @@ void app_main(void)
     hr_session_set_observer(&s_session, on_inbound, NULL);
     hr_stream_set_reject_cb(&s_session.stream, on_reject, NULL);
     hr_session_set_ack_payload(&s_session, CONFIG_HR_ACK_PAYLOAD);
+    /* The 6.0.644170 handshake switch, NVS-backed; applied in the loop below
+     * so a runtime change also restarts the handshake. */
+    hr_compat_init();
 
     hr_usb_init(&s_session);
 
@@ -494,6 +515,18 @@ void app_main(void)
                 /* Fresh CDC session: the dryer has forgotten us. */
                 s_hello_mounts = mounts;
                 s_hello_step = 0;
+            }
+            if (hr_compat_take_changed()) {
+                /*
+                 * The 6.0.644170 switch was flipped (boot, web UI or
+                 * /api/compat). Apply it and introduce ourselves again so the
+                 * dryer sees the new UNIQUE form without a USB re-attach.
+                 */
+                bool on = hr_compat_644170();
+                hr_session_set_compat(&s_session, on, on);
+                s_hello_step = 0;
+                ESP_LOGI(TAG, "handshake variant: %s",
+                         on ? "6.0.644170 (UNIQUE lH, re-ask)" : "default");
             }
             if (!up) {
                 s_hello_step = 0;

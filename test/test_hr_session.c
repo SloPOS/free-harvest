@@ -146,6 +146,90 @@ static void test_heartbeat_is_only_state(void)
     CHECK(strstr(log.buf, "STATUS") == NULL);
 }
 
+static void test_compat_644170_reasks_until_answered(void)
+{
+    /*
+     * With the 6.0.644170 compatibility switch ON, the heartbeat copies the
+     * genuine adapter: FDNAME and REQCFG go out again on every heartbeat
+     * until SNM and CFG arrive, STATUS until the first STAT. Each stops on
+     * its own answer, so a healthy dryer sees at most one extra round.
+     */
+    TEST_CASE("compat 644170: heartbeat re-asks until each answer arrives");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_compat(&s, true, true);
+    hr_session_set_wifi(&s, 5, 81, "MyNetwork", "HR_aabbccddeeff");
+
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 4);
+    CHECK(strstr(log.buf, "STATE 5 81\r") != NULL);
+    CHECK(strstr(log.buf, "FDNAME\r") != NULL);
+    CHECK(strstr(log.buf, "REQCFG\r") != NULL);
+    CHECK(strstr(log.buf, "STATUS\r") != NULL);
+
+    /* the name arrives: FDNAME stops, the other two continue */
+    feed(&s, "SNM,My Freeze Dryer,\r", 1000);
+    memset(&log, 0, sizeof(log));
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 3);
+    CHECK(strstr(log.buf, "FDNAME") == NULL);
+    CHECK(strstr(log.buf, "REQCFG") != NULL);
+    CHECK(strstr(log.buf, "STATUS") != NULL);
+
+    /* CFG and a STAT arrive: back to a bare STATE */
+    feed(&s, "CFG,1,1,PSTF000000000XXX,0,Auto,v6.4,\r", 2000);
+    feed(&s, "STAT,1,0,0,0,68,151697,265,0,38,1,1,Auto,v6.4,\r", 2100);
+    memset(&log, 0, sizeof(log));
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 1);
+    CHECK(strstr(log.buf, "STATE") != NULL);
+
+    /* switching the mode off restores the pinned default immediately */
+    hr_session_init(&s, tx_capture, &log);
+    hr_session_set_compat(&s, true, true);
+    hr_session_set_compat(&s, false, false);
+    memset(&log, 0, sizeof(log));
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 1);
+}
+
+static void test_compat_644170_tags_unique(void)
+{
+    /*
+     * The genuine adapter is captured sending "UNIQUE lH" unprompted at
+     * power-up; 6.0.644170's UNIQUE handler sets its adapter-mode byte only
+     * when that argument is present. OFF by default, the argument goes out
+     * from both the stepped and the one-shot handshake when ON.
+     */
+    TEST_CASE("compat 644170: UNIQUE carries lH only when switched on");
+    tx_log_t log = {0};
+    hr_session_t s;
+    hr_session_init(&s, tx_capture, &log);
+
+    hr_session_set_compat(&s, true, false);
+    for (unsigned k = 0; k < HR_HELLO_STEPS; k++) {
+        hr_session_hello_step(&s, k);
+    }
+    CHECK_INT(log.frames, HR_HELLO_STEPS);
+    CHECK(strstr(log.buf, "UNIQUE lH\r") != NULL);
+
+    memset(&log, 0, sizeof(log));
+    hr_session_hello(&s);
+    CHECK(strstr(log.buf, "UNIQUE lH\r") != NULL);
+
+    /* unique_tag alone does not turn the re-ask on */
+    memset(&log, 0, sizeof(log));
+    hr_session_heartbeat(&s);
+    CHECK_INT(log.frames, 1);
+
+    /* and off again is bare, terminated straight after the verb */
+    hr_session_set_compat(&s, false, false);
+    memset(&log, 0, sizeof(log));
+    hr_session_hello_step(&s, 1);
+    CHECK_STR(log.buf, "UNIQUE\r");
+}
+
 static void test_hello_is_one_burst(void)
 {
     /*
@@ -167,7 +251,7 @@ static void test_hello_is_one_burst(void)
     CHECK(strstr(log.buf, "FDNAME") != NULL);
     CHECK(strstr(log.buf, "REQCFG") != NULL);
     CHECK(strstr(log.buf, "STATUS") != NULL);
-    /* bare UNIQUE - the "lH" argument was a misreading, see hr_session.c */
+    /* bare UNIQUE by default; "lH" only behind hr_session_set_compat() */
     CHECK(strstr(log.buf, "UNIQUE lH") == NULL);
 }
 
@@ -567,6 +651,8 @@ int main(void)
     test_reqinfo_before_wifi_is_up();
     test_recipe_verbs_refused_on_generic_path();
     test_heartbeat_is_only_state();
+    test_compat_644170_reasks_until_answered();
+    test_compat_644170_tags_unique();
     test_hello_is_one_burst();
     test_cloud_flags_reach_the_wire();
     test_manual_cloud_override_wins();

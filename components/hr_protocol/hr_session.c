@@ -84,10 +84,44 @@ static void send_state(hr_session_t *s)
     hr_session_send(s, &b);
 }
 
+/*
+ * UNIQUE, bare or tagged. See hr_session_set_compat() for why the tag exists
+ * and why it is not the default.
+ */
+static void send_unique(hr_session_t *s)
+{
+    if (s->compat.unique_tag) {
+        hr_builder_t b;
+        hr_build_begin(&b, "UNIQUE");
+        hr_build_str(&b, "lH");
+        hr_session_send(s, &b);
+    } else {
+        hr_session_send_simple(s, "UNIQUE");
+    }
+}
+
 void hr_session_heartbeat(hr_session_t *s)
 {
-    if (s != NULL) {
-        send_state(s);
+    if (s == NULL) {
+        return;
+    }
+    send_state(s);
+    if (!s->compat.reask) {
+        return;
+    }
+    /*
+     * The genuine adapter's cadence against a dryer that has not answered:
+     * FDNAME / REQCFG every ~15 s until SNM / CFG arrive, and a telemetry
+     * request until the first STAT. An empty field IS the unanswered flag.
+     */
+    if (s->info.serial[0] == '\0') {
+        hr_session_send_simple(s, "FDNAME");
+    }
+    if (s->info.dryer_sn[0] == '\0') {
+        hr_session_send_simple(s, "REQCFG");
+    }
+    if (!s->info.have_stat) {
+        hr_session_send_simple(s, "STATUS");
     }
 }
 
@@ -98,7 +132,7 @@ void hr_session_hello_step(hr_session_t *s, unsigned step)
     }
     switch (step) {
     case 0: send_state(s); break;
-    case 1: hr_session_send_simple(s, "UNIQUE"); break;
+    case 1: send_unique(s); break;
     case 2: hr_session_send_simple(s, "FDNAME"); break;
     case 3: hr_session_send_simple(s, "REQCFG"); break;
     /*
@@ -126,9 +160,18 @@ void hr_session_hello(hr_session_t *s)
      * dryer has been told an adapter is present.
      */
     send_state(s);
-    hr_session_send_simple(s, "UNIQUE");
+    send_unique(s);
     hr_session_send_simple(s, "FDNAME");
     hr_session_send_simple(s, "REQCFG");
+}
+
+void hr_session_set_compat(hr_session_t *s, bool unique_tag, bool reask)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->compat.unique_tag = unique_tag;
+    s->compat.reask = reask;
 }
 
 void hr_session_set_cloud(hr_session_t *s, bool registered, bool cloud)

@@ -765,6 +765,19 @@
     </div>
 
     <div class="card">
+      <h2>Dryer firmware</h2>
+      <div class="pill">build <span id="dryer-fw">—</span></div>
+      <button id="compat644170" class="ghost" style="margin-top:10px">6.0.644170 handshake: —</button>
+      <div id="compatstatus" class="notice"></div>
+      <div class="hint">A dryer on build 6.0.644170 answers the identity query
+        once and then sends no telemetry. Switching this on makes the adapter
+        introduce itself the way the genuine one does — <code>UNIQUE lH</code>,
+        and re-asking for the name, configuration and a status frame every
+        15 s until answered. Harmless on 6.0.641041. Takes effect at once and
+        is remembered.</div>
+    </div>
+
+    <div class="card">
       <h2>Device log</h2>
       <div class="row"><button id="logrefresh" class="ghost">Refresh</button>
         <button id="logauto" class="ghost">Auto: off</button></div>
@@ -2317,6 +2330,11 @@ async function refreshState(){
     /* USB-level diagnosis. Deliberately reports the raw counters AND the
        conclusion they support, so a fault can be triaged from the phone
        without reading a serial console the adapter can't reach anyway. */
+    if(st.compat644170!==undefined){
+      $("#dryer-fw").textContent = st.fw_version || "—";
+      $("#compat644170").textContent =
+        "6.0.644170 handshake: " + (st.compat644170 ? "ON" : "off");
+    }
     if(st.usb_mounted!==undefined){
       $("#usb-mounted").textContent = st.usb_mounted ? "yes" : "no";
       $("#usb-mounts").textContent  = st.usb_mounts;
@@ -2877,6 +2895,22 @@ $("#trendpress").addEventListener("click",()=>{
   trendShowPress=!trendShowPress;
   $("#trendpress").textContent=trendShowPress?"Hide vacuum":"Show vacuum";
   refreshTrend();
+});
+
+/* ---------- 6.0.644170 handshake switch ----------
+   Stored on the adapter; the main loop re-runs the handshake immediately, so
+   the result shows up in the capture within seconds: SNM / CFG / STAT after
+   the new UNIQUE means the dryer accepted it, REQINFO alone means it did not. */
+$("#compat644170").addEventListener("click",async()=>{
+  const st=$("#compatstatus");
+  const cur = lastState ? !!lastState.compat644170 : false;
+  try{
+    const j=await ctrlPost("/api/compat", "compat644170="+(cur?"0":"1"));
+    if(!j.ok){ note(st, j.pin ? "PIN required." : "Could not change the setting.","bad"); return; }
+    $("#compat644170").textContent = "6.0.644170 handshake: " + (j.compat644170 ? "ON" : "off");
+    note(st,(j.compat644170?"On":"Off")+" — handshake re-sent. Watch Live Data Feed for SNM / CFG / STAT."+
+      (j.stored?"":" (not saved: NVS write failed)"), j.stored?"ok":"bad");
+  }catch(e){ note(st,"Request failed — is the adapter still reachable?","bad"); }
 });
 
 /* ---------- USB reconnect ----------
