@@ -123,6 +123,10 @@ static size_t s_trend_persisted;
 static bool s_resume_done;
 /* Backoff clock for the series write, so a failure cannot spin. */
 static unsigned long s_trend_last_try;
+/* A new run began: the stored series must go. Set by the USB task under
+   s_hist_lock, acted on by the main loop, because deleting a file is flash
+   work and the USB RX callback must not do flash work (see on_inbound). */
+static bool s_trend_file_stale;
 
 /*
  * The identifier we present to the dryer in WIFIINFO field 4.
@@ -249,7 +253,14 @@ static void on_inbound(const hr_frame_t *f, void *user)
         if ((running_now && !s_last_running) || (running_now && went_back)) {
             hr_trend_reset(&s_trend);
             s_trend_persisted = 0;
-            hr_capture_trend_reset();
+            /*
+             * The file is removed by the main loop, not here. This used to
+             * call hr_capture_trend_reset() directly: a SPIFFS remove() on
+             * the TinyUSB task, under s_hist_lock. On a 12 MB partition that
+             * is ~0.7 s during which the adapter NAKs everything the dryer
+             * sends, and every other user of the lock waits.
+             */
+            s_trend_file_stale = true;
         }
         s_last_running = running_now;
         s_last_type = (int)tel.type;
@@ -400,11 +411,28 @@ void app_main(void)
         hr_session_tick(&s_session, t);
         /* Let a stale run expire even if frames stop arriving entirely. */
         hr_phase_tracker_tick(&s_tracker, t);
-        /* Close elapsed graph buckets even while frames are absent, so a gap
-         * shows as a gap instead of compressing the time axis. */
+        /*
+         * Close elapsed graph buckets even while frames are absent, so a gap
+         * shows as a gap instead of compressing the time axis.
+         *
+         * The clock is read AFTER the lock is taken, not the loop's t: the
+         * USB task opens buckets with its own now_ms() under this lock, so a
+         * reading from before the wait could be older than the bucket it is
+         * asked to close. hr_trend_tick() is wrap-safe now as well, but the
+         * caller should not hand it a clock that runs backwards.
+         */
+        bool reset_file = false;
         xSemaphoreTake(s_hist_lock, portMAX_DELAY);
-        hr_trend_tick(&s_trend, t);
+        hr_trend_tick(&s_trend, now_ms());
+        if (s_trend_file_stale) {
+            s_trend_file_stale = false;
+            reset_file = true;
+        }
         xSemaphoreGive(s_hist_lock);
+        if (reset_file) {
+            /* Flash work, outside the lock, on this task - see on_inbound. */
+            hr_capture_trend_reset();
+        }
 
         /*
          * Power-loss recovery, decided once per boot.
@@ -441,7 +469,7 @@ void app_main(void)
                  * finished and must not be drawn as part of this one. */
                 hr_trend_reset(&s_trend);
                 s_trend_persisted = 0;
-                hr_capture_trend_reset();
+                s_trend_file_stale = true; /* removed next tick, off the lock */
                 if (n > 0) {
                     ESP_LOGI(TAG, "stored graph belongs to a finished batch "
                                   "(elapsed %u < %u); discarded",

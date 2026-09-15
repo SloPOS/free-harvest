@@ -273,8 +273,65 @@ static void test_restore_stops_at_capacity(void)
     CHECK(hr_trend_count(&tr) == HR_TREND_CAPACITY);
 }
 
+/*
+ * The main loop reads its clock, then waits for the history lock; the USB
+ * task may open a bucket in between with a LATER clock. A tick with a clock
+ * that predates the bucket must close nothing. Unsigned, the difference was
+ * ~2^32 ms and the tick closed 143 000 buckets - a five-minute freeze on the
+ * bench (docs/09, 2026-09-15).
+ */
+static void test_tick_with_a_clock_behind_the_bucket_closes_nothing(void)
+{
+    hr_trend_t tr;
+    hr_trend_init(&tr);
+    hr_trend_add(&tr, 1000700, 60, 0, false);   /* USB task, t = 1000.7 s */
+    hr_trend_tick(&tr, 1000000);                /* main loop, t = 1000.0 s */
+    CHECK(hr_trend_count(&tr) == 0);
+    hr_trend_tick(&tr, 1000700 + B - 1);        /* not yet */
+    CHECK(hr_trend_count(&tr) == 0);
+    hr_trend_tick(&tr, 1000700 + B);            /* now */
+    CHECK(hr_trend_count(&tr) == 1);
+    /* Same thing right after the counter wrapped: still nothing to close. */
+    hr_trend_init(&tr);
+    hr_trend_add(&tr, 0xFFFFFF00UL, 60, 0, false);
+    hr_trend_tick(&tr, 0xFFFFFE00UL);
+    CHECK(hr_trend_count(&tr) == 0);
+    hr_trend_tick(&tr, 0xFFFFFF00UL + B);       /* across the wrap */
+    CHECK(hr_trend_count(&tr) == 1);
+}
+
+/* A gap longer than the window is written as a full ring of gaps in one
+ * step, not one ring shift per missing bucket. */
+static void test_gap_longer_than_the_window_is_bounded(void)
+{
+    hr_trend_t tr;
+    hr_trend_init(&tr);
+    unsigned long t = 5000;
+    const int temps[] = {60, 60, 60};
+    feed_per_bucket(&tr, temps, 3, &t);
+    CHECK(hr_trend_count(&tr) == 3);
+    hr_trend_add(&tr, t, 59, 0, false);
+    /* 40 hours later. */
+    hr_trend_tick(&tr, t + 40UL * 3600UL * 1000UL);
+    CHECK(hr_trend_count(&tr) == HR_TREND_CAPACITY);
+    hr_trend_point_t p;
+    CHECK(hr_trend_get(&tr, 0, &p));
+    CHECK(p.temp_raw_f == HR_TREND_NO_TEMP);
+    CHECK(hr_trend_get(&tr, HR_TREND_CAPACITY - 1, &p));
+    CHECK(p.temp_raw_f == HR_TREND_NO_TEMP && p.temp_smooth_cf == HR_TREND_NO_TEMP);
+    /* Recording continues normally afterwards. */
+    unsigned long t2 = t + 40UL * 3600UL * 1000UL + 10;
+    hr_trend_add(&tr, t2, 58, 0, false);
+    hr_trend_tick(&tr, t2 + B);
+    CHECK(hr_trend_count(&tr) == HR_TREND_CAPACITY);
+    CHECK(hr_trend_get(&tr, HR_TREND_CAPACITY - 1, &p));
+    CHECK(p.temp_raw_f == 58);
+}
+
 int main(void)
 {
+    test_tick_with_a_clock_behind_the_bucket_closes_nothing();
+    test_gap_longer_than_the_window_is_bounded();
     test_deadband_widens_as_it_gets_colder();
     test_idle_plus_minus_one_is_suppressed();
     test_cold_oscillation_also_suppressed();
