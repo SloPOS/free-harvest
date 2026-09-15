@@ -11,6 +11,7 @@
  */
 #include "hr_capture.h"
 #include "hr_batchstore.h"
+#include "hr_units.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
@@ -308,6 +309,10 @@ void app_main(void)
     hr_session_init(&s_session, hr_usb_tx, NULL);
     hr_session_set_observer(&s_session, on_inbound, NULL);
     hr_session_set_ack_payload(&s_session, CONFIG_HR_ACK_PAYLOAD);
+
+    /* Temperature unit for everything that shows one (web, MQTT); NVS-backed,
+     * presentation only - the dryer keeps sending F. */
+    hr_units_init();
 
     hr_usb_init(&s_session);
 

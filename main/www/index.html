@@ -514,7 +514,7 @@
       <h2>Live readings</h2>
       <div class="metrics">
         <div class="metric"><div class="k">Temperature</div>
-          <div class="v"><span id="m-temp">–</span><span class="u"> °F</span></div></div>
+          <div class="v"><span id="m-temp">–</span><span class="u" id="m-temp-u"> °F</span></div></div>
         <div class="metric"><div class="k">Vacuum</div>
           <div class="v"><span id="m-press">–</span></div></div>
         <div class="metric"><div class="k">Batch elapsed</div>
@@ -555,6 +555,21 @@
         <button type="button" data-theme="dark">Dark</button>
       </div>
       <div class="hint">Auto follows your device's light/dark setting.</div>
+    </div>
+
+    <!-- Stored on the ADAPTER, not in this browser: the same unit is shown
+         here, on the adapter's own screen (boards that have one) and in Home
+         Assistant. The dryer keeps sending Fahrenheit; nothing is sent to it. -->
+    <div class="card">
+      <h2>Temperature unit</h2>
+      <div class="seg" id="unitseg">
+        <button type="button" data-unit="f">°F</button>
+        <button type="button" data-unit="c">°C</button>
+      </div>
+      <div id="unitstatus" class="notice"></div>
+      <div class="hint">Applies to this page, the adapter's display and the
+        Home Assistant sensor. The dryer's own panel is not changed. Vacuum
+        stays in microns (mTorr).</div>
     </div>
 
     <div class="card">
@@ -1074,6 +1089,29 @@ function hhmmss(sec){
           : `${m}:${String(s).padStart(2,"0")}`;
 }
 function note(el,msg,kind){ el.className="notice "+(kind||"info"); el.innerHTML=msg; }
+
+/* ---------- temperature unit ----------
+   Every temperature the adapter stores or serves is the dryer's own whole
+   degrees F (temp_f, min_f, the trend series). The unit the OWNER wants is a
+   setting on the adapter (/api/units, echoed in /api/state as temp_unit), so
+   this page, the adapter's screen and Home Assistant all agree. Conversion
+   happens here, at the last moment, and nowhere else on the page. */
+function tempUnit(){ return (lastState && lastState.temp_unit==="C") ? "C" : "F"; }
+function tempSym(){ return "\u00b0"+tempUnit(); }
+/* F -> the display unit. Whole degrees for F (as received); one decimal for
+   C unless `whole` asks for the integer (axis labels). */
+function fmtT(f, whole){
+  if(f===null||f===undefined||!isFinite(f)) return "\u2013";
+  if(tempUnit()!=="C") return String(Math.round(f));
+  const c=(f-32)*5/9;
+  return whole ? String(Math.round(c)) : c.toFixed(1);
+}
+function fmtTU(f, whole){ return fmtT(f, whole)+tempSym(); }
+function applyUnitSeg(){
+  const u=tempUnit().toLowerCase();
+  $$("#unitseg button").forEach(b=>b.classList.toggle("on", b.dataset.unit===u));
+  $("#m-temp-u").textContent=" "+tempSym();
+}
 /* Coarse, honest wording for an extrapolated estimate - no false precision. */
 function etaText(sec){
   sec=Math.max(0,parseInt(sec||0,10));
@@ -1352,7 +1390,7 @@ async function refreshLogbook(){
       ? new Date(b.start*1000).toLocaleString()
       : "date not recorded";
     const bits = [fmtDur2(b.duration_s)];
-    if(b.min_f !== undefined) bits.push("min " + b.min_f + "\u00b0F");
+    if(b.min_f !== undefined) bits.push("min " + fmtTU(b.min_f));
     if(b.vacuum_um) bits.push(b.vacuum_um + " \u00b5m");
     if(b.pulldown_s) bits.push("pulldown " + fmtDur2(b.pulldown_s));
     if(b.extra_dry_s) bits.push("+" + fmtDur2(b.extra_dry_s) + " drying");
@@ -2174,9 +2212,9 @@ function paintDash(st){
   $("#stagesub").textContent = !linked
     ? "Plug the adapter into the freeze dryer's USB port"
     : prep    ? "Pre-cooling — load your trays now"
-    : frz     ? (st.temp_f + "°F and falling · " + pct + "% frozen")
-    : dry     ? (st.vacuum_ok ? (st.vacuum_um + " microns · " + st.temp_f + "°F")
-                              : ("drying · " + st.temp_f + "°F"))
+    : frz     ? (fmtTU(st.temp_f) + " and falling · " + pct + "% frozen")
+    : dry     ? (st.vacuum_ok ? (st.vacuum_um + " microns · " + fmtTU(st.temp_f))
+                              : ("drying · " + fmtTU(st.temp_f)))
     : done    ? "Venting — open the drain valve on the dryer"
     : running ? "Running for " + hhmmss(st.elapsed_s)
     /* With control switched on the app can start a batch itself, so telling
@@ -2231,7 +2269,7 @@ function paintDash(st){
      dryer retains the last batch's value when idle, which would otherwise
      look like a run in progress. */
   if(have){
-    $("#m-temp").textContent    = st.temp_f;
+    $("#m-temp").textContent    = fmtT(st.temp_f);
     /* Show a real vacuum reading when the pump is running; the idle/placeholder
        sensor value is not a vacuum and would be misleading shown as one. */
     $("#m-press").innerHTML = st.vacuum_ok
@@ -2291,7 +2329,11 @@ function paintDash(st){
 async function refreshState(){
   try{
     const st=await (await fetch("/api/state",{cache:"no-store"})).json();
+    const unitChanged = !lastState || lastState.temp_unit!==st.temp_unit;
     lastState=st;
+    /* The unit is the adapter's; another browser (or curl) may have changed
+       it. Relabel and redraw the F-sourced chart when it moves. */
+    if(unitChanged){ applyUnitSeg(); refreshTrend(); }
     const linked = st.link==="up";
     $("#dot").className = "dot" + (linked? " on":"");
     $("#hdrsub").textContent = st.wifi==="connected"
@@ -2648,6 +2690,22 @@ $$("#themeseg button").forEach(b=>b.addEventListener("click",()=>{
   applyTheme(b.dataset.theme);
 }));
 
+/* Temperature unit. Lives on the adapter (NVS), so it is one POST and then
+   every reader - this page, the screen, Home Assistant - follows. The
+   dashboard redraws from the same F values on the next state poll. */
+$$("#unitseg button").forEach(b=>b.addEventListener("click", async ()=>{
+  const st=$("#unitstatus");
+  try{
+    const j=await ctrlPost("/api/units", "temp_unit="+b.dataset.unit);
+    if(!j.ok){ note(st, j.pin ? "PIN required." : (j.reason||"Could not change the unit."),"bad"); return; }
+    if(lastState) lastState.temp_unit=j.temp_unit;
+    applyUnitSeg();
+    refreshState(); refreshTrend();
+    note(st,"Showing \u00b0"+j.temp_unit+" everywhere."+
+      (j.stored?"":" (not saved: NVS write failed)"), j.stored?"ok":"bad");
+  }catch(e){ note(st,"Request failed \u2014 is the adapter still reachable?","bad"); }
+}));
+
 /* Remote-control master switch. A two-state segmented control rather than a
    checkbox, so the current state is readable without interpreting a tick and
    turning it ON is a positive act. */
@@ -2778,16 +2836,22 @@ function drawTrend(d){
   const L=44, R=trendShowPress?52:12, T=12, B=26;
   const pw=W-L-R, ph=H-T-B;
 
+  /* The series arrive in degrees F (what the dryer sends); the axis is drawn
+     in the owner's unit, so convert once here and scale everything from it. */
+  const metric = tempUnit()==="C";
+  const toU = v => metric ? (v-32)*5/9 : v;
+
   /* Temperature scale spans BOTH series so the raw band is never clipped. */
   let lo=Infinity, hi=-Infinity;
   const seen=v=>{ if(v!==null&&isFinite(v)){ if(v<lo)lo=v; if(v>hi)hi=v; } };
   for(let i=0;i<n;i++){
-    seen(d.smooth[i]===null?null:d.smooth[i]/100);
-    seen(d.temp[i]);
+    seen(d.smooth[i]===null?null:toU(d.smooth[i]/100));
+    seen(d.temp[i]===null?null:toU(d.temp[i]));
   }
   if(!isFinite(lo)){ $("#trendnote").textContent="No temperature yet."; return; }
   /* A dead-flat series would otherwise fill the whole box and look dramatic. */
-  if(hi-lo<4){ const mid=(hi+lo)/2; lo=mid-2; hi=mid+2; }
+  const flat = metric ? 2 : 4;
+  if(hi-lo<flat){ const mid=(hi+lo)/2; lo=mid-flat/2; hi=mid+flat/2; }
   const pad=(hi-lo)*0.12; lo-=pad; hi+=pad;
 
   const x=i=>L+(pw*i)/(n-1);
@@ -2803,8 +2867,9 @@ function drawTrend(d){
     svg.appendChild(t);
   }
   /* Freezing point is the one temperature worth marking explicitly. */
-  if(lo<32&&hi>32){
-    svg.appendChild(el("line",{x1:L,y1:y(32),x2:W-R,y2:y(32),
+  const fz = toU(32);
+  if(lo<fz&&hi>fz){
+    svg.appendChild(el("line",{x1:L,y1:y(fz),x2:W-R,y2:y(fz),
       stroke:"var(--muted)","stroke-width":1,"stroke-dasharray":"2 4",opacity:.5}));
   }
 
@@ -2828,11 +2893,11 @@ function drawTrend(d){
     return out.trim();
   };
 
-  const raw=path(d.temp,v=>v);
+  const raw=path(d.temp,v=>toU(v));
   if(raw) svg.appendChild(el("path",{d:raw,fill:"none",stroke:"var(--muted)",
     "stroke-width":1,opacity:.45}));
 
-  const sm=path(d.smooth,v=>v/100);
+  const sm=path(d.smooth,v=>toU(v/100));
   if(sm) svg.appendChild(el("path",{d:sm,fill:"none",stroke:"var(--accent)",
     "stroke-width":2.5,"stroke-linejoin":"round","stroke-linecap":"round"}));
 
@@ -2866,7 +2931,7 @@ function drawTrend(d){
   $("#trendnote").textContent=
     fmtDur(totalS)+" of data, "+n+" points at "+dt+"s"+
     ((d.stride||1)>1?" (downsampled)":"")+
-    (cur!==null&&isFinite(cur)?" \u00b7 now "+(cur/100).toFixed(1)+"\u00b0F smoothed":"");
+    (cur!==null&&isFinite(cur)?" \u00b7 now "+toU(cur/100).toFixed(1)+tempSym()+" smoothed":"");
 }
 
 async function refreshTrend(){
