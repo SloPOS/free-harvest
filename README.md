@@ -14,34 +14,41 @@ your own network. No cloud account. No vendor lock-in.
 
 Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 
-> ## ⚠️ Check your dryer's firmware first
+> ## 🧪 This is the Free Harvest **beta** branch
 >
-> **Free Harvest is developed and tested against dryer firmware `6.0.641041`.**
-> Settings → Diagnostics on the machine shows the build.
+> Test builds with features not yet on `main`. Expect rough edges, and please
+> report what you find on [Discord](https://discord.gg/KphHBYh9KC).
 >
-> You need **firmware 6.0.641041**: earlier builds do not send the signals Free
-> Harvest reads, and no adapter can change that.
+> **New in this beta (v1.1.0-beta):**
 >
-> **Do not run `6.0.644170`.** That build is broken. On a dryer running it,
-> *nothing* can talk to the machine — not Free Harvest, and **not HarvestRight's
-> own adapter either**. We proved it the hard way: a working dryer was updated to
-> it, both adapters went silent, and reverting to the build on
-> [https://harvestright.com](https://harvestright.com/pages/customer-support) brought both straight back.
+> - **It talks to dryers on firmware `6.0.644170`.** That build was never
+>   "broken" - it moved to an *encoded* USB transport that older Free Harvest,
+>   and the stock adapter, could not read. **vskiwi** discovered this and built
+>   the framing and capture for it; we then recovered the cipher from the
+>   firmware by decompilation and validated it byte-for-byte against a full live
+>   capture. This beta decodes it. Under test - see the firmware note below.
+> - **A large security and robustness hardening pass** (vskiwi, PR #5): every
+>   state-changing endpoint is now behind the control PIN, OTA refuses any image
+>   that is not Free Harvest, cross-origin POSTs are rejected, and a long list of
+>   concurrency, bounds and boot-safety bugs are fixed.
+
+> ## ⚠️ Dryer firmware
 >
-> ### If you have already updated to it
+> Free Harvest is developed against **`6.0.641041`**, still the most tested
+> build, and everything works there.
 >
-> **You can go back.** The build published on harvestright.com is the working
-> one, and installing it over `6.0.644170` restored a dryer that had gone
-> completely silent - both Free Harvest and the HarvestRight adapter started
-> talking again immediately.
+> **`6.0.644170` now works in this beta.** It speaks an encoded transport
+> instead of plaintext, which is why older builds saw it as silent; this beta
+> frames and decodes it. To use it, turn on the **6.0.644170 handshake** in
+> Settings → Debug (or `POST /api/compat compat644170=1`), then watch the
+> Live Data Feed for `SNM` / `CFG` / `STAT`. It is validated against captured
+> data but still wants real-dryer testing - if you have a 644170 machine,
+> running it **monitor-only (control off)** and reporting back helps most.
 >
-> We are deliberately not writing the procedure here, because we have done it
-> once and that is not enough to instruct anyone else on updating a freeze
-> dryer. Get the firmware and the steps from HarvestRight.
->
-> If your dryer answers the identity query once and then goes quiet, check the
-> firmware build before you suspect the adapter. That symptom cost this project
-> days of chasing a bug that was never in the adapter at all.
+> Want to stay on plaintext instead? `6.0.641041` is the reference build. If you
+> are on `6.0.644170` and would rather go back, the build on
+> [harvestright.com](https://harvestright.com/pages/customer-support) is the
+> working one - get the firmware and the steps from HarvestRight, not from here.
 
 ![Dashboard while a batch runs](docs/img/dashboard-running.png)
 
