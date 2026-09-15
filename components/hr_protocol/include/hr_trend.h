@@ -75,6 +75,7 @@ typedef struct {
     int32_t level_cf;            /* current accepted level, hundredths F */
     int8_t cand_dir;             /* direction being confirmed: -1 or +1 */
     uint8_t cand_runs;           /* consecutive buckets in that direction */
+    uint16_t gap_run;            /* consecutive buckets with no samples */
 
     /* --- committed history --- */
     hr_trend_point_t pts[HR_TREND_CAPACITY];

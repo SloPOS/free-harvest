@@ -826,6 +826,7 @@
 
     <div class="card">
       <h2>Logbook</h2>
+      <div id="lbestimate" style="margin-bottom:12px"></div>
       <div id="logbook"></div>
       <div class="rcprow" style="margin-top:12px">
         <button type="button" id="lbcsv">Download CSV</button>
@@ -1334,6 +1335,8 @@ async function refreshLogbook(){
     : "The adapter does not know the date yet, so recent batches may show " +
       "no date. It learns the time when this page loads.";
 
+  renderEstimate(d.estimate);
+
   if(!d.batches || !d.batches.length){
     box.innerHTML = '<div class="hint">No batches recorded yet. The first one ' +
                     'appears here when a run finishes.</div>';
@@ -1353,17 +1356,58 @@ async function refreshLogbook(){
     if(b.vacuum_um) bits.push(b.vacuum_um + " \u00b5m");
     if(b.pulldown_s) bits.push("pulldown " + fmtDur2(b.pulldown_s));
     if(b.extra_dry_s) bits.push("+" + fmtDur2(b.extra_dry_s) + " drying");
+    const phases = [];
+    if(b.freeze_s) phases.push("freeze " + fmtDur2(b.freeze_s));
+    if(b.dry_s)    phases.push("dry " + fmtDur2(b.dry_s));
+    if(b.final_s)  phases.push("final " + fmtDur2(b.final_s));
 
-    el.innerHTML = "<h3></h3><div class='meta'></div><div class='meta'></div>";
+    el.innerHTML = "<h3></h3><div class='meta'></div><div class='meta'></div>" +
+                   "<div class='meta'></div>";
     el.querySelector("h3").textContent = b.name || "(unnamed)";
     el.querySelectorAll(".meta")[0].textContent =
       when + " \u00b7 " + b.outcome;
     el.querySelectorAll(".meta")[1].textContent = bits.join("  \u00b7  ");
+    el.querySelectorAll(".meta")[2].textContent = phases.join("  \u00b7  ");
     if(b.outcome !== "complete"){
       el.style.borderColor = "#e5484d";
     }
     box.appendChild(el);
   });
+}
+
+/*
+ * How long the next run should take.
+ *
+ * Always shown, and always says what it is based on. With no completed runs on
+ * this machine it rests on a single measured batch of unfrozen fruit, which is
+ * a weak basis for a prediction and is labelled as one - a number with no
+ * provenance invites more trust than it has earned. Each run this dryer
+ * finishes replaces it with the median of its own history.
+ */
+function renderEstimate(e){
+  const box = $("#lbestimate");
+  if(!box) return;
+  if(!e || !e.total_s){ box.textContent = ""; return; }
+
+  const basis = e.samples === 0
+    ? "from one reference batch \u2014 this dryer has no completed runs yet"
+    : (e.samples === 1
+        ? "from this dryer's 1 completed run"
+        : "median of this dryer's " + e.samples + " completed runs");
+
+  box.innerHTML = "";
+  const h = document.createElement("div");
+  h.className = "meta";
+  h.textContent = "Next run, estimated: " + fmtDur2(e.total_s);
+  const p = document.createElement("div");
+  p.className = "meta";
+  p.textContent = "freeze " + fmtDur2(e.freeze_s) +
+                  "  \u00b7  dry " + fmtDur2(e.dry_s) +
+                  "  \u00b7  final dry " + fmtDur2(e.final_s);
+  const b = document.createElement("div");
+  b.className = "hint";
+  b.textContent = basis;
+  box.appendChild(h); box.appendChild(p); box.appendChild(b);
 }
 
 /*

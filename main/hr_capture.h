@@ -24,6 +24,13 @@
  * background task after a short delay, because doing it synchronously on the
  * boot path breaks USB (see hr_capture.c for the full explanation).
  */
+/*
+ * Why the chip last restarted, as a short word: "poweron", "panic",
+ * "brownout", "sw", ... Lives here because the capture log records it, and
+ * both this and /api/state need the same answer from one place.
+ */
+const char *hr_reset_reason_str(void);
+
 void hr_capture_init(void);
 
 /* How long to wait before mounting, so USB enumeration finishes untouched. */
@@ -55,6 +62,11 @@ unsigned long hr_capture_dropped(void);
 /* Bytes currently stored, and the partition's total capacity. */
 size_t hr_capture_size(void);
 size_t hr_capture_capacity(void);
+
+/* Per-segment view, for diagnosing a download that does not match the size. */
+unsigned hr_capture_seg_count(void);
+unsigned hr_capture_seg_active(void);
+size_t   hr_capture_seg_bytes(unsigned i);
 
 /* Erase the log. Returns false on failure. */
 bool hr_capture_clear(void);

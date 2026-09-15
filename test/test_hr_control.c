@@ -85,7 +85,7 @@ static void test_screen_listing(void)
     CHECK_INT((int)hr_control_for_screen(17, buf, 8), 2);  /* Preparing  */
     CHECK_INT((int)hr_control_for_screen(4,  buf, 8), 2);  /* Freezing   */
     CHECK_INT((int)hr_control_for_screen(5,  buf, 8), 1);  /* Drying     */
-    CHECK_INT((int)hr_control_for_screen(6,  buf, 8), 3);  /* Final dry  */
+    CHECK_INT((int)hr_control_for_screen(6,  buf, 8), 1);  /* Final dry  */
 
     CHECK_INT((int)hr_control_for_screen(2,  buf, 8), 2);  /* Load trays */
     CHECK_INT((int)hr_control_for_screen(7,  buf, 8), 4);  /* Complete   */
@@ -142,14 +142,40 @@ static void test_end_batch_button_differs_per_screen(void)
 
 static void test_drying_direction_asymmetry(void)
 {
-    /* More dry time is the conservative direction and costs only time.
-     * Less dry time moves toward an under-dried batch, so it asks first. */
-    CHECK_INT(hr_control_lookup("final_more")->sev, HR_SEV_BENIGN);
-    CHECK_INT(hr_control_lookup("final_less")->sev, HR_SEV_CONFIRM);
+    /* More dry time is the conservative direction and costs only time, so it
+     * goes through without a prompt. It lives on Batch Complete. */
+    CHECK_INT(hr_control_lookup("done_more_dry")->sev, HR_SEV_BENIGN);
 
     const hr_action_t *a = NULL;
-    CHECK_INT(hr_control_check("final_more", 6, 6, false, &a), HR_CTRL_OK);
-    CHECK_INT(hr_control_check("final_less", 6, 6, false, &a), HR_CTRL_NEEDS_CONFIRM);
+    CHECK_INT(hr_control_check("done_more_dry", 7, 7, false, &a), HR_CTRL_OK);
+}
+
+/*
+ * Final Dry offers End Batch and nothing else.
+ *
+ * "More Dry Time" and "Less Dry Time" were listed on this screen and are not
+ * on the machine - the owner watched a full run and the Final Dry screen never
+ * showed them. They belong to Batch Complete and to the extra-dry phase after
+ * it. Pinned here because the rows look plausible and would otherwise be
+ * reinvented: a run spends its last ten hours on this screen, and two buttons
+ * the dryer has no control for is a worse failure than a missing one.
+ */
+static void test_final_dry_has_no_dry_time_buttons(void)
+{
+    CHECK(hr_control_lookup("final_more") == NULL);
+    CHECK(hr_control_lookup("final_less") == NULL);
+
+    const hr_action_t *a = NULL;
+    CHECK_INT(hr_control_check("final_more", 6, 6, false, &a),
+              HR_CTRL_UNKNOWN_ACTION);
+    CHECK(a == NULL);
+
+    /* End Batch is still there, and still asks. */
+    CHECK_INT(hr_control_lookup("final_end")->sev, HR_SEV_DESTRUCTIVE);
+
+    const hr_action_t *list[8];
+    size_t n = hr_control_for_screen(6, list, 8);
+    CHECK_INT((int)n, 1);
 }
 
 static void test_action_names_are_unique(void)
@@ -191,6 +217,7 @@ int main(void)
     test_screen_listing();
     test_end_batch_button_differs_per_screen();
     test_drying_direction_asymmetry();
+    test_final_dry_has_no_dry_time_buttons();
     test_action_names_are_unique();
     test_every_action_is_self_consistent();
     return TEST_REPORT();

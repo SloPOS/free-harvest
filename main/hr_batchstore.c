@@ -168,6 +168,16 @@ static int open_stage(reader_t *r)
         if (r->fd >= 0) {
             return 0;
         }
+        /*
+         * Absent is normal - the older segment does not exist until the first
+         * rotation. A segment that stat()s non-empty and still will not open
+         * is damage, and silently returning an empty logbook for it reads
+         * exactly like "no batches have ever run".
+         */
+        if (file_size(p) > 0) {
+            ESP_LOGE(TAG, "logbook %s holds %u bytes but will not open "
+                          "(errno %d)", p, (unsigned)file_size(p), errno);
+        }
         r->stage++;
     }
     return -1;
@@ -239,19 +249,23 @@ bool hr_batchstore_clear(void)
 
 /* ---- in-progress batch --------------------------------------------------- */
 
-bool hr_batchstore_save_open(const hr_batch_t *b)
+bool hr_batchstore_save_open(const hr_batch_t *b, int32_t start_elapsed,
+                             int32_t last_elapsed)
 {
     nvs_handle_t nh;
     if (b == NULL || nvs_open(NVS_NS, NVS_READWRITE, &nh) != ESP_OK) {
         return false;
     }
     bool ok = nvs_set_blob(nh, "open", b, sizeof(*b)) == ESP_OK &&
+              nvs_set_i32(nh, "open_start", start_elapsed) == ESP_OK &&
+              nvs_set_i32(nh, "open_last", last_elapsed) == ESP_OK &&
               nvs_commit(nh) == ESP_OK;
     nvs_close(nh);
     return ok;
 }
 
-bool hr_batchstore_load_open(hr_batch_t *out)
+bool hr_batchstore_load_open(hr_batch_t *out, int32_t *start_elapsed,
+                             int32_t *last_elapsed)
 {
     nvs_handle_t nh;
     if (out == NULL || nvs_open(NVS_NS, NVS_READONLY, &nh) != ESP_OK) {
@@ -260,6 +274,15 @@ bool hr_batchstore_load_open(hr_batch_t *out)
     size_t len = sizeof(*out);
     bool ok = nvs_get_blob(nh, "open", out, &len) == ESP_OK &&
               len == sizeof(*out);
+    if (ok) {
+        int32_t v;
+        if (start_elapsed != NULL && nvs_get_i32(nh, "open_start", &v) == ESP_OK) {
+            *start_elapsed = v;
+        }
+        if (last_elapsed != NULL && nvs_get_i32(nh, "open_last", &v) == ESP_OK) {
+            *last_elapsed = v;
+        }
+    }
     nvs_close(nh);
     return ok && out->outcome == HR_OUTCOME_RUNNING;
 }
@@ -269,6 +292,8 @@ void hr_batchstore_clear_open(void)
     nvs_handle_t nh;
     if (nvs_open(NVS_NS, NVS_READWRITE, &nh) == ESP_OK) {
         nvs_erase_key(nh, "open");
+        nvs_erase_key(nh, "open_start");
+        nvs_erase_key(nh, "open_last");
         nvs_commit(nh);
         nvs_close(nh);
     }
