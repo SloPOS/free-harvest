@@ -1,4 +1,5 @@
 #include "hr_capture.h"
+#include "hr_quiesce.h"
 
 #include "esp_timer.h"
 
@@ -74,6 +75,20 @@ static const char *const k_seg[CAP_SEGMENTS] = {
 
 static bool s_ready;
 static SemaphoreHandle_t s_lock;
+/*
+ * Who is inside the filesystem right now, for the teardown paths.
+ *
+ * s_lock serialises the WRITERS. It says nothing about the download readers
+ * (hr_capture_open..close on the HTTP task), the logbook in hr_batchstore.c
+ * (main task) or the bare stat() calls behind the size counters - and
+ * esp_vfs_spiffs_unregister() frees the SPIFFS control block under all of
+ * them without a reference count of its own. Every such path passes through
+ * this gate, so hr_capture_shutdown() and hr_capture_format() can wait for
+ * the last of them to leave before pulling the filesystem away.
+ */
+static hr_quiesce_t s_fs_gate = HR_QUIESCE_INIT;
+/* Longest the teardown paths wait for the filesystem to go quiet, in total. */
+#define QUIESCE_MS 500
 static size_t s_total;      /* partition capacity */
 static uint8_t s_seg;       /* active segment index */
 static size_t s_seg_used;   /* bytes in the active segment */
@@ -153,10 +168,37 @@ static volatile unsigned long s_trend_writes, s_trend_fails;
 unsigned long hr_capture_trend_writes(void) { return s_trend_writes; }
 unsigned long hr_capture_trend_fails(void) { return s_trend_fails; }
 
+bool hr_capture_fs_enter(void)
+{
+    return hr_quiesce_enter(&s_fs_gate);
+}
+
+void hr_capture_fs_leave(void)
+{
+    hr_quiesce_leave(&s_fs_gate);
+}
+
+/* Wait, bounded, until every task inside the filesystem has left it. */
+static bool fs_drain(TickType_t deadline)
+{
+    while (!hr_quiesce_idle(&s_fs_gate)) {
+        if ((int32_t)(deadline - xTaskGetTickCount()) <= 0) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return true;
+}
+
 static size_t seg_size(unsigned i)
 {
     struct stat st;
-    return (stat(k_seg[i], &st) == 0) ? (size_t)st.st_size : 0;
+    if (!hr_capture_fs_enter()) {
+        return 0;
+    }
+    size_t n = (stat(k_seg[i], &st) == 0) ? (size_t)st.st_size : 0;
+    hr_capture_fs_leave();
+    return n;
 }
 
 /* What the whole set would occupy once every segment has reached the ceiling. */
@@ -361,8 +403,12 @@ size_t hr_capture_trend_load(hr_trend_t *tr, uint32_t *last_elapsed)
     if (!s_ready || tr == NULL) {
         return 0;
     }
+    if (!hr_capture_fs_enter()) {
+        return 0;
+    }
     FILE *f = fopen(TRENDFILE, "rb");
     if (f == NULL) {
+        hr_capture_fs_leave();
         return 0;
     }
     size_t n = 0;
@@ -381,6 +427,7 @@ size_t hr_capture_trend_load(hr_trend_t *tr, uint32_t *last_elapsed)
         n++;
     }
     fclose(f);
+    hr_capture_fs_leave();
     return n;
 }
 
@@ -451,11 +498,13 @@ bool hr_capture_trend_save(const hr_trend_t *tr, uint32_t batch_elapsed_s)
 
 size_t hr_capture_trend_bytes(void)
 {
-    if (!s_ready) {
+    if (!s_ready || !hr_capture_fs_enter()) {
         return 0;
     }
     struct stat st;
-    return (stat(TRENDFILE, &st) == 0) ? (size_t)st.st_size : 0;
+    size_t n = (stat(TRENDFILE, &st) == 0) ? (size_t)st.st_size : 0;
+    hr_capture_fs_leave();
+    return n;
 }
 
 void hr_capture_trend_reset(void)
@@ -748,38 +797,63 @@ bool hr_capture_clear(void)
  * the NULL this API uses for failure.
  */
 /*
- * Flush and unmount the capture filesystem.
+ * Quiesce, flush and unmount the capture filesystem before a deliberate
+ * restart.
  *
- * Called before the deliberate reboot after an OTA. Without it SPIFFS is never
- * cleanly unmounted, and the symptom is not a lost write - it is a file whose
- * metadata and data disagree: stat() reported 26,359 bytes on a log whose very
- * first read() returned nothing. Since the mount is configured with
- * format_if_mount_failed, a bad enough inconsistency then wipes the partition
- * silently, which is how a 270KB capture became 26KB between two reboots.
+ * Why unmount at all: without it SPIFFS is never cleanly unmounted, and the
+ * symptom is not a lost write - it is a file whose metadata and data
+ * disagree: stat() reported 26,359 bytes on a log whose very first read()
+ * returned nothing. Since the mount is configured with format_if_mount_failed,
+ * a bad enough inconsistency then wipes the partition silently, which is how
+ * a 270KB capture became 26KB between two reboots.
  *
- * Takes the writer lock so an in-flight line finishes first, and never releases
- * it: nothing should write after this point, and blocking a late writer is
- * better than letting it reopen the filesystem we just closed.
+ * Why it has to be QUIESCED first: esp_vfs_spiffs_unregister() drops the VFS
+ * entry, unmounts, then frees the SPIFFS control block and deletes its lock -
+ * and nothing in ESP-IDF stops another task from being inside a read(),
+ * stat() or fclose() on that partition at the same moment. The first version
+ * of this function waited 3 s for the writer's mutex and then unmounted
+ * regardless ("unmounting underneath it"), and the mutex was all it waited
+ * for: the download readers, the logbook on the main task and the bare
+ * stat() calls behind the size counters never took it. Freeing the filesystem
+ * under any of them is a use-after-free in a task that then walks into it -
+ * a panic on the reboot path, which the dryer showed as the NEW firmware's
+ * first boot reporting reset=panic.
+ *
+ * So: close the gate so no new file operation starts, take the writer's
+ * mutex so an in-flight line finishes, wait for the last reader to leave,
+ * write the pending run summary, unmount. The whole wait is bounded by
+ * QUIESCE_MS, and if the filesystem is still busy at the deadline it is left
+ * MOUNTED: SPIFFS is built to survive losing power with a file open, which
+ * is exactly what the reset then looks like to it, whereas freeing it under
+ * a user is a crash. The mutex is deliberately never released - after this
+ * the module is inert, and a late writer blocking on it is the right outcome.
+ *
+ * A capture that never mounted, or was already shut down, is a no-op.
  */
 void hr_capture_shutdown(void)
 {
     if (!s_ready) {
         return;
     }
-    bool locked = true;
-    if (s_lock != NULL &&
-        xSemaphoreTake(s_lock, pdMS_TO_TICKS(3000)) != pdTRUE) {
-        /* A writer is still inside a file operation. The reboot is coming
-         * regardless, so unmount anyway - but say so, because this is the
-         * situation that produces a log whose metadata and data disagree. */
-        ESP_LOGW(TAG, "shutdown: writer still busy after 3 s; unmounting "
-                      "underneath it");
-        locked = false;
-    }
+    const TickType_t deadline =
+        xTaskGetTickCount() + pdMS_TO_TICKS(QUIESCE_MS);
+
+    hr_quiesce_close(&s_fs_gate);
+    bool locked = s_lock != NULL &&
+                  xSemaphoreTake(s_lock, pdMS_TO_TICKS(QUIESCE_MS)) == pdTRUE;
+    bool drained = fs_drain(deadline);
     s_ready = false;
+
+    if (!locked || !drained) {
+        ESP_LOGW(TAG, "shutdown: filesystem still busy after %u ms (writer %s, "
+                      "%d other user(s)); left mounted for the restart",
+                 (unsigned)QUIESCE_MS, locked ? "idle" : "busy",
+                 hr_quiesce_users(&s_fs_gate));
+        return;
+    }
+    flush_run();
     esp_vfs_spiffs_unregister("capture");
-    ESP_LOGI(TAG, "capture filesystem unmounted%s",
-             locked ? " cleanly" : " (unclean)");
+    ESP_LOGI(TAG, "capture filesystem unmounted cleanly");
 }
 
 /*
@@ -806,12 +880,28 @@ bool hr_capture_format(void)
         ESP_LOGE(TAG, "format refused: a writer still holds the filesystem");
         return false;
     }
+    /*
+     * The readers and the logbook do not take that mutex. Wait for them the
+     * same way hr_capture_shutdown() does, and refuse rather than format
+     * under an open descriptor - that is the very thing this exists to cure.
+     */
+    hr_quiesce_close(&s_fs_gate);
+    if (!fs_drain(xTaskGetTickCount() + pdMS_TO_TICKS(QUIESCE_MS))) {
+        hr_quiesce_reopen(&s_fs_gate);
+        if (s_lock != NULL) {
+            xSemaphoreGive(s_lock);
+        }
+        ESP_LOGE(TAG, "format refused: %d reader(s) still inside the "
+                      "filesystem", hr_quiesce_users(&s_fs_gate));
+        return false;
+    }
     s_ready = false;
     esp_vfs_spiffs_unregister("capture");
     esp_err_t err = esp_spiffs_format("capture");
     if (s_lock != NULL) {
         xSemaphoreGive(s_lock);
     }
+    hr_quiesce_reopen(&s_fs_gate);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "format failed: %s", esp_err_to_name(err));
         return false;
@@ -851,6 +941,11 @@ void *hr_capture_open(void)
     if (!s_ready) {
         return NULL;
     }
+    /* Held for the whole download - every read() and the close() are inside
+     * the filesystem - and released by hr_capture_close(). */
+    if (!hr_capture_fs_enter()) {
+        return NULL;
+    }
     /* Make any pending run visible before the caller reads the log. */
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(500)) == pdTRUE) {
         flush_run();
@@ -859,6 +954,7 @@ void *hr_capture_open(void)
 
     cap_reader_t *r = calloc(1, sizeof(*r));
     if (r == NULL) {
+        hr_capture_fs_leave();
         return NULL;
     }
     r->fd = -1;
@@ -944,6 +1040,7 @@ void hr_capture_close(void *handle)
             close(r->fd);
         }
         free(r);
+        hr_capture_fs_leave();
     }
 }
 

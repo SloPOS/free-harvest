@@ -5,6 +5,7 @@
 #include "hr_http.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
+#include "hr_reboot.h"
 #include "hr_telemetry.h"
 #include "hr_trend.h"
 #include "hr_usb.h"
@@ -1054,19 +1055,11 @@ static esp_err_t h_cmd(httpd_req_t *req)
  * next boot partition and reboots. Lets you update over WiFi without
  * unplugging the board from the dryer.
  *
- * Reboot is deferred slightly so the HTTP 200 reaches the browser first.
+ * The restart is deferred slightly so the HTTP 200 reaches the browser first,
+ * and goes through hr_reboot_request() so the capture filesystem is quiesced
+ * and unmounted before esp_restart() - see hr_capture_shutdown() for what an
+ * unclean unmount, and an unmount under a busy writer, each did.
  */
-static void ota_reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    /* Unmount before restarting. An OTA reboot that leaves SPIFFS mounted has
-     * been corrupting the capture log - see hr_capture_shutdown(). */
-    hr_capture_shutdown();
-    ESP_LOGW(TAG, "rebooting into new firmware");
-    esp_restart();
-}
-
 static esp_err_t h_ota(httpd_req_t *req)
 {
     /*
@@ -1217,7 +1210,7 @@ static esp_err_t h_ota(httpd_req_t *req)
 
     ESP_LOGI(TAG, "OTA complete, will boot %s", target->label);
     send_json(req, "{\"ok\":true}", 11);
-    xTaskCreate(ota_reboot_task, "ota_reboot", 3072, NULL, 5, NULL);
+    hr_reboot_request("new firmware installed", 1200);
     return ESP_OK;
 }
 

@@ -1,4 +1,5 @@
 #include "hr_batchstore.h"
+#include "hr_capture.h"   /* hr_capture_fs_enter/leave: the shared partition */
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -83,9 +84,19 @@ static void save_active(void)
  * the logbook never records anything. main.c now calls it once
  * hr_capture_ready() turns true.
  */
+/*
+ * Every file operation here lives on the capture partition and is bracketed
+ * by hr_capture_fs_enter()/leave(), so hr_capture_shutdown() can wait for it
+ * rather than unmount underneath it. A refused enter() means a shutdown or
+ * reformat is in progress: behave as if the store were unavailable.
+ */
 void hr_batchstore_init(void)
 {
     load_active();
+    if (!hr_capture_fs_enter()) {
+        s_ready = false;
+        return;
+    }
     /* A write to the active segment proves the filesystem is up. Doing it here
      * rather than trusting a flag means a failed mount shows as an unready
      * store instead of as append failures later. */
@@ -94,6 +105,7 @@ void hr_batchstore_init(void)
         ESP_LOGW(TAG, "logbook unavailable: %s (%s)", seg_path(s_active),
                  strerror(errno));
         s_ready = false;
+        hr_capture_fs_leave();
         return;
     }
     fclose(f);
@@ -101,13 +113,19 @@ void hr_batchstore_init(void)
     ESP_LOGI(TAG, "logbook ready: seg%u active, %u + %u bytes stored",
              (unsigned)s_active, (unsigned)file_size(SEG_A),
              (unsigned)file_size(SEG_B));
+    hr_capture_fs_leave();
 }
 
 bool hr_batchstore_ready(void) { return s_ready; }
 
 size_t hr_batchstore_bytes(void)
 {
-    return s_ready ? file_size(SEG_A) + file_size(SEG_B) : 0;
+    if (!s_ready || !hr_capture_fs_enter()) {
+        return 0;
+    }
+    size_t n = file_size(SEG_A) + file_size(SEG_B);
+    hr_capture_fs_leave();
+    return n;
 }
 
 bool hr_batchstore_append(const hr_batch_t *b)
@@ -119,6 +137,9 @@ bool hr_batchstore_append(const hr_batch_t *b)
     size_t n = hr_batch_encode(b, line, sizeof(line));
     if (n == 0) {
         ESP_LOGW(TAG, "record would not encode; not written");
+        return false;
+    }
+    if (!hr_capture_fs_enter()) {
         return false;
     }
 
@@ -135,10 +156,12 @@ bool hr_batchstore_append(const hr_batch_t *b)
     FILE *f = fopen(seg_path(s_active), "a");
     if (f == NULL) {
         ESP_LOGE(TAG, "append failed: %s", strerror(errno));
+        hr_capture_fs_leave();
         return false;
     }
     int w = fprintf(f, "%s\n", line);
     fclose(f);
+    hr_capture_fs_leave();
     if (w <= 0) {
         return false;
     }
@@ -188,14 +211,20 @@ void *hr_batchstore_open(void)
     if (!s_ready) {
         return NULL;
     }
+    /* Held for the whole streamed response; released in hr_batchstore_close(). */
+    if (!hr_capture_fs_enter()) {
+        return NULL;
+    }
     reader_t *r = calloc(1, sizeof(*r));
     if (r == NULL) {
+        hr_capture_fs_leave();
         return NULL;
     }
     r->fd = -1;
     r->stage = 0;
     if (open_stage(r) < 0) {
         free(r);
+        hr_capture_fs_leave();
         return NULL;
     }
     return r;
@@ -231,16 +260,18 @@ void hr_batchstore_close(void *handle)
             close(r->fd);
         }
         free(r);
+        hr_capture_fs_leave();
     }
 }
 
 bool hr_batchstore_clear(void)
 {
-    if (!s_ready) {
+    if (!s_ready || !hr_capture_fs_enter()) {
         return false;
     }
     remove(SEG_A);
     remove(SEG_B);
+    hr_capture_fs_leave();
     s_active = 0;
     save_active();
     ESP_LOGW(TAG, "logbook cleared");

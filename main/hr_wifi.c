@@ -39,6 +39,7 @@ static char s_ssid[33];
 static esp_timer_handle_t s_ap_timeout_timer;
 static esp_timer_handle_t s_sta_retry_timer;
 static bool s_ap_window_expired; /* true once the 5-min window has closed */
+static volatile bool s_restarting; /* hr_wifi_prepare_restart() was called */
 
 static wifi_ap_record_t s_scan[MAX_SCAN];
 static uint16_t s_scan_count;
@@ -264,6 +265,15 @@ static bool credentials_plausible(const char *ssid, const char *pw)
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
+    if (s_restarting) {
+        /*
+         * esp_restart() is stopping the driver. The disconnect it raises is
+         * not a lost link to be repaired - re-enabling the AP and calling
+         * esp_wifi_connect() into a stack that is being torn down is exactly
+         * the kind of work a reboot path should not be doing.
+         */
+        return;
+    }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         /*
          * Runs in the WiFi event task - MUST NOT block. Reconnect immediately
@@ -576,6 +586,13 @@ void hr_wifi_forget(void)
                  esp_err_to_name(merr));
     }
     start_ap_mode();
+}
+
+void hr_wifi_prepare_restart(void)
+{
+    s_restarting = true;
+    cancel_sta_retry();
+    cancel_ap_timeout();
 }
 
 void hr_wifi_scan_start(void)

@@ -19,6 +19,7 @@
 #include "hr_history.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
+#include "hr_reboot.h"
 #include "hr_session.h"
 #include "hr_telemetry.h"
 #include "hr_trend.h"
@@ -460,9 +461,16 @@ void app_main(void)
             } else if (t - boot_ms >= HR_OTA_CONFIRM_TIMEOUT_MS) {
                 ESP_LOGE(TAG, "update never became reachable; rolling back to "
                               "the previous firmware");
-                /* Does not return on success. */
-                esp_ota_mark_app_invalid_rollback_and_reboot();
-                ota_pending = false; /* rollback unavailable; keep running */
+                /*
+                 * Mark, then restart through the common path so the capture
+                 * filesystem is quiesced first - the _and_reboot variant
+                 * calls esp_restart() directly. If marking fails there is
+                 * no rollback to be had; keep running this image.
+                 */
+                if (esp_ota_mark_app_invalid_rollback() == ESP_OK) {
+                    hr_reboot_request("rolling back an unreachable update", 0);
+                }
+                ota_pending = false;
             }
         }
         hr_session_tick(&s_session, t);

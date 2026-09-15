@@ -87,9 +87,25 @@ bool hr_capture_clear(void);
  * Open the log for reading. Returns NULL if unavailable. Caller must call
  * hr_capture_close(). Kept opaque so the HTTP layer can stream it.
  */
-/* Flush and unmount before a deliberate reboot, so SPIFFS is not left
- * inconsistent. After this the capture APIs are inert. */
+/*
+ * Quiesce, flush and unmount before a deliberate restart, so SPIFFS is not
+ * left inconsistent. Waits - bounded, well under a second - for the writer
+ * and for anyone inside hr_capture_fs_enter() to finish, and leaves the
+ * filesystem mounted rather than pull it from under them if they do not.
+ * After this the capture APIs are inert. Safe to call when the capture never
+ * mounted. Call it from hr_reboot_request(), not directly.
+ */
 void hr_capture_shutdown(void);
+
+/*
+ * Bracket any file operation on the capture partition that is NOT made by
+ * this module's writer - the logbook in hr_batchstore.c, for instance - with
+ * these, so the teardown paths can wait for it. enter() returns false once a
+ * shutdown or reformat is under way; the caller must then not touch the
+ * filesystem. Nests.
+ */
+bool hr_capture_fs_enter(void);
+void hr_capture_fs_leave(void);
 
 /* Reformat the partition. Destroys the capture log, the trend and the
  * logbook - the recovery path when SPIFFS refuses writes with EIO while
