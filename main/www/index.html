@@ -1309,24 +1309,47 @@ function pinPut(v){ try{ v ? sessionStorage.setItem("fh_pin", v)
  * adapter's five-wrong lockout.
  */
 let pinVerified = false;
+/* true / false / null, where null means the adapter could not be asked. */
 async function pinIsSet(){
-  try{ return !!(await (await fetch("/api/pin")).json()).set; }catch(e){ return false; }
+  try{ return !!(await (await fetch("/api/pin")).json()).set; }catch(e){ return null; }
 }
 async function pinTry(pin){
   try{ const j = await (await fetch("/api/pin/verify",
         {method:"POST", body:"pin=" + encodeURIComponent(pin)})).json();
-       return !!j.ok; }catch(e){ return false; }
+       return !!j.ok; }catch(e){ return null; }
 }
 async function ensurePin(){
   if(pinVerified) return true;
-  if(!await pinIsSet()){ pinVerified = true; return true; }   /* nothing to gate */
+
+  /*
+   * An UNKNOWN answer must never be cached. Treating a failed request as "no
+   * PIN is set" - and remembering it - would un-gate the whole session on one
+   * blip, and the user would find out only when the adapter refused the
+   * action they had already set up. The adapter is single-worker, so a
+   * request racing an upload is enough to cause that.
+   */
+  const needed = await pinIsSet();
+  if(needed === false){ pinVerified = true; return true; }   /* known: none set */
+  if(needed === null && !pinGet()) return true;   /* cannot tell and hold none:
+                                                     let the adapter judge the
+                                                     request, and ask again
+                                                     next time rather than
+                                                     latching open */
   let pin = pinGet();
-  if(pin && await pinTry(pin)){ pinVerified = true; return true; }
+  if(pin){
+    const ok = await pinTry(pin);
+    if(ok === true){ pinVerified = true; return true; }
+    if(ok === null) return true;   /* could not ask: keep a PIN that may be
+                                      perfectly good, and let the adapter rule */
+    pinPut("");                    /* genuinely refused: stop offering it */
+  }
   for(let i=0; i<2; i++){
     pin = prompt(i ? "PIN incorrect - try again" : "Control PIN");
     if(!pin) return false;
-    if(await pinTry(pin)){ pinPut(pin); pinVerified = true; return true; }
-    pinPut("");
+    const ok = await pinTry(pin);
+    if(ok === true){ pinPut(pin); pinVerified = true; return true; }
+    if(ok === null){ pinPut(pin); return true; }   /* unverifiable now; the
+                                                      adapter still checks */
   }
   return false;
 }
@@ -2990,9 +3013,9 @@ $("#otago").addEventListener("click",async ()=>{
   /*
    * Ask for the PIN BEFORE the upload. The firmware image is the POST body, so
    * a rejected upload means pushing the whole 1.3 MB again just to be told the
-   * adapter is locked. Check /api/pin first and prompt up front; only send once
-   * we hold a PIN (or the adapter has none set). The post-upload check below
-   * still stands, for a stored PIN that turns out to be wrong.
+   * adapter is locked. ensurePin() settles it up front; only send once we hold
+   * a PIN (or the adapter has none set). The post-upload check below still
+   * stands, for a stored PIN that turns out to be wrong.
    */
   if(!await ensurePin()){ note(st,"Update needs the control PIN.","bad"); return; }
   const bar=$("#otabar"), fill=$("#otafill");
