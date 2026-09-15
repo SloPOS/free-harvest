@@ -22,11 +22,15 @@ Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 > You need **firmware 6.0.641041**: earlier builds do not send the signals Free
 > Harvest reads, and no adapter can change that.
 >
-> **Do not run `6.0.644170`.** That build is broken. On a dryer running it,
-> *nothing* can talk to the machine — not Free Harvest, and **not HarvestRight's
-> own adapter either**. We proved it the hard way: a working dryer was updated to
-> it, both adapters went silent, and reverting to the build on
-> [https://harvestright.com](https://harvestright.com/pages/customer-support) brought both straight back.
+> **`6.0.644170` is not supported on this `main` build yet — but it is coming.**
+> It turned out not to be broken after all: it moved to an *encoded* USB
+> transport that plaintext Free Harvest (and HarvestRight's own adapter) could
+> not read, which is why both went silent on it. We have since reverse-engineered
+> and **decoded** that transport. A **beta** build that talks to `6.0.644170`
+> dryers is in testing now, and a `main` release will follow once it is validated
+> on real hardware. Until then, run `6.0.641041` here, or try the
+> [beta branch](https://github.com/SloPOS/free-harvest/tree/beta) if you have a
+> `6.0.644170` machine and want to help test.
 >
 > ### If you have already updated to it
 >
