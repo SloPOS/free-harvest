@@ -14,38 +14,33 @@ your own network. No cloud account. No vendor lock-in.
 
 Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 
-> ## ⚠️ Check your dryer's firmware first
+> ## ✅ Dryer firmware — both builds are supported
 >
-> **Free Harvest is developed and tested against dryer firmware `6.0.641041`.**
-> Settings → Diagnostics on the machine shows the build.
+> Settings → Diagnostics on the machine shows your build.
 >
-> You need **firmware 6.0.641041**: earlier builds do not send the signals Free
-> Harvest reads, and no adapter can change that.
+> **`6.0.641041`** — the original plaintext protocol. Fully supported, and the
+> build most of this project was mapped against.
 >
-> **`6.0.644170` is not supported on this `main` build yet — but it is coming.**
-> It turned out not to be broken after all: it moved to an *encoded* USB
-> transport that plaintext Free Harvest (and HarvestRight's own adapter) could
-> not read, which is why both went silent on it. We have since reverse-engineered
-> and **decoded** that transport. A **beta** build that talks to `6.0.644170`
-> dryers is in testing now, and a `main` release will follow once it is validated
-> on real hardware. Until then, run `6.0.641041` here, or try the
-> [beta branch](https://github.com/SloPOS/free-harvest/tree/beta) if you have a
-> `6.0.644170` machine and want to help test.
+> **`6.0.644170`** — supported since **v1.2.0**. This build was never "broken",
+> though it looked it: it moved the USB link to an *encoded* transport that
+> neither older Free Harvest nor HarvestRight's own adapter could read, so both
+> went silent on it. **vskiwi** discovered the dryer was in fact still answering
+> and built the framing and capture for it; the cipher was then recovered from
+> the firmware by decompilation and validated byte-for-byte against a full live
+> capture. Free Harvest decodes it, and from the app a 644170 dryer behaves like
+> any other.
 >
-> ### If you have already updated to it
+> **There is nothing to switch on.** The adapter reads the dryer's build from
+> its `UID` reply and enables the encoded handshake by itself the first time it
+> sees `6.0.644170`, then re-introduces itself so the machine starts answering.
+> A plaintext dryer is never touched, and the decoder only ever runs on a real
+> encoded frame. The toggle is still there in Settings → Debug (or
+> `POST /api/compat compat644170=1`) if it ever gets that wrong — and a choice
+> made by hand is remembered, not overridden.
 >
-> **You can go back.** The build published on harvestright.com is the working
-> one, and installing it over `6.0.644170` restored a dryer that had gone
-> completely silent - both Free Harvest and the HarvestRight adapter started
-> talking again immediately.
->
-> We are deliberately not writing the procedure here, because we have done it
-> once and that is not enough to instruct anyone else on updating a freeze
-> dryer. Get the firmware and the steps from HarvestRight.
->
-> If your dryer answers the identity query once and then goes quiet, check the
-> firmware build before you suspect the adapter. That symptom cost this project
-> days of chasing a bug that was never in the adapter at all.
+> If you would rather go back to plaintext firmware entirely, the build on
+> [harvestright.com](https://harvestright.com/pages/customer-support) is the
+> working one — get the firmware and the steps from HarvestRight, not here.
 
 ![Dashboard while a batch runs](docs/img/dashboard-running.png)
 
@@ -142,10 +137,19 @@ Screens whose buttons have never been captured offer **nothing at all** rather t
 guesses. Anything that starts, ends or skips part of a cycle asks first, and names
 the cost: *"You will lose 18h 04m of progress on this batch."*
 
-**A PIN is available** and gates every endpoint that can change the machine —
-control, recipes, raw commands, firmware updates. Monitoring stays completely
-open. Five wrong attempts lock control for a minute, which turns guessing a
-four-digit PIN from seconds into weeks.
+**A PIN is available** and gates every endpoint that can change the machine or
+the adapter — control, recipes, raw commands, firmware updates, Wi-Fi and MQTT
+settings, clearing or formatting stored data, the USB re-attach. Monitoring
+stays completely open: the dashboard and the log downloads never ask for it.
+
+The app asks for the PIN **before** the action rather than after — including
+before it opens a control screen, so Candy/Custom setup and the Wi-Fi, MQTT,
+firmware and debug pages want it on the way in. That matters most for a
+firmware upload, where being refused afterwards meant pushing the whole image a
+second time. Five wrong attempts lock control for a minute, which turns
+guessing a four-digit PIN from seconds into weeks. Scripts can pass it as
+`pin=` in the form body or in an `X-HR-Pin` header (the OTA upload, whose body
+is the image, uses the header).
 
 It is not a login system, and the UI says so: no accounts, no sessions. The
 threat it addresses is a housemate or a guest tapping Start, not a determined
@@ -169,7 +173,7 @@ shut the drain valve by hand.
 |---|---|
 | **ESP32-S3 board** | Must be **S3** (or S2) — needs native USB. An ESP32-S3 N16R8 DevKitC-1 works best: [https://amzn.to/4hGcVpa](https://amzn.to/4zDtFEi). ~$12. |
 | **USB-C to USB-A cable** | From the board's **USB** port to the freeze dryer's USB-A port. |
-| Freeze dryer | Harvest Right, firmware v6.x (developed against v6.4 / build 641041). |
+| Freeze dryer | Harvest Right, firmware v6.x. Both `6.0.641041` (plaintext) and `6.0.644170` (encoded) are supported. |
 
 > ### ⚠️ The original ESP32 will not work
 > A classic ESP32 (WROOM-32, DevKitC-32) has **no USB device controller** — its USB
@@ -417,7 +421,8 @@ reverts itself.**
 
 1. Download the new `hr_wifi_adapter.bin`
 2. **Settings → Firmware update → choose file → Upload & install**
-3. It writes to the spare slot, verifies, then reboots into the new version
+3. If a control PIN is set, you are asked for it **before** the upload starts
+4. It writes to the spare slot, verifies, then reboots into the new version
 
 If the upload fails or the file is invalid, it's **rejected and the current firmware
 keeps running** — the device won't be bricked by a bad upload.
@@ -538,23 +543,30 @@ every known verb, and which fields are confirmed vs. inferred.
 
 ### Known gaps
 
-- **The full cycle is now decoded** — Freezing (type 4), Drying (5), Final dry (6),
-  Complete/vent (7) and Idle (1) — from a 22-hour capture, with real vacuum
-  readings, per-phase timers and live % frozen. **Defrost has still never been
-  captured.** A transient type 44 appeared once inside final dry and remains
-  unmapped.
-- **Time-remaining is still naive.** The freeze estimate extrapolates linearly,
-  but cooling is exponential (Newton's law of cooling), so it under-estimates the
-  final few degrees — which are the slowest. A curve-fitting estimator that learns
-  from past cycles is in progress; the trend graph is its first piece.
+- **The full cycle is decoded** — Preparing (17), Starting (2), Freezing (4),
+  Drying (5), Final dry (6), Complete/vent (7), **Defrost (10)** and Idle (1) —
+  with real vacuum readings, per-phase timers and live % frozen. A transient
+  type 44 appeared once inside final dry and remains unmapped.
+- **Time-remaining is only partly learned.** Completed runs record per-phase
+  durations, and the logbook estimates the next run from the median of this
+  dryer's own finished cycles (seeded from one measured batch until it has any
+  of its own). The live in-run freeze estimate still extrapolates linearly,
+  though, and cooling is exponential — so it under-estimates the last few
+  degrees, which are the slowest. A curve fit for that is still unbuilt.
 - **Alerts and a learning time estimator are designed but not shipped.** Both
   are specified in `docs/superpowers/specs/`; the estimator needs a body of real
   batches before it can be validated, which is exactly what the logbook is now
   collecting.
 - **Screens 15 (Diagnostics) and 44 are unmapped**, so the app offers no buttons on
   them. Screen 2's Continue, and every other screen, is mapped.
-- **Defrost has never been captured.** It can now be triggered (`CLICK 7 1`), so
-  this is one run away from being closed.
+- **The compressor restart-delay screen is not surfaced.** Stop the compressor
+  and ask it to restart inside ~3 minutes and the dryer runs an anti-short-cycle
+  countdown, going quiet while it does. The app keeps showing the last reading,
+  which looks like it has frozen; the link recovers on its own. Telling "paused"
+  apart from "live" in the UI is not done yet.
+- **The defrost time cannot be read or set.** Defrost itself is decoded, but the
+  duration set with the machine's own up/down arrows is never transmitted, and
+  no button numbers for that screen have been captured.
 - **`SENDCANDY`/`SENDCUSTOM` sent through the raw command box or MQTT are
   malformed.** Those paths use the generic field builder, which takes the quoted
   recipe payload apart. The recipe editor builds them correctly.

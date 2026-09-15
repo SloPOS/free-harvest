@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
@@ -14,9 +15,27 @@ static const char *TAG = "hr_usb";
 
 #define CDC_ITF TINYUSB_CDC_ACM_0
 #define RX_CHUNK 256
+/* How long one sender may wait for another to finish its frame. Frames are
+ * under 512 bytes and the flush wait is 50 ms, so this is generous. */
+#define TX_LOCK_MS 200
 
 static hr_session_t *s_session;
 static volatile bool s_host_present;
+static SemaphoreHandle_t s_tx_lock;
+/*
+ * The task tud_task() runs on. esp_tinyusb does not export its handle, so it
+ * is captured from the first callback, all of which run on that task. Needed
+ * by hr_usb_tx() to know when waiting for the endpoint would be waiting for
+ * itself.
+ */
+static TaskHandle_t s_tusb_task;
+
+static void note_tusb_task(void)
+{
+    if (s_tusb_task == NULL) {
+        s_tusb_task = xTaskGetCurrentTaskHandle();
+    }
+}
 
 /* USB-level diagnostic counters - see hr_usb.h for why these exist. */
 static volatile bool s_mounted;
@@ -35,6 +54,7 @@ static void on_rx(int itf, cdcacm_event_t *event)
     uint8_t buf[RX_CHUNK];
     size_t got = 0;
 
+    note_tusb_task();
     /* Drain everything TinyUSB has buffered for us. */
     while (tinyusb_cdcacm_read(itf, buf, sizeof(buf), &got) == ESP_OK &&
            got > 0) {
@@ -53,6 +73,7 @@ static void on_rx(int itf, cdcacm_event_t *event)
  */
 void tud_mount_cb(void)
 {
+    note_tusb_task();
     s_mounted = true;
     s_suspended = false;
     s_mount_events++;
@@ -63,7 +84,15 @@ void tud_mount_cb(void)
 void tud_umount_cb(void)
 {
     s_mounted = false;
-    ESP_LOGW(TAG, "USB unmounted: host dropped us");
+    /*
+     * Drop whatever is still queued for the host. A frame that could not be
+     * flushed while the link was down used to sit in the TX FIFO and go out
+     * the moment the host re-enumerated - for a CLICK that means pressing a
+     * button on whatever screen the dryer shows when it comes back, seconds
+     * or hours after the user asked. Runs on the TinyUSB task, so no lock.
+     */
+    tud_cdc_n_write_clear(CDC_ITF);
+    ESP_LOGW(TAG, "USB unmounted: host dropped us (TX queue cleared)");
 }
 
 void tud_suspend_cb(bool remote_wakeup_en)
@@ -150,9 +179,24 @@ static void on_line_state(int itf, cdcacm_event_t *event)
     ESP_LOGI(TAG, "line state: dtr=%d rts=%d", (int)dtr, (int)rts);
 }
 
-void hr_usb_tx(const char *data, size_t len, void *user)
+bool hr_usb_tx(const char *data, size_t len, void *user)
 {
     (void)user;
+
+    if (data == NULL || len == 0) {
+        return false;
+    }
+    if (!s_mounted) {
+        /* Nobody is draining the FIFO. Queueing anyway would deliver this
+         * frame to a future session - see tud_umount_cb(). */
+        ESP_LOGW(TAG, "TX refused: host has not enumerated us");
+        return false;
+    }
+    if (s_tx_lock != NULL &&
+        xSemaphoreTake(s_tx_lock, pdMS_TO_TICKS(TX_LOCK_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "TX refused: transport busy");
+        return false;
+    }
 
 #if CONFIG_HR_HTTP_LOG_TO_UART
     /*
@@ -178,17 +222,67 @@ void hr_usb_tx(const char *data, size_t len, void *user)
         ESP_LOGI(TAG, "TX -> %s", line);
     }
 #endif
-    size_t queued = tinyusb_cdcacm_write_queue(CDC_ITF, (const uint8_t *)data,
-                                               len);
-    if (queued != len) {
-        ESP_LOGW(TAG, "short write: queued %u of %u", (unsigned)queued,
-                 (unsigned)len);
+    /*
+     * All or nothing. The FIFO takes what fits and returns the count; a frame
+     * that only half fits must not be started, because the bytes already
+     * committed to the endpoint cannot be taken back - clearing the FIFO
+     * behind them leaves the dryer a frame without its terminator, glued to
+     * whatever is sent next. So check the room first and refuse whole.
+     */
+    bool ok = true;
+    if (tud_cdc_n_write_available(CDC_ITF) < len) {
+        ESP_LOGW(TAG, "TX refused: FIFO has no room for %u bytes (host not "
+                      "reading?)", (unsigned)len);
+        ok = false;
+    } else {
+        size_t queued = tinyusb_cdcacm_write_queue(CDC_ITF,
+                                                   (const uint8_t *)data, len);
+        if (queued != len) {
+            /* Cannot happen after the room check; treat it as the same
+             * refusal rather than leave a torn frame behind. */
+            ESP_LOGW(TAG, "short write: queued %u of %u", (unsigned)queued,
+                     (unsigned)len);
+            tud_cdc_n_write_clear(CDC_ITF);
+            ok = false;
+        }
     }
-    /* Flush promptly - the dryer's parser is CR-driven and latency-sensitive. */
-    esp_err_t err = tinyusb_cdcacm_write_flush(CDC_ITF, pdMS_TO_TICKS(50));
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "flush failed: %s", esp_err_to_name(err));
+
+    if (ok) {
+        /*
+         * Push it to the endpoint now - the dryer's parser is CR-driven and
+         * latency-sensitive. The FIFO drains 64 bytes per bulk transfer, and
+         * every transfer after the first is started from tud_task(), i.e. on
+         * the TinyUSB task. When THIS call is on that task (the WIFIINFO
+         * reply is sent from inside the RX callback) waiting for the drain
+         * would wait for ourselves: the 50 ms timed out on every frame over
+         * 64 bytes, the FIFO was then cleared, and the dryer received the
+         * first 64 bytes of WIFIINFO with no terminator. Kick once and
+         * return; tud_task() finishes the job as soon as we hand control
+         * back.
+         *
+         * From any other task, wait briefly so a frame that did not go out is
+         * at least reported. A host that is slow to poll IN is not a
+         * failure - the bytes are complete in the FIFO and go out on the next
+         * IN token - so the FIFO is NOT cleared here. It is cleared when the
+         * host actually goes away (tud_umount_cb).
+         */
+        if (xTaskGetCurrentTaskHandle() == s_tusb_task) {
+            tud_cdc_n_write_flush(CDC_ITF);
+        } else {
+            esp_err_t err = tinyusb_cdcacm_write_flush(CDC_ITF,
+                                                       pdMS_TO_TICKS(50));
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "TX pending: host slow to read (%s, %u bytes "
+                              "still queued)", esp_err_to_name(err),
+                         (unsigned)(CONFIG_TINYUSB_CDC_TX_BUFSIZE -
+                                    tud_cdc_n_write_available(CDC_ITF)));
+            }
+        }
     }
+    if (s_tx_lock != NULL) {
+        xSemaphoreGive(s_tx_lock);
+    }
+    return ok;
 }
 
 bool hr_usb_host_present(void)
@@ -199,6 +293,7 @@ bool hr_usb_host_present(void)
 void hr_usb_init(hr_session_t *session)
 {
     s_session = session;
+    s_tx_lock = xSemaphoreCreateMutex();
 
     const tinyusb_config_t tusb_cfg = {
         .device_descriptor = NULL, /* default descriptor; see README re VID/PID */

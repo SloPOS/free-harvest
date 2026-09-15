@@ -56,6 +56,18 @@ bool hr_capture_ready(void);
  */
 void hr_capture_append(uint32_t t_ms, const char *body);
 
+/*
+ * Record one complete ENCODED frame (the 6.0.644170 transport, see
+ * hr_protocol.h) verbatim, header included:
+ *
+ *     <millis>\t~enc <len> )S$3...
+ *
+ * The "~" prefix is the log's existing marker for a line that is not a
+ * plaintext frame ("~repeat", "~boot"), so tooling that splits frame bodies
+ * on commas skips it. Same queue and rules as hr_capture_append().
+ */
+void hr_capture_enc(uint32_t t_ms, const char *frame, size_t len);
+
 /* Frame lines discarded because the write queue was full. */
 unsigned long hr_capture_dropped(void);
 
@@ -75,9 +87,25 @@ bool hr_capture_clear(void);
  * Open the log for reading. Returns NULL if unavailable. Caller must call
  * hr_capture_close(). Kept opaque so the HTTP layer can stream it.
  */
-/* Flush and unmount before a deliberate reboot, so SPIFFS is not left
- * inconsistent. After this the capture APIs are inert. */
+/*
+ * Quiesce, flush and unmount before a deliberate restart, so SPIFFS is not
+ * left inconsistent. Waits - bounded, well under a second - for the writer
+ * and for anyone inside hr_capture_fs_enter() to finish, and leaves the
+ * filesystem mounted rather than pull it from under them if they do not.
+ * After this the capture APIs are inert. Safe to call when the capture never
+ * mounted. Call it from hr_reboot_request(), not directly.
+ */
 void hr_capture_shutdown(void);
+
+/*
+ * Bracket any file operation on the capture partition that is NOT made by
+ * this module's writer - the logbook in hr_batchstore.c, for instance - with
+ * these, so the teardown paths can wait for it. enter() returns false once a
+ * shutdown or reformat is under way; the caller must then not touch the
+ * filesystem. Nests.
+ */
+bool hr_capture_fs_enter(void);
+void hr_capture_fs_leave(void);
 
 /* Reformat the partition. Destroys the capture log, the trend and the
  * logbook - the recovery path when SPIFFS refuses writes with EIO while

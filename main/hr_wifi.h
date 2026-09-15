@@ -45,6 +45,15 @@ bool hr_wifi_set_credentials(const char *ssid, const char *password);
 /* Forget stored credentials and fall back to the setup AP. */
 void hr_wifi_forget(void);
 
+/*
+ * A deliberate restart is about to happen (hr_reboot_request()). From here
+ * the event handler ignores the disconnect that esp_restart()'s Wi-Fi
+ * shutdown handler produces - instead of re-opening the setup AP and
+ * reconnecting into a stack that is being torn down - and the retry timers
+ * are stopped. Nothing else changes; the driver is stopped by esp_restart().
+ */
+void hr_wifi_prepare_restart(void);
+
 /* Trigger an async scan; results retrieved with hr_wifi_scan_result_json(). */
 void hr_wifi_scan_start(void);
 

@@ -765,6 +765,19 @@
     </div>
 
     <div class="card">
+      <h2>Dryer firmware</h2>
+      <div class="pill">build <span id="dryer-fw">—</span></div>
+      <button id="compat644170" class="ghost" style="margin-top:10px">6.0.644170 handshake: —</button>
+      <div id="compatstatus" class="notice"></div>
+      <div class="hint">A dryer on build 6.0.644170 answers the identity query
+        once and then sends no telemetry. Switching this on makes the adapter
+        introduce itself the way the genuine one does — <code>UNIQUE lH</code>,
+        and re-asking for the name, configuration and a status frame every
+        15 s until answered. Harmless on 6.0.641041. Takes effect at once and
+        is remembered.</div>
+    </div>
+
+    <div class="card">
       <h2>Device log</h2>
       <div class="row"><button id="logrefresh" class="ghost">Refresh</button>
         <button id="logauto" class="ghost">Auto: off</button></div>
@@ -1032,7 +1045,14 @@ $$("nav button").forEach(b=>b.addEventListener("click",()=>{
   const already=document.getElementById(target)?.classList.contains("active");
   show(already && target !== "v-dash" ? "v-dash" : target);
 }));
-$$(".item[data-go]").forEach(it=>it.addEventListener("click",()=>show("v-"+it.dataset.go)));
+/* Control/config screens need the PIN to OPEN; the dashboard, Live Data Feed
+   (log downloads) and About stay view-only. */
+const PIN_VIEWS = ["s-batch","s-wifi","s-mqtt","s-fw","s-debug"];
+$$(".item[data-go]").forEach(it=>it.addEventListener("click",async ()=>{
+  const go = it.dataset.go;
+  if(PIN_VIEWS.includes(go) && !await ensurePin()) return;
+  show("v-"+go);
+}));
 $$("[data-back]").forEach(b=>b.addEventListener("click",()=>show("v-set")));
 
 /* ---------- helpers ---------- */
@@ -1281,21 +1301,79 @@ function pinPut(v){ try{ v ? sessionStorage.setItem("fh_pin", v)
                           : sessionStorage.removeItem("fh_pin"); }catch(e){} }
 
 /*
+ * PIN gate. The adapter enforces the control PIN on every state-changing
+ * endpoint; this asks for it UP FRONT - before a control screen opens or
+ * anything is sent - and remembers it for the browser session. View-only
+ * paths (the dashboard, log downloads) never call this. pinVerified caches a
+ * good PIN so navigation does not re-check on every tap and walk into the
+ * adapter's five-wrong lockout.
+ */
+let pinVerified = false;
+/* true / false / null, where null means the adapter could not be asked. */
+async function pinIsSet(){
+  try{ return !!(await (await fetch("/api/pin")).json()).set; }catch(e){ return null; }
+}
+async function pinTry(pin){
+  try{ const j = await (await fetch("/api/pin/verify",
+        {method:"POST", body:"pin=" + encodeURIComponent(pin)})).json();
+       return !!j.ok; }catch(e){ return null; }
+}
+async function ensurePin(){
+  if(pinVerified) return true;
+
+  /*
+   * An UNKNOWN answer must never be cached. Treating a failed request as "no
+   * PIN is set" - and remembering it - would un-gate the whole session on one
+   * blip, and the user would find out only when the adapter refused the
+   * action they had already set up. The adapter is single-worker, so a
+   * request racing an upload is enough to cause that.
+   */
+  const needed = await pinIsSet();
+  if(needed === false){ pinVerified = true; return true; }   /* known: none set */
+  if(needed === null && !pinGet()) return true;   /* cannot tell and hold none:
+                                                     let the adapter judge the
+                                                     request, and ask again
+                                                     next time rather than
+                                                     latching open */
+  let pin = pinGet();
+  if(pin){
+    const ok = await pinTry(pin);
+    if(ok === true){ pinVerified = true; return true; }
+    if(ok === null) return true;   /* could not ask: keep a PIN that may be
+                                      perfectly good, and let the adapter rule */
+    pinPut("");                    /* genuinely refused: stop offering it */
+  }
+  for(let i=0; i<2; i++){
+    pin = prompt(i ? "PIN incorrect - try again" : "Control PIN");
+    if(!pin) return false;
+    const ok = await pinTry(pin);
+    if(ok === true){ pinPut(pin); pinVerified = true; return true; }
+    if(ok === null){ pinPut(pin); return true; }   /* unverifiable now; the
+                                                      adapter still checks */
+  }
+  return false;
+}
+
+/*
  * POST to a control endpoint, attaching the PIN and asking for it once if the
  * adapter says it is needed. One retry only - repeated prompting on a wrong
  * PIN would walk straight into the lockout.
  */
 async function ctrlPost(url, body){
-  const withPin = b => pinGet() ? b + "&pin=" + encodeURIComponent(pinGet()) : b;
+  body = body || "";
+  if(!await ensurePin()) return {ok:false, reason:"PIN required", pin:true};
+  const withPin = b => pinGet()
+    ? (b ? b + "&" : "") + "pin=" + encodeURIComponent(pinGet()) : b;
   let r = await fetch(url, {method:"POST", body: withPin(body)});
   let j = await r.json().catch(()=>({}));
   if(!j.ok && j.pin){
-    const entered = prompt("Control PIN");
-    if(!entered) return j;
-    pinPut(entered);
-    r = await fetch(url, {method:"POST", body: withPin(body)});
-    j = await r.json().catch(()=>({}));
-    if(!j.ok && j.pin) pinPut("");     /* wrong: do not keep it */
+    /* the stored PIN was refused after all (changed, or the lockout cleared) -
+       drop it, ask again, retry once */
+    pinPut(""); pinVerified = false;
+    if(await ensurePin()){
+      r = await fetch(url, {method:"POST", body: withPin(body)});
+      j = await r.json().catch(()=>({}));
+    }
   }
   return j;
 }
@@ -1803,7 +1881,7 @@ function renderRecipes(){
     const st = rcpBtn("Send + Start", function(){ askStartRecipe(r); });
     st.className = "ctrlbtn sev2";
     row.appendChild(st);
-    row.appendChild(rcpBtn("Edit", function(){ editRecipe(r); }));
+    row.appendChild(rcpBtn("Edit", async function(){ if(await ensurePin()) editRecipe(r); }));
     if(rcpState.extra_dry_s > 0 && r.family === FAM_CANDY &&
        r.suggest_dry_s > (r.num[6]||0)){
       row.appendChild(rcpBtn("Apply +" + fmtMins(rcpState.extra_dry_s) + "m",
@@ -1889,8 +1967,7 @@ async function saveRecipe(){
                "&notes="+encodeURIComponent(rcpDraft.notes)+
                "&num="+encodeURIComponent(rcpDraft.num.join(","));
   try{
-    const r = await fetch("/api/recipes/save",{method:"POST",body:body});
-    const j = await r.json().catch(function(){return {};});
+    const j = await ctrlPost("/api/recipes/save", body);
     if(!j.ok){ alert("Could not save: " + (j.reason || "unknown error")); return; }
   }catch(e){ alert("Could not reach the adapter."); return; }
   hideEditor();
@@ -1905,7 +1982,7 @@ async function applySuggestion(r){
                "&notes="+encodeURIComponent(r.notes)+
                "&num="+encodeURIComponent(num.join(","));
   try{
-    await fetch("/api/recipes/save",{method:"POST",body:body});
+    await ctrlPost("/api/recipes/save", body);
   }catch(e){}
   refreshRecipes();
 }
@@ -2316,6 +2393,11 @@ async function refreshState(){
     /* USB-level diagnosis. Deliberately reports the raw counters AND the
        conclusion they support, so a fault can be triaged from the phone
        without reading a serial console the adapter can't reach anyway. */
+    if(st.compat644170!==undefined){
+      $("#dryer-fw").textContent = st.fw_version || "—";
+      $("#compat644170").textContent =
+        "6.0.644170 handshake: " + (st.compat644170 ? "ON" : "off");
+    }
     if(st.usb_mounted!==undefined){
       $("#usb-mounted").textContent = st.usb_mounted ? "yes" : "no";
       $("#usb-mounts").textContent  = st.usb_mounts;
@@ -2448,9 +2530,7 @@ async function sendCmd(verb,args,statusEl){
      */
     const body="verb="+encodeURIComponent(verb)+
       (args? "&args="+encodeURIComponent(args) : "");
-    const r=await fetch("/api/cmd",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
-    const j=await r.json();
+    const j=await ctrlPost("/api/cmd", body);
     note(el, j.ok? esc(verb)+" sent ✓" : "Refused: "+esc(j.reason||"not allowed"),
          j.ok?"ok":"bad");
   }catch(e){ note(el,"Request failed","bad"); }
@@ -2483,10 +2563,7 @@ $("#dryerreboot").addEventListener("click",async()=>{
   const el=$("#rebootstatus");
   note(el,"Sending REBOOT…","info");
   try{
-    const r=await fetch("/api/dryer/reboot",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:"confirm=REBOOT"});
-    const j=await r.json();
+    const j=await ctrlPost("/api/dryer/reboot", "confirm=REBOOT");
     note(el, j.ok? "REBOOT sent — watch the machine's panel"
                  : "Refused: "+esc(j.reason||"not allowed"), j.ok?"ok":"bad");
   }catch(e){ note(el,"Request failed","bad"); }
@@ -2516,9 +2593,9 @@ async function saveWifi(ssid,pw,statusEl){
   note(statusEl,"Saving & connecting to <b>"+esc(ssid)+"</b>…","info");
   try{
     const body="ssid="+encodeURIComponent(ssid)+"&password="+encodeURIComponent(pw);
-    const j=await (await fetch("/api/wifi",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},body})).json();
-    if(!j.ok){ note(statusEl,"Rejected — check the name/password","bad"); return; }
+    const j=await ctrlPost("/api/wifi", body);
+    if(!j.ok){ note(statusEl, j.pin ? "PIN required" :
+                    "Rejected — check the name/password","bad"); return; }
   }catch(e){ note(statusEl,"Request failed","bad"); return; }
   note(statusEl,"Connecting… this page may drop briefly (that's normal)","info");
   let n=0; const t=setInterval(async()=>{
@@ -2544,7 +2621,7 @@ $("#save").addEventListener("click",()=>saveWifi($("#ssid").value.trim(),$("#pw"
 $("#save2").addEventListener("click",()=>saveWifi($("#ssid2").value.trim(),$("#pw2").value,$("#wifistatus2")));
 $("#forget").addEventListener("click",async()=>{
   if(!confirm("Forget the saved network and return to setup mode?")) return;
-  await fetch("/api/forget",{method:"POST"}); setTimeout(refreshState,1200);
+  await ctrlPost("/api/forget", ""); setTimeout(refreshState,1200);
 });
 
 /* ---------- mqtt ---------- */
@@ -2572,10 +2649,9 @@ $("#mqttsave").addEventListener("click",async()=>{
     "&user="+encodeURIComponent($("#mqttuser").value)+
     "&password="+encodeURIComponent($("#mqttpass").value);
   try{
-    const j=await (await fetch("/api/mqtt",{method:"POST",
-      headers:{"Content-Type":"application/x-www-form-urlencoded"},body})).json();
+    const j=await ctrlPost("/api/mqtt", body);
     note(el, j.ok? "Saved. Connecting… check Debug → Device log if it doesn't turn green."
-                 : "Rejected — check host/port","bad");
+                 : j.pin ? "PIN required" : "Rejected — check host/port","bad");
     if(j.ok) note(el,"Saved. Connecting…","ok");
   }catch(e){ note(el,"Request failed","bad"); }
   setTimeout(refreshMqtt,1500);
@@ -2612,7 +2688,7 @@ async function refreshCapture(){
 $("#dl2").addEventListener("click",()=>location.href="/api/capture");
 $("#capclear").addEventListener("click",async()=>{
   if(!confirm("Erase the stored capture log? Download it first if you need it.")) return;
-  await fetch("/api/capture/clear",{method:"POST"});
+  await ctrlPost("/api/capture/clear", "");
   setTimeout(refreshCapture,500);
 });
 $("#pause").addEventListener("click",()=>{ paused=!paused;
@@ -2654,7 +2730,7 @@ $$("#themeseg button").forEach(b=>b.addEventListener("click",()=>{
 $$("#ctrlseg button").forEach(b=>b.addEventListener("click", async ()=>{
   const on = b.dataset.on === "1";
   try{
-    await fetch("/api/control/enable",{method:"POST",body:"on="+(on?"1":"0")});
+    await ctrlPost("/api/control/enable", "on="+(on?"1":"0"));
   }catch(e){}
   refreshState();
 }));
@@ -2684,8 +2760,7 @@ $("#cfyes").addEventListener("click", async ()=>{
     catch(e){}
   }
   if(p.del){
-    try{ await fetch("/api/recipes/delete",{method:"POST",
-                                            body:"slot="+p.recipe.slot}); }catch(e){}
+    try{ await ctrlPost("/api/recipes/delete", "slot="+p.recipe.slot); }catch(e){}
     refreshRecipes();
     return;
   }
@@ -2700,7 +2775,7 @@ $("#lbcsv").addEventListener("click", ()=>{
 });
 $("#lbclear").addEventListener("click", async ()=>{
   if(!confirm("Delete every batch record? This cannot be undone.")) return;
-  try{ await fetch("/api/batches/clear",{method:"POST"}); }catch(e){}
+  try{ await ctrlPost("/api/batches/clear", ""); }catch(e){}
   refreshLogbook();
 });
 $("#pinsave").addEventListener("click", ()=>savePin(false));
@@ -2727,8 +2802,8 @@ $("#setcancel").addEventListener("click", cancelSetup);
 
 $("#rcpsave").addEventListener("click", saveRecipe);
 $("#rcpcancel").addEventListener("click", hideEditor);
-$("#rcpnewcandy").addEventListener("click", ()=>newRecipe(FAM_CANDY));
-$("#rcpnewcustom").addEventListener("click", ()=>newRecipe(FAM_CUSTOM));
+$("#rcpnewcandy").addEventListener("click", async ()=>{ if(await ensurePin()) newRecipe(FAM_CANDY); });
+$("#rcpnewcustom").addEventListener("click", async ()=>{ if(await ensurePin()) newRecipe(FAM_CUSTOM); });
 refreshRecipes();
 
 /* ---------- trend chart ----------
@@ -2880,6 +2955,22 @@ $("#trendpress").addEventListener("click",()=>{
   refreshTrend();
 });
 
+/* ---------- 6.0.644170 handshake switch ----------
+   Stored on the adapter; the main loop re-runs the handshake immediately, so
+   the result shows up in the capture within seconds: SNM / CFG / STAT after
+   the new UNIQUE means the dryer accepted it, REQINFO alone means it did not. */
+$("#compat644170").addEventListener("click",async()=>{
+  const st=$("#compatstatus");
+  const cur = lastState ? !!lastState.compat644170 : false;
+  try{
+    const j=await ctrlPost("/api/compat", "compat644170="+(cur?"0":"1"));
+    if(!j.ok){ note(st, j.pin ? "PIN required." : "Could not change the setting.","bad"); return; }
+    $("#compat644170").textContent = "6.0.644170 handshake: " + (j.compat644170 ? "ON" : "off");
+    note(st,(j.compat644170?"On":"Off")+" — handshake re-sent. Watch Live Data Feed for SNM / CFG / STAT."+
+      (j.stored?"":" (not saved: NVS write failed)"), j.stored?"ok":"bad");
+  }catch(e){ note(st,"Request failed — is the adapter still reachable?","bad"); }
+});
+
 /* ---------- USB reconnect ----------
    Retries the dryer link without a reboot or a power cycle. Not destructive:
    the adapter cannot control the cycle, and the dryer sees the same
@@ -2890,9 +2981,8 @@ $("#usbreattach").addEventListener("click",async()=>{
   const before = lastState ? lastState.usb_mounts : 0;
   note(st,"Detaching and re-attaching…","info");
   try{
-    const r=await fetch("/api/usb/reattach",{method:"POST"});
-    const j=await r.json();
-    if(!j.ok){ note(st,"Could not start the re-attach.","bad"); return; }
+    const j=await ctrlPost("/api/usb/reattach", "");
+    if(!j.ok){ note(st, j.pin ? "PIN required." : "Could not start the re-attach.","bad"); return; }
   }catch(e){ note(st,"Request failed — is the adapter still reachable?","bad"); return; }
   /* The gap is 1.5s; give the dryer time to run its MSC-then-CDC probe. */
   note(st,"Re-attached. Waiting up to 90s for the dryer to start talking…","info");
@@ -2917,9 +3007,17 @@ $("#usbreattach").addEventListener("click",async()=>{
 });
 
 /* ---------- OTA ---------- */
-$("#otago").addEventListener("click",()=>{
+$("#otago").addEventListener("click",async ()=>{
   const f=$("#otafile").files[0], st=$("#otastatus");
   if(!f){ note(st,"Choose a .bin file first","bad"); return; }
+  /*
+   * Ask for the PIN BEFORE the upload. The firmware image is the POST body, so
+   * a rejected upload means pushing the whole 1.3 MB again just to be told the
+   * adapter is locked. ensurePin() settles it up front; only send once we hold
+   * a PIN (or the adapter has none set). The post-upload check below still
+   * stands, for a stored PIN that turns out to be wrong.
+   */
+  if(!await ensurePin()){ note(st,"Update needs the control PIN.","bad"); return; }
   const bar=$("#otabar"), fill=$("#otafill");
   bar.style.display="block"; fill.style.width="0";
   note(st,"Uploading "+esc(f.name)+" ("+Math.round(f.size/1024)+" KB)…","info");
@@ -2927,13 +3025,21 @@ $("#otago").addEventListener("click",()=>{
   const x=new XMLHttpRequest();
   x.open("POST","/api/ota");
   x.setRequestHeader("Content-Type","application/octet-stream");
+  /* The body is the image itself, so the PIN travels in a header. */
+  if(pinGet()) x.setRequestHeader("X-HR-Pin", pinGet());
   /* No client timeout: a 1.3MB push over Wi-Fi to a single-threaded server can
      legitimately take a couple of minutes, and aborting mid-write is worse
      than waiting. */
   x.timeout=0;
   x.upload.onprogress=e=>{ if(e.lengthComputable) fill.style.width=Math.round(100*e.loaded/e.total)+"%"; };
-  x.onload=()=>{ otaBusy=false; let ok=false,reason="rejected";
-    try{ const j=JSON.parse(x.responseText); ok=j.ok; reason=j.reason||reason; }catch(e){}
+  x.onload=()=>{ otaBusy=false; let ok=false,reason="rejected",needPin=false;
+    try{ const j=JSON.parse(x.responseText); ok=j.ok; reason=j.reason||reason; needPin=!!j.pin; }catch(e){}
+    if(!ok && needPin){
+      const entered = prompt("Control PIN");
+      if(entered){ pinPut(entered); note(st,"PIN saved for this session — press Update again.","info"); }
+      else note(st,"Update needs the control PIN.","bad");
+      return;
+    }
     if(ok){ note(st,"✅ Installed — rebooting on trial. If it can't get back "+
                     "on the network it reverts itself; this page reloads "+
                     "shortly.","ok");

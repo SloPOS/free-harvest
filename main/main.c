@@ -9,12 +9,18 @@
  * test/). The exact contents the dryer expects inside a GOTIT ack are NOT yet
  * confirmed - see README and decoded/PROTOCOL_NOTES.md.
  */
+#include <string.h>
+
 #include "hr_capture.h"
 #include "hr_batchstore.h"
+#include "hr_compat.h"
+#include "hr_encring.h"
+#include "hr_enc.h"
 #include "hr_http.h"
 #include "hr_history.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
+#include "hr_reboot.h"
 #include "hr_session.h"
 #include "hr_telemetry.h"
 #include "hr_trend.h"
@@ -36,6 +42,9 @@ static const char *TAG = "hr_main";
 static hr_session_t s_session;
 static hr_history_t s_history;
 static SemaphoreHandle_t s_hist_lock;
+/* The last few encoded frames (6.0.644170 transport) for /api/enc. Written
+ * from the USB RX task, read by HTTP - under s_hist_lock like history. */
+static hr_encring_t s_encring;
 /* Tracks whether the batch-elapsed counter is actually advancing, so an idle
  * dryer isn't reported as "running" using last batch's leftover elapsed. */
 static hr_phase_tracker_t s_tracker;
@@ -50,6 +59,12 @@ static hr_phase_tracker_t s_tracker;
 static hr_trend_t s_trend;
 /* Last batch-elapsed seen, to notice a new batch and start a fresh series. */
 static long s_last_batch_elapsed = -1;
+/*
+ * Set from the USB RX task when a UID reports 6.0.644170 and no handshake has
+ * been chosen. The main loop does the NVS write and the re-handshake, because
+ * this callback must not touch flash.
+ */
+static volatile bool s_compat_auto_req;
 
 /*
  * Batch logbook.
@@ -123,6 +138,10 @@ static size_t s_trend_persisted;
 static bool s_resume_done;
 /* Backoff clock for the series write, so a failure cannot spin. */
 static unsigned long s_trend_last_try;
+/* A new run began: the stored series must go. Set by the USB task under
+   s_hist_lock, acted on by the main loop, because deleting a file is flash
+   work and the USB RX callback must not do flash work (see on_inbound). */
+static bool s_trend_file_stale;
 
 /*
  * The identifier we present to the dryer in WIFIINFO field 4.
@@ -211,6 +230,21 @@ static void on_inbound(const hr_frame_t *f, void *user)
 
     hr_http_notify(seq);
 
+    /*
+     * 6.0.644170 answers a bare UNIQUE with this UID and then says nothing
+     * useful ever again - it wants the tagged handshake before it will talk.
+     * The dryer names its own build here, so detect it and switch rather than
+     * asking the owner to know. Only when nobody has chosen already, so a
+     * deliberate "off" is not undone on the next UID.
+     */
+    if (strcmp(f->verb, "UID") == 0) {
+        const char *fw = hr_frame_field(f, 2);
+        if (fw != NULL && strcmp(fw, "6.0.644170") == 0 &&
+            !hr_compat_644170() && !hr_compat_explicit()) {
+            s_compat_auto_req = true;
+        }
+    }
+
     /* Persist every frame so a full cycle can be recovered later - the RAM
      * ring only holds a few minutes. */
     {
@@ -249,7 +283,14 @@ static void on_inbound(const hr_frame_t *f, void *user)
         if ((running_now && !s_last_running) || (running_now && went_back)) {
             hr_trend_reset(&s_trend);
             s_trend_persisted = 0;
-            hr_capture_trend_reset();
+            /*
+             * The file is removed by the main loop, not here. This used to
+             * call hr_capture_trend_reset() directly: a SPIFFS remove() on
+             * the TinyUSB task, under s_hist_lock. On a 12 MB partition that
+             * is ~0.7 s during which the adapter NAKs everything the dryer
+             * sends, and every other user of the lock waits.
+             */
+            s_trend_file_stale = true;
         }
         s_last_running = running_now;
         s_last_type = (int)tel.type;
@@ -263,6 +304,9 @@ static void on_inbound(const hr_frame_t *f, void *user)
          * handed to the main loop to write, never written from here.
          */
         hr_batch_t finished;
+        /* s_batch is also touched by the main loop (resume, checkpoint) and
+         * s_batch_done is read there; a 90-byte struct is not atomic. */
+        xSemaphoreTake(s_hist_lock, portMAX_DELAY);
         if (hr_batch_observe(&s_batch, (int)tel.type,
                              (int32_t)tel.batch_elapsed_s,
                              (int32_t)tel.temperature_f,
@@ -276,6 +320,7 @@ static void on_inbound(const hr_frame_t *f, void *user)
                 s_batch_done_pending = true;
             }
         }
+        xSemaphoreGive(s_hist_lock);
     }
 
 #if CONFIG_HR_HTTP_LOG_TO_UART
@@ -283,6 +328,63 @@ static void on_inbound(const hr_frame_t *f, void *user)
     if (hr_frame_tostring(f, line, sizeof(line)) > 0) {
         ESP_LOGI(TAG, "RX <- %s", line);
     }
+#endif
+}
+
+/*
+ * Lines the parser refused. Until now they only bumped frames_bad; for a
+ * protocol still being decoded those bytes are the interesting ones, so put
+ * them in the log (printable as-is, everything else as \xNN, capped).
+ */
+static void on_reject(const char *bytes, size_t n, const char *why, void *user)
+{
+    (void)user;
+    char shown[3 * 64 + 4];
+    size_t o = 0;
+    size_t lim = n < 64 ? n : 64;
+    for (size_t i = 0; i < lim && o + 5 < sizeof(shown); i++) {
+        unsigned char c = (unsigned char)bytes[i];
+        if (c >= 0x20 && c < 0x7f) {
+            shown[o++] = (char)c;
+        } else {
+            o += (size_t)snprintf(shown + o, sizeof(shown) - o, "\\x%02x", c);
+        }
+    }
+    shown[o] = '\0';
+    ESP_LOGW(TAG, "RX rejected (%s, %u bytes): %s%s", why, (unsigned)n, shown,
+             n > lim ? "..." : "");
+}
+
+/*
+ * A complete encoded frame from a 6.0.644170 dryer, raw: into the RAM ring
+ * for /api/enc and into the capture log for download. The session has
+ * already refreshed the link on it, and right after this returns it decodes
+ * the frame (hr_enc) and runs the plaintext through its ordinary frame path -
+ * REQINFO -> WIFIINFO, SNM/CFG/UID/STAT bookkeeping, and on_inbound() above,
+ * so telemetry, the logbook, the graph, MQTT and the UI all work on
+ * 6.0.644170 exactly as on the plaintext firmware. Runs on the USB RX task,
+ * so the same rules as on_inbound: no flash work here, the capture queues.
+ */
+static void on_enc_frame(const char *frame, size_t len, void *user)
+{
+    (void)user;
+    uint32_t t = (uint32_t)now_ms();
+
+    xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+    hr_encring_push(&s_encring, t, frame, len);
+    xSemaphoreGive(s_hist_lock);
+
+    hr_capture_enc(t, frame, len);
+
+    /* Once, so the operator sees the transport switch in /api/log. */
+    if (s_session.stream.enc_frames == 1) {
+        ESP_LOGW(TAG, "dryer switched to the encoded transport (\")S\" + "
+                      "length, first frame %u chars); decoding it - see "
+                      "/api/enc for the raw frames, enc_decoded in "
+                      "/api/state", (unsigned)len);
+    }
+#if CONFIG_HR_HTTP_LOG_TO_UART
+    ESP_LOGI(TAG, "RX <- enc %u %.*s", (unsigned)len, (int)len, frame);
 #endif
 }
 
@@ -307,7 +409,13 @@ void app_main(void)
 
     hr_session_init(&s_session, hr_usb_tx, NULL);
     hr_session_set_observer(&s_session, on_inbound, NULL);
+    hr_stream_set_reject_cb(&s_session.stream, on_reject, NULL);
+    hr_encring_init(&s_encring);
+    hr_session_set_enc_observer(&s_session, on_enc_frame, NULL);
     hr_session_set_ack_payload(&s_session, CONFIG_HR_ACK_PAYLOAD);
+    /* The 6.0.644170 handshake switch, NVS-backed; applied in the loop below
+     * so a runtime change also restarts the handshake. */
+    hr_compat_init();
 
     hr_usb_init(&s_session);
 
@@ -331,6 +439,7 @@ void app_main(void)
      * Must be set before hr_http_start(). */
     hr_http_use_lock(s_hist_lock);
     hr_http_set_trend(&s_trend);
+    hr_http_set_encring(&s_encring);
     hr_http_start(&s_session, &s_history);
 
     /* MQTT connects only if a broker is configured (via the web setup page);
@@ -348,6 +457,7 @@ void app_main(void)
 
     hr_link_state_t last_link = HR_LINK_DOWN;
     unsigned long last_beat = 0;
+    unsigned long last_heap = 0;
     unsigned long boot_ms = now_ms();
     for (;;) {
         unsigned long t = now_ms();
@@ -362,19 +472,43 @@ void app_main(void)
             } else if (t - boot_ms >= HR_OTA_CONFIRM_TIMEOUT_MS) {
                 ESP_LOGE(TAG, "update never became reachable; rolling back to "
                               "the previous firmware");
-                /* Does not return on success. */
-                esp_ota_mark_app_invalid_rollback_and_reboot();
-                ota_pending = false; /* rollback unavailable; keep running */
+                /*
+                 * Mark, then restart through the common path so the capture
+                 * filesystem is quiesced first - the _and_reboot variant
+                 * calls esp_restart() directly. If marking fails there is
+                 * no rollback to be had; keep running this image.
+                 */
+                if (esp_ota_mark_app_invalid_rollback() == ESP_OK) {
+                    hr_reboot_request("rolling back an unreachable update", 0);
+                }
+                ota_pending = false;
             }
         }
         hr_session_tick(&s_session, t);
         /* Let a stale run expire even if frames stop arriving entirely. */
         hr_phase_tracker_tick(&s_tracker, t);
-        /* Close elapsed graph buckets even while frames are absent, so a gap
-         * shows as a gap instead of compressing the time axis. */
+        /*
+         * Close elapsed graph buckets even while frames are absent, so a gap
+         * shows as a gap instead of compressing the time axis.
+         *
+         * The clock is read AFTER the lock is taken, not the loop's t: the
+         * USB task opens buckets with its own now_ms() under this lock, so a
+         * reading from before the wait could be older than the bucket it is
+         * asked to close. hr_trend_tick() is wrap-safe now as well, but the
+         * caller should not hand it a clock that runs backwards.
+         */
+        bool reset_file = false;
         xSemaphoreTake(s_hist_lock, portMAX_DELAY);
-        hr_trend_tick(&s_trend, t);
+        hr_trend_tick(&s_trend, now_ms());
+        if (s_trend_file_stale) {
+            s_trend_file_stale = false;
+            reset_file = true;
+        }
         xSemaphoreGive(s_hist_lock);
+        if (reset_file) {
+            /* Flash work, outside the lock, on this task - see on_inbound. */
+            hr_capture_trend_reset();
+        }
 
         /*
          * Power-loss recovery, decided once per boot.
@@ -411,7 +545,7 @@ void app_main(void)
                  * finished and must not be drawn as part of this one. */
                 hr_trend_reset(&s_trend);
                 s_trend_persisted = 0;
-                hr_capture_trend_reset();
+                s_trend_file_stale = true; /* removed next tick, off the lock */
                 if (n > 0) {
                     ESP_LOGI(TAG, "stored graph belongs to a finished batch "
                                   "(elapsed %u < %u); discarded",
@@ -436,6 +570,31 @@ void app_main(void)
                 /* Fresh CDC session: the dryer has forgotten us. */
                 s_hello_mounts = mounts;
                 s_hello_step = 0;
+            }
+            /*
+             * Auto-detected 6.0.644170. Done here rather than in the RX
+             * callback because it writes NVS; hr_compat_set_644170() then
+             * marks the choice explicit, so this fires once and a later
+             * manual "off" is respected.
+             */
+            if (s_compat_auto_req) {
+                s_compat_auto_req = false;
+                ESP_LOGW(TAG, "dryer reports 6.0.644170: enabling the encoded "
+                              "handshake automatically - override in "
+                              "Settings > Debug");
+                hr_compat_set_644170(true);
+            }
+            if (hr_compat_take_changed()) {
+                /*
+                 * The 6.0.644170 switch was flipped (boot, web UI or
+                 * /api/compat). Apply it and introduce ourselves again so the
+                 * dryer sees the new UNIQUE form without a USB re-attach.
+                 */
+                bool on = hr_compat_644170();
+                hr_session_set_compat(&s_session, on, on);
+                s_hello_step = 0;
+                ESP_LOGI(TAG, "handshake variant: %s",
+                         on ? "6.0.644170 (UNIQUE lH, re-ask)" : "default");
             }
             if (!up) {
                 s_hello_step = 0;
@@ -538,12 +697,14 @@ void app_main(void)
 
                 if (running && s_open_last >= 0 &&
                     gap <= RESUME_MAX_GAP_S && gap >= -RESUME_BACK_S) {
+                    xSemaphoreTake(s_hist_lock, portMAX_DELAY);
                     hr_batch_resume(&s_batch, &s_open_rec, s_open_start,
                                     now_el, s_last_type);
+                    hr_batch_t cur = s_batch.cur;
+                    xSemaphoreGive(s_hist_lock);
                     ESP_LOGW(TAG, "resumed the batch across a restart: %s, "
                                   "%us so far, %ds of it unobserved",
-                             s_batch.cur.name,
-                             (unsigned)s_batch.cur.duration_s, (int)gap);
+                             cur.name, (unsigned)cur.duration_s, (int)gap);
                 } else {
                     s_open_rec.outcome = HR_OUTCOME_INTERRUPTED;
                     hr_batchstore_append(&s_open_rec);
@@ -557,10 +718,22 @@ void app_main(void)
                 s_open_pending = false;
             }
 
+            /*
+             * Copy out under the lock, write to flash outside it. The flag
+             * used to be cleared BEFORE the record was read, so a second
+             * HR_BATCH_FINISHED from the USB task could overwrite s_batch_done
+             * while hr_batchstore_append() was still encoding it.
+             */
+            hr_batch_t done;
+            bool have_done = false;
+            hr_batch_t open_cur;
+            int32_t open_start = 0, open_last = 0;
+            bool checkpoint = false;
+            xSemaphoreTake(s_hist_lock, portMAX_DELAY);
             if (s_batch_done_pending) {
+                done = s_batch_done;
+                have_done = true;
                 s_batch_done_pending = false;
-                hr_batchstore_append(&s_batch_done);
-                hr_batchstore_clear_open();
             } else if (s_batch.active &&
                        (uint32_t)now_ms() - s_batch_saved_ms > 60000u) {
                 /*
@@ -569,8 +742,17 @@ void app_main(void)
                  * enough not to wear out the NVS partition.
                  */
                 s_batch_saved_ms = (uint32_t)now_ms();
-                hr_batchstore_save_open(&s_batch.cur, s_batch.start_elapsed,
-                                        s_batch.last_elapsed);
+                open_cur = s_batch.cur;
+                open_start = s_batch.start_elapsed;
+                open_last = s_batch.last_elapsed;
+                checkpoint = true;
+            }
+            xSemaphoreGive(s_hist_lock);
+            if (have_done) {
+                hr_batchstore_append(&done);
+                hr_batchstore_clear_open();
+            } else if (checkpoint) {
+                hr_batchstore_save_open(&open_cur, open_start, open_last);
             }
         }
 
@@ -616,23 +798,56 @@ void app_main(void)
          */
         if (t - last_beat >= 10000UL) {
             last_beat = t;
+            /*
+             * Two lines, not one: the log ring keeps HR_LOG_LINE_MAX (144)
+             * characters per line and this was ~185 with the prefix, so
+             * everything after "heap=" - the trend and capture counters, the
+             * part that says whether recording works - never reached
+             * /api/log or the bench port. Only the UART saw it.
+             */
             ESP_LOGI(TAG,
                      "usb mounted=%d suspended=%d mounts=%u rx_bytes=%lu | "
-                     "frames_in=%lu frames_out=%lu bad=%lu unknown=%lu link=%s | heap=%u | "
-                     "trend pts=%u persisted=%u "
-                     "bytes=%u writes=%lu fails=%lu drops=%lu",
+                     "frames_in=%lu frames_out=%lu bad=%lu noise=%lu "
+                     "unknown=%lu enc=%lu/%luB dec=%lu/%lu link=%s | heap=%u",
                      (int)hr_usb_mounted(), (int)hr_usb_suspended(),
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
                      s_session.frames_in, s_session.frames_out,
-                     s_session.stream.frames_bad, s_session.unknown_verbs,
+                     s_session.stream.frames_bad,
+                     s_session.stream.noise_bytes, s_session.unknown_verbs,
+                     s_session.stream.enc_frames, s_session.stream.enc_bytes,
+                     s_session.enc_decoded, s_session.enc_undecoded,
                      s_session.link == HR_LINK_UP ? "UP" : "DOWN",
-                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)esp_get_free_heap_size());
+            ESP_LOGI(TAG,
+                     "trend pts=%u persisted=%u bytes=%u writes=%lu fails=%lu "
+                     "| capture drops=%lu",
                      (unsigned)hr_trend_count(&s_trend),
                      (unsigned)s_trend_persisted,
                      (unsigned)hr_capture_trend_bytes(),
                      hr_capture_trend_writes(),
                      hr_capture_trend_fails(),
                      hr_capture_dropped());
+        }
+
+        /*
+         * Heap watchdog, once a minute.
+         *
+         * "free" alone hides two things this chip actually dies of: a slow
+         * leak (visible only as min_free stepping down over hours) and
+         * fragmentation (free stays healthy while the largest block that
+         * can still be handed out shrinks below what Wi-Fi or lwIP ask for,
+         * which surfaces as a Wi-Fi reconnect, not as an out-of-memory
+         * message). One line every 60 s puts both into /api/log and the
+         * capture, where a field report can actually be read against them.
+         */
+        if (t - last_heap >= 60000UL) {
+            last_heap = t;
+            multi_heap_info_t hi;
+            heap_caps_get_info(&hi, MALLOC_CAP_INTERNAL);
+            ESP_LOGI(TAG, "heap free=%u min_free=%u largest_block=%u",
+                     (unsigned)hi.total_free_bytes,
+                     (unsigned)hi.minimum_free_bytes,
+                     (unsigned)hi.largest_free_block);
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }

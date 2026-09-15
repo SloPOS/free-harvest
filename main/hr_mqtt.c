@@ -1,7 +1,12 @@
 #include "hr_mqtt.h"
+#include "hr_http.h"
 
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "nvs.h"
 
@@ -9,6 +14,27 @@
 
 static const char *TAG = "hr_mqtt";
 #define NVS_NS "hrmqtt"
+
+/*
+ * Telemetry publishes go through a queue and a small task of their own.
+ *
+ * hr_mqtt_publish_telemetry() is called from the frame observer, which runs on
+ * the TinyUSB task. esp_mqtt_client_publish() takes the client's API lock -
+ * held by the MQTT task for the duration of its network poll - and can then
+ * wait on a socket write for up to the network timeout (10 s default). While
+ * that blocks, tud_task() is not run, the device stops answering the host, and
+ * the dryer's CDC stack gives up on it: a slow broker cost the dryer link.
+ * Nothing on the USB RX path may wait on the network; the callback now only
+ * copies the JSON into the queue.
+ */
+#define PUB_QUEUE_DEPTH 4
+typedef struct {
+    char json[256];
+} pub_item_t;
+static QueueHandle_t s_pub_queue;
+static TaskHandle_t s_pub_task;
+/* Guards s_client / s_connected between the publisher and connect_now(). */
+static SemaphoreHandle_t s_client_lock;
 
 /*
  * Topic scheme (unique per device via MAC-derived id):
@@ -73,10 +99,38 @@ static void get_creds(char *user, size_t ul, char *pass, size_t pl)
 }
 
 /* ---- publish helpers -----------------------------------------------------*/
+/*
+ * Publish from the MQTT task's own event handler. Runs with the client's API
+ * lock already held by the caller (it is recursive), so it must not take
+ * s_client_lock: connect_now() holds that while stopping the client, and
+ * esp_mqtt_client_stop() waits for this very task to finish its handler.
+ */
 static void pub(const char *topic, const char *payload, int retain)
 {
     if (s_client && s_connected) {
         esp_mqtt_client_publish(s_client, topic, payload, 0, 1, retain);
+    }
+}
+
+/* The publisher task: drains the queue and does the blocking publishes. */
+static void pub_task(void *arg)
+{
+    (void)arg;
+    pub_item_t item;
+    char topic[96];
+    snprintf(topic, sizeof(topic), "%s/state", s_base);
+    for (;;) {
+        if (xQueueReceive(s_pub_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (xSemaphoreTake(s_client_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            continue; /* a reconfigure is in progress; this sample is stale */
+        }
+        if (s_client && s_connected) {
+            /* retained so HA shows the last value after a restart */
+            esp_mqtt_client_publish(s_client, topic, item.json, 0, 1, 1);
+        }
+        xSemaphoreGive(s_client_lock);
     }
 }
 
@@ -200,7 +254,16 @@ static void publish_discovery(void)
  * Everything routes through the tested allow-list, so hardware/unknown verbs
  * are refused here regardless of payload.
  */
-static void handle_cmd(const char *topic, const char *data, int len)
+static bool topic_ends_with(const char *topic, int topic_len,
+                            const char *suffix)
+{
+    int sl = (int)strlen(suffix);
+    return topic != NULL && topic_len >= sl &&
+           memcmp(topic + topic_len - sl, suffix, (size_t)sl) == 0;
+}
+
+static void handle_cmd(const char *topic, int topic_len, const char *data,
+                       int len)
 {
     char buf[256];
     if (len <= 0 || len >= (int)sizeof(buf)) {
@@ -209,11 +272,21 @@ static void handle_cmd(const char *topic, const char *data, int len)
     memcpy(buf, data, len);
     buf[len] = '\0';
 
-    bool is_config_set = strstr(topic, "/config/set") != NULL;
+    /*
+     * esp-mqtt's topic is NOT NUL-terminated - it has topic_len - and it is
+     * only present in the first fragment of a message. strstr() over it read
+     * past the topic into the payload, and a NULL topic (later fragment of an
+     * oversized message) would have crashed the adapter.
+     */
+    bool is_config_set = topic_ends_with(topic, topic_len, "/config/set");
 
     if (is_config_set) {
         /* Batch-name text entity -> SETBNAME,<payload> (buf is already the
          * NUL-terminated payload). */
+        if (!hr_http_control_enabled()) {
+            ESP_LOGW(TAG, "MQTT SETBNAME refused: control is disabled");
+            return;
+        }
         bool ok = hr_session_send_config(s_session, "SETBNAME", buf);
         ESP_LOGI(TAG, "MQTT SETBNAME '%s' -> %s", buf, ok ? "sent" : "refused");
         return;
@@ -226,6 +299,17 @@ static void handle_cmd(const char *topic, const char *data, int len)
     if (comma) {
         *comma = '\0';
         args = comma + 1;
+    }
+    /*
+     * SAFE verbs (reads, BEEP) are always allowed - that is what the HA
+     * buttons send. CONFIG verbs change the dryer's settings, clock or names,
+     * so they follow the same "control enabled" switch as the web UI. MQTT
+     * has no PIN and no confirmation dialog; the switch is the only gate the
+     * owner has over it.
+     */
+    if (hr_cmd_classify(verb) != HR_CMD_SAFE && !hr_http_control_enabled()) {
+        ESP_LOGW(TAG, "MQTT cmd '%s' refused: control is disabled", verb);
+        return;
     }
     bool ok = hr_session_send_config(s_session, verb, args);
     ESP_LOGI(TAG, "MQTT cmd '%s' args '%s' -> %s", verb, args ? args : "",
@@ -260,7 +344,16 @@ static void on_mqtt(void *handler_args, esp_event_base_t base, int32_t id,
         ESP_LOGW(TAG, "broker disconnected (will retry)");
         break;
     case MQTT_EVENT_DATA:
-        handle_cmd(e->topic, e->data, e->data_len);
+        /*
+         * A retained message on cmd/ or config/set is re-delivered on EVERY
+         * reconnect, so one stray retained "SETDATE" would be re-executed
+         * each time the broker link flapped. Commands are live requests;
+         * ignore retained ones. Fragments after the first carry no topic.
+         */
+        if (e->retain || e->current_data_offset != 0 || e->topic == NULL) {
+            break;
+        }
+        handle_cmd(e->topic, e->topic_len, e->data, e->data_len);
         break;
     case MQTT_EVENT_ERROR:
         /*
@@ -304,10 +397,21 @@ static void derive_id(void)
 
 static void connect_now(void)
 {
-    if (s_client) {
-        esp_mqtt_client_stop(s_client);
-        esp_mqtt_client_destroy(s_client);
-        s_client = NULL;
+    /*
+     * Detach the old client from the publisher BEFORE stopping it, and do the
+     * stop/destroy without holding the lock: esp_mqtt_client_stop() waits for
+     * the MQTT task, whose event handler must never have to wait on us.
+     * The publisher only ever sees either a live client or NULL.
+     */
+    esp_mqtt_client_handle_t old = NULL;
+    xSemaphoreTake(s_client_lock, portMAX_DELAY);
+    old = s_client;
+    s_client = NULL;
+    s_connected = false;
+    xSemaphoreGive(s_client_lock);
+    if (old) {
+        esp_mqtt_client_stop(old);
+        esp_mqtt_client_destroy(old);
     }
     char user[64], pass[96];
     get_creds(user, sizeof(user), pass, sizeof(pass));
@@ -327,13 +431,16 @@ static void connect_now(void)
     cfg.session.last_will.qos = 1;
     cfg.session.last_will.retain = 1;
 
-    s_client = esp_mqtt_client_init(&cfg);
-    if (!s_client) {
+    esp_mqtt_client_handle_t fresh = esp_mqtt_client_init(&cfg);
+    if (!fresh) {
         ESP_LOGE(TAG, "client init failed");
         return;
     }
-    esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, on_mqtt, NULL);
-    esp_err_t serr = esp_mqtt_client_start(s_client);
+    esp_mqtt_client_register_event(fresh, ESP_EVENT_ANY_ID, on_mqtt, NULL);
+    xSemaphoreTake(s_client_lock, portMAX_DELAY);
+    s_client = fresh;
+    xSemaphoreGive(s_client_lock);
+    esp_err_t serr = esp_mqtt_client_start(fresh);
     if (serr != ESP_OK) {
         ESP_LOGE(TAG, "client_start failed: %s", esp_err_to_name(serr));
         return;
@@ -346,6 +453,16 @@ void hr_mqtt_start(hr_session_t *session)
 {
     s_session = session;
     derive_id();
+    if (s_client_lock == NULL) {
+        s_client_lock = xSemaphoreCreateMutex();
+    }
+    if (s_pub_queue == NULL) {
+        s_pub_queue = xQueueCreate(PUB_QUEUE_DEPTH, sizeof(pub_item_t));
+    }
+    if (s_pub_task == NULL && s_pub_queue != NULL) {
+        /* Low priority: it only ever waits on the network. */
+        xTaskCreate(pub_task, "hr_mqtt_pub", 4096, NULL, 3, &s_pub_task);
+    }
     if (!load_broker()) {
         ESP_LOGI(TAG, "no broker configured; MQTT idle");
         return;
@@ -353,18 +470,22 @@ void hr_mqtt_start(hr_session_t *session)
     connect_now();
 }
 
+/*
+ * Called from the USB RX task for every STAT. MUST NOT block: copy the JSON
+ * onto the queue and return. A full queue means the broker is slower than the
+ * dryer; the newest sample replaces nothing and is simply dropped - the next
+ * STAT is seconds away and the state topic is retained anyway.
+ */
 void hr_mqtt_publish_telemetry(const hr_telemetry_t *t)
 {
-    if (!s_connected || !t || !t->valid) {
+    if (!s_connected || !t || !t->valid || s_pub_queue == NULL) {
         return;
     }
-    char json[256];
-    if (hr_telemetry_to_json(t, json, sizeof(json)) == 0) {
+    pub_item_t item;
+    if (hr_telemetry_to_json(t, item.json, sizeof(item.json)) == 0) {
         return;
     }
-    char topic[96];
-    snprintf(topic, sizeof(topic), "%s/state", s_base);
-    pub(topic, json, 1); /* retained so HA shows last value after restart */
+    (void)xQueueSend(s_pub_queue, &item, 0);
 }
 
 void hr_mqtt_publish_frame(const char *verb, const char *body)

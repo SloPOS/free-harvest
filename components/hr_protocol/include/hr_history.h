@@ -37,6 +37,9 @@ typedef struct {
     char verb[HR_MAX_VERB];
     char body[HR_HIST_BODY];      /* verb + comma-joined fields, no CR */
     uint8_t nfields;
+    /* The frame was longer than HR_HIST_BODY; body holds its head and ends
+     * in "...". The full text is in the capture log. */
+    uint8_t truncated;
 } hr_hist_entry_t;
 
 typedef struct {
@@ -45,6 +48,7 @@ typedef struct {
     uint32_t count;
     uint32_t last_seq;
     uint8_t nfields;
+    uint8_t truncated;            /* last_body is a truncated head */
     /* Bit i set => field i differs from the previous occurrence of this verb.
      * Only the first 32 fields are tracked. */
     uint32_t changed_mask;

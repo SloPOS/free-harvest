@@ -1,4 +1,5 @@
 #include "hr_session.h"
+#include "hr_enc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -84,10 +85,44 @@ static void send_state(hr_session_t *s)
     hr_session_send(s, &b);
 }
 
+/*
+ * UNIQUE, bare or tagged. See hr_session_set_compat() for why the tag exists
+ * and why it is not the default.
+ */
+static void send_unique(hr_session_t *s)
+{
+    if (s->compat.unique_tag) {
+        hr_builder_t b;
+        hr_build_begin(&b, "UNIQUE");
+        hr_build_str(&b, "lH");
+        hr_session_send(s, &b);
+    } else {
+        hr_session_send_simple(s, "UNIQUE");
+    }
+}
+
 void hr_session_heartbeat(hr_session_t *s)
 {
-    if (s != NULL) {
-        send_state(s);
+    if (s == NULL) {
+        return;
+    }
+    send_state(s);
+    if (!s->compat.reask) {
+        return;
+    }
+    /*
+     * The genuine adapter's cadence against a dryer that has not answered:
+     * FDNAME / REQCFG every ~15 s until SNM / CFG arrive, and a telemetry
+     * request until the first STAT. An empty field IS the unanswered flag.
+     */
+    if (s->info.serial[0] == '\0') {
+        hr_session_send_simple(s, "FDNAME");
+    }
+    if (s->info.dryer_sn[0] == '\0') {
+        hr_session_send_simple(s, "REQCFG");
+    }
+    if (!s->info.have_stat) {
+        hr_session_send_simple(s, "STATUS");
     }
 }
 
@@ -98,7 +133,7 @@ void hr_session_hello_step(hr_session_t *s, unsigned step)
     }
     switch (step) {
     case 0: send_state(s); break;
-    case 1: hr_session_send_simple(s, "UNIQUE"); break;
+    case 1: send_unique(s); break;
     case 2: hr_session_send_simple(s, "FDNAME"); break;
     case 3: hr_session_send_simple(s, "REQCFG"); break;
     /*
@@ -126,9 +161,18 @@ void hr_session_hello(hr_session_t *s)
      * dryer has been told an adapter is present.
      */
     send_state(s);
-    hr_session_send_simple(s, "UNIQUE");
+    send_unique(s);
     hr_session_send_simple(s, "FDNAME");
     hr_session_send_simple(s, "REQCFG");
+}
+
+void hr_session_set_compat(hr_session_t *s, bool unique_tag, bool reask)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->compat.unique_tag = unique_tag;
+    s->compat.reask = reask;
 }
 
 void hr_session_set_cloud(hr_session_t *s, bool registered, bool cloud)
@@ -196,6 +240,39 @@ static void on_frame(const hr_frame_t *f, void *user)
     }
 }
 
+/*
+ * A complete encoded frame (6.0.644170 transport). It is unmistakably the
+ * dryer talking, so it keeps the link up exactly as a plaintext frame would,
+ * and it is handed raw to the enc observer (RAM ring, capture). Then it is
+ * decoded (hr_enc): the plaintext line is parsed and run through on_frame,
+ * the same entry a plaintext frame takes - so REQINFO gets its WIFIINFO,
+ * SNM/CFG/UID/STAT fill in dryer info (which is what stops the re-ask), and
+ * the observer sees an ordinary frame. A frame that does not decode to a
+ * parseable line is counted and otherwise left alone: the link was already
+ * refreshed and the raw bytes are already in the ring.
+ */
+static void on_enc(const char *frame, size_t len, void *user)
+{
+    hr_session_t *s = (hr_session_t *)user;
+
+    s->last_rx_ms = s->now_ms;
+    s->link = HR_LINK_UP;
+    s->last_enc_ms = s->now_ms;
+    s->last_enc_len = len;
+
+    if (s->enc_observer != NULL) {
+        s->enc_observer(frame, len, s->enc_observer_user);
+    }
+
+    int pn = hr_enc_decode(frame, len, s->enc_plain, sizeof(s->enc_plain));
+    if (pn > 0 && hr_frame_parse(s->enc_plain, &s->enc_frame)) {
+        s->enc_decoded++;
+        on_frame(&s->enc_frame, s);
+    } else {
+        s->enc_undecoded++;
+    }
+}
+
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user)
 {
     if (s == NULL) {
@@ -203,6 +280,7 @@ void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user)
     }
     memset(s, 0, sizeof(*s));
     hr_stream_init(&s->stream);
+    hr_stream_set_enc_cb(&s->stream, on_enc, s);
     s->tx = tx;
     s->tx_user = tx_user;
     s->link = HR_LINK_DOWN;
@@ -216,6 +294,16 @@ void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user)
     }
     s->observer = fn;
     s->observer_user = user;
+}
+
+void hr_session_set_enc_observer(hr_session_t *s, hr_enc_observer_fn fn,
+                                 void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->enc_observer = fn;
+    s->enc_observer_user = user;
 }
 
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload)
@@ -233,6 +321,11 @@ void hr_session_rx(hr_session_t *s, const void *data, size_t n,
         return;
     }
     s->now_ms = now_ms;
+    if (s->stream.len > 0 &&
+        now_ms - s->last_byte_ms > HR_PARTIAL_STALE_MS) {
+        hr_stream_discard_partial(&s->stream, "stale");
+    }
+    s->last_byte_ms = now_ms;
     hr_stream_feed(&s->stream, data, n, on_frame, s);
 }
 
@@ -258,7 +351,9 @@ bool hr_session_send(hr_session_t *s, hr_builder_t *b)
     if (wire == NULL) {
         return false;
     }
-    s->tx(wire, len, s->tx_user);
+    if (!s->tx(wire, len, s->tx_user)) {
+        return false; /* the transport did not deliver it; say so */
+    }
     s->frames_out++;
     return true;
 }
@@ -424,7 +519,9 @@ bool hr_session_send_raw(hr_session_t *s, const char *frame)
     char buf[HR_MAX_FRAME];
     memcpy(buf, frame, len);
     buf[len] = '\r';          /* same terminator every outbound frame uses */
-    s->tx(buf, len + 1, s->tx_user);
+    if (!s->tx(buf, len + 1, s->tx_user)) {
+        return false;
+    }
     s->frames_out++;
     return true;
 }
