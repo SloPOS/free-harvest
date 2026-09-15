@@ -567,9 +567,8 @@
         <button type="button" data-unit="c">°C</button>
       </div>
       <div id="unitstatus" class="notice"></div>
-      <div class="hint">Applies to this page, the adapter's display and the
-        Home Assistant sensor. The dryer's own panel is not changed. Vacuum
-        stays in microns (mTorr).</div>
+      <div class="hint">Applies to this page and the Home Assistant sensor.
+        The dryer's own panel is not changed.</div>
     </div>
 
     <div class="card">
@@ -2701,8 +2700,10 @@ $$("#unitseg button").forEach(b=>b.addEventListener("click", async ()=>{
     if(lastState) lastState.temp_unit=j.temp_unit;
     applyUnitSeg();
     refreshState(); refreshTrend();
-    note(st,"Showing \u00b0"+j.temp_unit+" everywhere."+
-      (j.stored?"":" (not saved: NVS write failed)"), j.stored?"ok":"bad");
+    /* The highlighted segment and the redrawn readings are the confirmation;
+       the notice only speaks up when something went wrong. */
+    if(j.stored) st.textContent="";
+    else note(st,"Not saved: NVS write failed.","bad");
   }catch(e){ note(st,"Request failed \u2014 is the adapter still reachable?","bad"); }
 }));
 
