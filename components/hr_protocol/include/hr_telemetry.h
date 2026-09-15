@@ -14,6 +14,7 @@
 #define HR_TELEMETRY_H
 
 #include "hr_protocol.h"
+#include "hr_temp.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -62,10 +63,18 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out);
 /*
  * Build a compact JSON object of the telemetry into `buf` for publishing to
  * the MQTT state topic. Returns bytes written (excluding NUL), 0 on overflow.
- * Example: {"type":1,"temp_f":69,"pressure":151882,"elapsed_s":0,
- *           "mode":"QUALITY","prep_s":0}
+ * Example: {"type":1,"temp_f":69,"temp":69,"temp_unit":"F","pressure":151882,
+ *           "elapsed_s":0,"mode":"QUALITY","prep_s":0,...}
+ *
+ * temp_f is always the dryer's own whole degrees F (what every existing
+ * consumer reads). `temp` is the same reading in `unit` - whole degrees for
+ * F, one decimal for C - and `temp_unit` names it, so a Home Assistant
+ * sensor declared in that unit can read `temp` without a template of its own.
+ * hr_telemetry_to_json() is the Fahrenheit form.
  */
 size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap);
+size_t hr_telemetry_to_json_unit(const hr_telemetry_t *t, hr_temp_unit_t unit,
+                                 char *buf, size_t cap);
 
 /* ------------------------------------------------------------------ */
 /* Cycle phase                                                         */

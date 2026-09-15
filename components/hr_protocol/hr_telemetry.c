@@ -405,15 +405,27 @@ const char *hr_phase_label(hr_phase_t p)
 
 size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap)
 {
+    return hr_telemetry_to_json_unit(t, HR_TEMP_F, buf, cap);
+}
+
+size_t hr_telemetry_to_json_unit(const hr_telemetry_t *t, hr_temp_unit_t unit,
+                                 char *buf, size_t cap)
+{
     if (t == NULL || buf == NULL) {
         return 0;
     }
+    char temp[16];
+    if (hr_temp_fmt_num(t->temperature_f, unit, temp, sizeof(temp)) == 0) {
+        return 0;
+    }
     int n = snprintf(buf, cap,
-                     "{\"type\":%d,\"temp_f\":%ld,\"pressure\":%ld,"
+                     "{\"type\":%d,\"temp_f\":%ld,\"temp\":%s,"
+                     "\"temp_unit\":\"%s\",\"pressure\":%ld,"
                      "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld,"
                      "\"freeze_pct\":%ld,\"phase_pct\":%ld,"
                      "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s}",
-                     t->type, t->temperature_f, t->pressure_raw,
+                     t->type, t->temperature_f, temp,
+                     hr_temp_unit_letter(unit), t->pressure_raw,
                      t->batch_elapsed_s, t->mode, t->prep_remaining_s,
                      t->freeze_pct, t->phase_pct, t->phase_elapsed_s,
                      t->pressure_microns, t->pressure_valid ? "true" : "false");

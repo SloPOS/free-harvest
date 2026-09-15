@@ -77,10 +77,23 @@ static void test_json_output(void)
     size_t n = hr_telemetry_to_json(&t, buf, sizeof(buf));
     CHECK(n > 0);
     CHECK_STR(buf,
-              "{\"type\":1,\"temp_f\":69,\"pressure\":151882,"
+              "{\"type\":1,\"temp_f\":69,\"temp\":69,\"temp_unit\":\"F\","
+              "\"pressure\":151882,"
               "\"elapsed_s\":0,\"mode\":\"QUALITY\",\"prep_s\":0,"
               "\"freeze_pct\":0,\"phase_pct\":0,\"phase_s\":0,"
               "\"vacuum_um\":0,\"vacuum_ok\":false}");
+
+    /* Celsius form: temp_f stays the wire value, temp is converted and the
+     * unit is named; nothing else in the document moves. */
+    n = hr_telemetry_to_json_unit(&t, HR_TEMP_C, buf, sizeof(buf));
+    CHECK(n > 0);
+    CHECK(strstr(buf, "\"temp_f\":69,\"temp\":20.6,\"temp_unit\":\"C\",") != NULL);
+    parse("STAT,4,0,0,0,24,10000,12066,0,45,Auto,1,55,0,0,5,0,0,,\r", &t);
+    n = hr_telemetry_to_json_unit(&t, HR_TEMP_C, buf, sizeof(buf));
+    CHECK(n > 0);
+    CHECK(strstr(buf, "\"temp_f\":24,\"temp\":-4.4,\"temp_unit\":\"C\",") != NULL);
+    n = hr_telemetry_to_json_unit(&t, HR_TEMP_F, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"temp_f\":24,\"temp\":24,\"temp_unit\":\"F\",") != NULL);
 }
 
 /* ---- phase detection (grounded in real captures) ---- */
