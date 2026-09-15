@@ -35,6 +35,14 @@ void hr_mqtt_publish_telemetry(const hr_telemetry_t *t);
 /* Publish a raw inbound frame line to a debug topic (optional visibility). */
 void hr_mqtt_publish_frame(const char *verb, const char *body);
 
+/*
+ * The temperature unit changed (hr_units.h): re-publish the HA discovery
+ * configs so the Temperature sensor's unit_of_measurement follows, and the
+ * next state document is read in the new unit. Called from the main loop; a
+ * no-op while not connected (the CONNECTED event publishes discovery anyway).
+ */
+void hr_mqtt_rediscover(void);
+
 /* True once connected to the broker. */
 bool hr_mqtt_connected(void);
 

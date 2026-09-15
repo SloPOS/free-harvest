@@ -1,4 +1,5 @@
 #include "hr_mqtt.h"
+#include "hr_units.h"
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -168,8 +169,14 @@ static void publish_discovery(void)
     snprintf(cfg, sizeof(cfg), "%s/config/set", s_base);
 
     /* Sensors (value_templates read the state JSON from hr_telemetry_to_json) */
-    discover_sensor("temp", "Temperature", "\\u00b0F", "temperature",
-                    "{{ value_json.temp_f }}");
+    /* Temperature in the owner's unit (Settings > Temperature unit): the state
+     * document carries `temp` converted to it and `temp_unit` naming it, next
+     * to the dryer's own `temp_f`. The discovery config and the value it reads
+     * are therefore always in the same unit, and hr_mqtt_rediscover() re-sends
+     * this when the owner switches. */
+    const bool metric = hr_units_temp() == HR_TEMP_C;
+    discover_sensor("temp", "Temperature", metric ? "\\u00b0C" : "\\u00b0F",
+                    "temperature", "{{ value_json.temp }}");
     discover_sensor("pressure", "Pressure (raw)", "", "",
                     "{{ value_json.pressure }}");
     discover_sensor("state_type", "State Code", "", "",
@@ -358,13 +365,23 @@ void hr_mqtt_publish_telemetry(const hr_telemetry_t *t)
     if (!s_connected || !t || !t->valid) {
         return;
     }
-    char json[256];
-    if (hr_telemetry_to_json(t, json, sizeof(json)) == 0) {
+    char json[320];
+    if (hr_telemetry_to_json_unit(t, hr_units_temp(), json, sizeof(json)) == 0) {
         return;
     }
     char topic[96];
     snprintf(topic, sizeof(topic), "%s/state", s_base);
     pub(topic, json, 1); /* retained so HA shows last value after restart */
+}
+
+void hr_mqtt_rediscover(void)
+{
+    if (!s_connected) {
+        return;
+    }
+    ESP_LOGI(TAG, "re-publishing HA discovery (temperature unit: %s)",
+             hr_temp_unit_letter(hr_units_temp()));
+    publish_discovery();
 }
 
 void hr_mqtt_publish_frame(const char *verb, const char *body)

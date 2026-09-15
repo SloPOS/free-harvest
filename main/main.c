@@ -442,6 +442,13 @@ void app_main(void)
                 s_hello_mounts = mounts;
                 s_hello_step = 0;
             }
+            if (hr_units_take_changed()) {
+                /* Owner switched F/C (boot, web UI or /api/units): Home
+                 * Assistant needs the Temperature sensor re-declared in the
+                 * new unit. The web UI reads the setting directly. Nothing
+                 * goes to the dryer. */
+                hr_mqtt_rediscover();
+            }
             if (!up) {
                 s_hello_step = 0;
             } else if (s_hello_step < HR_HELLO_STEPS) {
