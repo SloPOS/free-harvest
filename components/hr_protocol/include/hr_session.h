@@ -31,16 +31,39 @@ extern "C" {
  */
 #define HR_LINK_TIMEOUT_MS 45000UL
 
+/*
+ * A frame that began but has not been terminated after this long is not a
+ * frame. Real frames are under 200 bytes and arrive in one USB transfer;
+ * REQINFO itself repeats every 1-2 s. What this catches is bytes a host sent
+ * BEFORE it spoke the protocol (a flasher probing the port, terminal noise),
+ * which otherwise sit in the buffer and prefix the next real frame - on the
+ * bench that turned the dryer's first REQINFO into an unknown verb.
+ */
+#define HR_PARTIAL_STALE_MS 1500UL
+
 typedef enum {
     HR_LINK_DOWN = 0,
     HR_LINK_UP,
 } hr_link_state_t;
 
-/* Transport write callback. Must transmit all `len` bytes. */
-typedef void (*hr_tx_fn)(const char *data, size_t len, void *user);
+/*
+ * Transport write callback. Returns true only if all `len` bytes were handed
+ * to the host, so the caller (and the web UI behind it) can tell "sent" from
+ * "queued into a FIFO nobody is draining".
+ */
+typedef bool (*hr_tx_fn)(const char *data, size_t len, void *user);
 
 /* Optional observer invoked for every inbound frame (logging, WiFi relay). */
 typedef void (*hr_observer_fn)(const hr_frame_t *f, void *user);
+
+/*
+ * Optional observer for every complete ENCODED frame (the 6.0.644170
+ * transport - see hr_protocol.h). Gets the whole frame, header included,
+ * verbatim. The session itself does nothing with the contents: it counts the
+ * frame, notes its length and time, and treats it as proof the dryer is
+ * still there.
+ */
+typedef void (*hr_enc_observer_fn)(const char *frame, size_t len, void *user);
 
 /* Everything we have learned about the attached dryer. */
 typedef struct {
@@ -77,10 +100,24 @@ typedef struct {
     hr_dryer_info_t info;
 
     unsigned long now_ms;
-    unsigned long last_rx_ms;
-    unsigned long frames_in;
+    unsigned long last_rx_ms;   /* last complete frame */
+    unsigned long last_byte_ms; /* last byte of any kind, for stale partials */
+    unsigned long frames_in;    /* plaintext frames parsed */
     unsigned long frames_out;
     unsigned long unknown_verbs;
+
+    /*
+     * Encoded transport, as seen by the session. Counts live in the stream
+     * (stream.enc_frames / enc_bytes / enc_bad); these are the "when" and
+     * "how big" of the most recent one, for /api/state. Encoded frames are
+     * NOT counted in frames_in - that stays the plaintext count - but they do
+     * refresh last_rx_ms, so the link stays up and the heartbeat and re-ask
+     * keep going while the dryer talks this way.
+     */
+    unsigned long last_enc_ms;  /* now_ms when the last encoded frame completed; 0 = never */
+    size_t        last_enc_len; /* its declared (= actual) total length */
+    hr_enc_observer_fn enc_observer;
+    void *enc_observer_user;
 
     /*
      * Payload placed in the GOTIT ack. UNVERIFIED - the genuine adapter's
@@ -121,12 +158,26 @@ typedef struct {
         bool cloud;             /* adapter can reach the vendor cloud  */
         bool cloud_override;    /* set by hand; stops the automatic rule */
     } wifi;
+
+    /*
+     * Handshake variants for dryer firmware 6.0.644170. Both OFF by default;
+     * see hr_session_set_compat().
+     */
+    struct {
+        bool unique_tag;   /* "UNIQUE lH" instead of a bare "UNIQUE" */
+        bool reask;        /* re-send FDNAME/REQCFG/STATUS each heartbeat
+                              until each has been answered */
+    } compat;
 } hr_session_t;
 
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user);
 
 /* Register an observer for inbound frames (may be NULL). */
 void hr_session_set_observer(hr_session_t *s, hr_observer_fn fn, void *user);
+
+/* Register an observer for complete encoded frames (may be NULL). */
+void hr_session_set_enc_observer(hr_session_t *s, hr_enc_observer_fn fn,
+                                 void *user);
 
 /*
  * Tell the session what to report in WIFIINFO.
@@ -203,6 +254,33 @@ void hr_session_set_cloud_auto(hr_session_t *s, bool online);
 
 void hr_session_set_wifi(hr_session_t *s, int link, int rssi,
                          const char *ssid, const char *ap_name);
+
+/*
+ * Handshake variants for a dryer running firmware 6.0.644170.
+ *
+ * On 6.0.641041 the verb dispatcher and the executor have no notion of an
+ * "adapter mode": UNIQUE answers UID, FDNAME answers SNM, STATUS answers STAT,
+ * each unconditionally (G0641041 executor at 0x2b7e4, handlers 0x2cc68 /
+ * 0x2cd20 / 0x2cdac). 6.0.644170 adds one: a mode byte that the USB layer
+ * clears on attach, that the UNIQUE handler sets to 1 only when the frame's
+ * first argument contains "lH" (the substring search runs on the parser's
+ * argument slot 0 - 0x20003b00 is line buffer 0x20003f38 minus the 12 x 90
+ * byte argument array, the same layout 641041 uses at 0x20003acc/0x20003f04),
+ * and that the dispatcher consults to drop everything except UNIQUE / STATE /
+ * WIFIINFO / FDNAME when it reads 2. A machine on that build answers a bare
+ * UNIQUE with UID and then nothing - exactly the symptom that has been seen
+ * on every 644170 machine so far, and the genuine adapter is captured sending
+ * "UNIQUE lH" unprompted at power-up.
+ *
+ * `unique_tag` sends the argument. `reask` copies the genuine adapter's other
+ * habit, measured against a simulator playing a stuck machine: FDNAME and
+ * REQCFG go out again on every ~15 s heartbeat until answered, and STATUS
+ * until a STAT has arrived. Both are verified harmless on 6.0.641041 (UID,
+ * SNM, CFG, STAT arrive exactly as with the bare form) and both default OFF,
+ * because upstream shipped them in 1.0.5.4-1.0.5.6 and backed them out again
+ * without a conclusive test on a 644170 machine.
+ */
+void hr_session_set_compat(hr_session_t *s, bool unique_tag, bool reask);
 
 /* Override the GOTIT ack payload. */
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload);

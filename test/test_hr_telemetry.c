@@ -81,6 +81,12 @@ static void test_json_output(void)
               "\"elapsed_s\":0,\"mode\":\"QUALITY\",\"prep_s\":0,"
               "\"freeze_pct\":0,\"phase_pct\":0,\"phase_s\":0,"
               "\"vacuum_um\":0,\"vacuum_ok\":false}");
+
+    /* mode is dryer-supplied text; a quote in it must not break the JSON */
+    parse("STAT,1,0,0,0,69,151882,0,0,38,0,1,QU\"AL\\TY,v6.4,,\r", &t);
+    n = hr_telemetry_to_json(&t, buf, sizeof(buf));
+    CHECK(n > 0);
+    CHECK(strstr(buf, "\"mode\":\"QU\\\"AL\\\\TY\"") != NULL);
 }
 
 /* ---- phase detection (grounded in real captures) ---- */

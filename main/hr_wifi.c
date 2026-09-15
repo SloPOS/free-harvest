@@ -24,6 +24,12 @@ static const char *TAG = "hr_wifi";
  * the device broadcasting an open setup network indefinitely for attackers.
  */
 #define AP_OPEN_WINDOW_US (5 * 60 * 1000000ULL)
+/*
+ * Once the fast retries are used up, keep trying the stored network at this
+ * interval for as long as we are powered. The adapter is fed by the dryer's
+ * USB port, so "reboot to reconnect" means a trip to the machine mid-batch.
+ */
+#define STA_RETRY_BACKOFF_US (30 * 1000000ULL)
 
 static hr_wifi_status_t s_status;
 static esp_netif_t *s_sta_netif;
@@ -31,7 +37,9 @@ static esp_netif_t *s_ap_netif;
 static int s_sta_retries;
 static char s_ssid[33];
 static esp_timer_handle_t s_ap_timeout_timer;
+static esp_timer_handle_t s_sta_retry_timer;
 static bool s_ap_window_expired; /* true once the 5-min window has closed */
+static volatile bool s_restarting; /* hr_wifi_prepare_restart() was called */
 
 static wifi_ap_record_t s_scan[MAX_SCAN];
 static uint16_t s_scan_count;
@@ -112,6 +120,40 @@ static void cancel_ap_timeout(void)
     }
 }
 
+/* Slow retry of the stored network. Runs in the esp_timer task. */
+static void sta_retry_cb(void *arg)
+{
+    (void)arg;
+    if (s_status == HR_WIFI_CONNECTED || s_ssid[0] == '\0') {
+        return;
+    }
+    ESP_LOGI(TAG, "retrying \"%s\" (attempt %d)", s_ssid, s_sta_retries + 1);
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
+    }
+}
+
+static void arm_sta_retry(void)
+{
+    if (s_sta_retry_timer == NULL) {
+        const esp_timer_create_args_t a = {.callback = sta_retry_cb,
+                                           .name = "sta_retry"};
+        if (esp_timer_create(&a, &s_sta_retry_timer) != ESP_OK) {
+            return;
+        }
+    }
+    esp_timer_stop(s_sta_retry_timer);
+    esp_timer_start_once(s_sta_retry_timer, STA_RETRY_BACKOFF_US);
+}
+
+static void cancel_sta_retry(void)
+{
+    if (s_sta_retry_timer != NULL) {
+        esp_timer_stop(s_sta_retry_timer);
+    }
+}
+
 /*
  * Configure the setup AP. Does NOT start the WiFi driver - the driver is
  * started exactly once in hr_wifi_start(). Callable any time to (re)assert
@@ -164,11 +206,16 @@ static void start_ap_mode(void)
  * The AP is deliberately kept up so the status page remains reachable and can
  * report the new station IP.
  */
-static void start_sta_connect(const char *ssid, const char *pw)
+/*
+ * Returns false if the driver refused the configuration. This used to be
+ * ESP_ERROR_CHECK, i.e. abort() on data that came in over HTTP: a password the
+ * driver rejects (ESP_ERR_WIFI_PASSWORD) had already been written to NVS by the
+ * caller, so the next boot loaded it, hit the same abort, and the adapter
+ * boot-looped until reflashed with a wiped NVS.
+ */
+static bool start_sta_connect(const char *ssid, const char *pw)
 {
     ESP_LOGI(TAG, "connecting to \"%s\"", ssid);
-    s_status = HR_WIFI_CONNECTING;
-    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
 
     wifi_config_t sta = {0};
     snprintf((char *)sta.sta.ssid, sizeof(sta.sta.ssid), "%s", ssid);
@@ -177,11 +224,39 @@ static void start_sta_connect(const char *ssid, const char *pw)
     sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
     sta.sta.pmf_cfg.capable = true;
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-    esp_err_t err = esp_wifi_connect();
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_config(STA) rejected \"%s\": %s", ssid,
+                 esp_err_to_name(err));
+        return false;
+    }
+    s_status = HR_WIFI_CONNECTING;
+    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
+    err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(err));
     }
+    return true;
+}
+
+/*
+ * What the driver will accept: an SSID of 1..32 bytes and a passphrase that is
+ * either empty (open network) or 8..63 characters (WPA/WPA2 PSK). Checked
+ * before anything is stored so a bad value is answered with HTTP 400 rather
+ * than persisted.
+ */
+static bool credentials_plausible(const char *ssid, const char *pw)
+{
+    size_t sl = ssid ? strlen(ssid) : 0;
+    size_t pl = pw ? strlen(pw) : 0;
+    if (sl == 0 || sl > 32) {
+        return false;
+    }
+    /* 64 hex digits is a raw PSK; the driver takes it as well. */
+    if (pl != 0 && (pl < 8 || pl > 64)) {
+        return false;
+    }
+    return true;
 }
 
 /* -------------------------------------------------------------------- */
@@ -190,6 +265,15 @@ static void start_sta_connect(const char *ssid, const char *pw)
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
+    if (s_restarting) {
+        /*
+         * esp_restart() is stopping the driver. The disconnect it raises is
+         * not a lost link to be repaired - re-enabling the AP and calling
+         * esp_wifi_connect() into a stack that is being torn down is exactly
+         * the kind of work a reboot path should not be doing.
+         */
+        return;
+    }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         /*
          * Runs in the WiFi event task - MUST NOT block. Reconnect immediately
@@ -222,16 +306,33 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
                      s_sta_retries, d->reason);
             esp_wifi_connect();
         } else {
-            ESP_LOGW(TAG, "join failed %d times (reason %d); staying in setup "
-                          "AP - re-submit credentials from the page to retry",
-                     s_sta_retries, d->reason);
-            s_status = HR_WIFI_AP_SETUP;
+            /*
+             * The fast retries are spent. This used to stop here for good:
+             * no further esp_wifi_connect(), and - once the setup-AP window
+             * had closed and the mode had been forced to STA - no AP either.
+             * A router reboot longer than eight quick attempts (well under
+             * two minutes) left the adapter unreachable on every interface
+             * until someone unplugged it from the dryer.
+             *
+             * Keep trying, slowly. If the AP window is still open the user
+             * can also re-submit credentials from the setup page meanwhile.
+             */
+            if (s_sta_retries == STA_RETRY_LIMIT) {
+                ESP_LOGW(TAG, "join failed %d times (reason %d); will keep "
+                              "retrying every %us",
+                         s_sta_retries, d->reason,
+                         (unsigned)(STA_RETRY_BACKOFF_US / 1000000ULL));
+            }
+            s_status = s_ap_window_expired ? HR_WIFI_CONNECTING
+                                           : HR_WIFI_AP_SETUP;
+            arm_sta_retry();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "connected, ip " IPSTR, IP2STR(&e->ip_info.ip));
         s_status = HR_WIFI_CONNECTED;
         s_sta_retries = 0;
+        cancel_sta_retry();
         cancel_ap_timeout(); /* connected in time; no need to force-close AP */
         /*
          * Security: once we're on the home network, shut the setup AP down
@@ -350,6 +451,15 @@ void hr_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     configure_ap();
     ESP_ERROR_CHECK(esp_wifi_start());
+    /*
+     * The open setup AP is on the air from this moment, whatever happens with
+     * the stored network, so its five-minute window has to start now as well.
+     * It used to be armed only from start_ap_mode() (no credentials) and from
+     * the reconnect path - so a boot with stored credentials and the router
+     * down broadcast the open AP indefinitely, which is the exact case the
+     * window exists for. A successful connection cancels it on GOT_IP.
+     */
+    arm_ap_timeout();
 
     /*
      * No power save. The adapter is mains-powered off the dryer's USB port, so
@@ -361,9 +471,12 @@ void hr_wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     char ssid[33] = {0}, pw[65] = {0};
-    if (load_credentials(ssid, sizeof(ssid), pw, sizeof(pw))) {
-        start_sta_connect(ssid, pw); /* safe now: driver is started */
+    if (load_credentials(ssid, sizeof(ssid), pw, sizeof(pw)) &&
+        credentials_plausible(ssid, pw) && start_sta_connect(ssid, pw)) {
+        /* connecting; driver is started so esp_wifi_connect() is legal */
     } else {
+        /* Nothing stored, or the stored values are ones the driver will not
+         * take: stay reachable on the setup AP instead of aborting. */
         start_ap_mode();
     }
 
@@ -418,18 +531,27 @@ void hr_wifi_current_ssid(char *out, size_t cap)
 
 bool hr_wifi_set_credentials(const char *ssid, const char *password)
 {
-    if (ssid == NULL || ssid[0] == '\0' || strlen(ssid) > 32) {
-        return false;
-    }
     if (password == NULL) {
         password = "";
     }
-    if (!store_credentials(ssid, password)) {
+    if (!credentials_plausible(ssid, password)) {
         return false;
     }
+    /*
+     * Apply first, store second. If the driver refuses the configuration the
+     * caller gets a 400 and nothing has been written - the old credentials, if
+     * any, stay in NVS and keep working across the next reboot.
+     */
     s_sta_retries = 0;
+    cancel_sta_retry();
     esp_wifi_disconnect();
-    start_sta_connect(ssid, password);
+    if (!start_sta_connect(ssid, password)) {
+        return false;
+    }
+    if (!store_credentials(ssid, password)) {
+        ESP_LOGE(TAG, "credentials accepted by the driver but not saved");
+        return false;
+    }
     return true;
 }
 
@@ -441,7 +563,36 @@ void hr_wifi_forget(void)
         nvs_commit(nh);
         nvs_close(nh);
     }
+    /*
+     * Erasing the stored network used to be all this did: the station stayed
+     * associated, the retry logic kept its SSID, and after the AP window had
+     * closed start_ap_mode() refused to bring the AP back - so "Forget" did
+     * nothing visible until the next reboot.
+     *
+     * Leave the network for real, drop the STA config so nothing reconnects
+     * to it, and treat the explicit (PIN-guarded) request as permission for
+     * one more setup window: the user just asked for setup mode.
+     */
+    cancel_sta_retry();
+    s_sta_retries = 0;
+    s_ssid[0] = '\0';
+    esp_wifi_disconnect();
+    wifi_config_t empty = {0};
+    esp_wifi_set_config(WIFI_IF_STA, &empty);
+    s_ap_window_expired = false;
+    esp_err_t merr = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (merr != ESP_OK) {
+        ESP_LOGW(TAG, "could not re-enable the setup AP: %s",
+                 esp_err_to_name(merr));
+    }
     start_ap_mode();
+}
+
+void hr_wifi_prepare_restart(void)
+{
+    s_restarting = true;
+    cancel_sta_retry();
+    cancel_ap_timeout();
 }
 
 void hr_wifi_scan_start(void)
@@ -459,6 +610,19 @@ void hr_wifi_scan_start(void)
     if (s_status == HR_WIFI_CONNECTING) {
         return; /* can't scan mid-connect; UI keeps last results */
     }
+    /*
+     * Rate-limit. Each scan parks the single httpd worker for 1-2 s and takes
+     * the radio off-channel, which stalls MQTT keep-alives and an OTA upload
+     * in progress. /api/scan is an unauthenticated GET that the setup page
+     * polls by itself, so anyone on the LAN could keep the radio scanning
+     * continuously. Within the window the last results are served instead.
+     */
+    static uint32_t last_scan_ms;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (last_scan_ms != 0 && (uint32_t)(now - last_scan_ms) < 10000u) {
+        return;
+    }
+    last_scan_ms = now;
     s_scanning = true;
 
     wifi_scan_config_t cfg = {.show_hidden = false};
@@ -474,11 +638,26 @@ void hr_wifi_scan_start(void)
     s_scanning = false;
 }
 
+/*
+ * Build the JSON array. Every write is checked against the space left: the
+ * previous version added snprintf's *desired* length to the offset even when
+ * the output had been truncated, and with enough long SSIDs in range the
+ * offset ran past the caller's buffer, the final "]" was written beyond it and
+ * the caller sent that many bytes to the client. An entry that does not fit
+ * is left out rather than truncated, so the result is always valid JSON.
+ */
 size_t hr_wifi_scan_result_json(char *out, size_t cap)
 {
+    if (out == NULL || cap < 3) {
+        if (out != NULL && cap > 0) {
+            out[0] = '\0';
+        }
+        return 0;
+    }
     size_t o = 0;
-    o += snprintf(out + o, cap - o, "[");
-    for (uint16_t i = 0; i < s_scan_count && o < cap - 96; i++) {
+    out[o++] = '[';
+    bool first = true;
+    for (uint16_t i = 0; i < s_scan_count; i++) {
         char ssid_esc[64];
         /* SSIDs can contain quotes/backslashes; escape for JSON. */
         size_t e = 0;
@@ -491,11 +670,20 @@ size_t hr_wifi_scan_result_json(char *out, size_t cap)
         }
         ssid_esc[e] = '\0';
         bool secure = s_scan[i].authmode != WIFI_AUTH_OPEN;
-        o += snprintf(out + o, cap - o,
-                      "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
-                      i ? "," : "", ssid_esc, s_scan[i].rssi,
-                      secure ? "true" : "false");
+        /* Leave room for the closing bracket and the NUL. */
+        size_t room = cap - o - 2;
+        int w = snprintf(out + o, room,
+                         "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+                         first ? "" : ",", ssid_esc, s_scan[i].rssi,
+                         secure ? "true" : "false");
+        if (w < 0 || (size_t)w >= room) {
+            out[o] = '\0'; /* undo the partial entry */
+            break;
+        }
+        o += (size_t)w;
+        first = false;
     }
-    o += snprintf(out + o, cap - o, "]");
+    out[o++] = ']';
+    out[o] = '\0';
     return o;
 }

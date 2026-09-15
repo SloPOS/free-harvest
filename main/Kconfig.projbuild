@@ -22,8 +22,37 @@ config HR_ACK_PAYLOAD
         payload is not yet known - capture it with a USB sniffer and set it
         here (or leave for later; the decoding UI works regardless).
 
+config HR_COMPAT_644170
+    bool "Handshake for dryer firmware 6.0.644170 (default at first boot)"
+    default n
+    help
+        Send "UNIQUE lH" instead of a bare "UNIQUE", and re-send FDNAME /
+        REQCFG / STATUS on every 15 s heartbeat until each is answered -
+        the genuine adapter's observed behaviour.
+
+        A dryer on 6.0.644170 answers a bare UNIQUE with UID and then never
+        sends anything else (no SNM, CFG, STAT). That build adds an
+        adapter-mode byte that its UNIQUE handler sets only when the frame
+        carries "lH"; 6.0.641041 has no such byte and works either way.
+        Verified harmless on 6.0.641041.
+
+        This is only the value used until the switch is changed at runtime
+        (Settings > Debug, or POST /api/compat), which is stored in NVS.
+
 config HR_HTTP_LOG_TO_UART
     bool "Also echo received frames to the UART console"
     default y
+
+config HR_LOG_RING_KB
+    int "In-app log ring (/api/log) size, KB"
+    range 4 128
+    default 32
+    help
+        Static DRAM reserved for the in-app copy of the ESP-IDF log that
+        /api/log serves. Lines are stored packed (a line costs its own
+        length plus two bytes), so 32 KB keeps roughly 500 lines of the
+        ~65-character average - a boot, the handshake and several minutes
+        of a busy link. Boards without PSRAM that carry other RAM users can
+        turn this down; the ring only ever drops its oldest lines.
 
 endmenu

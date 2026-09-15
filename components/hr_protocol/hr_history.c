@@ -57,6 +57,41 @@ static uint32_t diff_mask(const hr_frame_t *cur, const char *prev_body)
     return mask;
 }
 
+/*
+ * Store the frame text, or - when it does not fit - as much of it as does,
+ * ending in "...". Returns true if it was truncated.
+ *
+ * hr_frame_tostring() refuses to write a frame that does not fit and its
+ * result used to be ignored here, so a long frame (STAT type 15 has 34 fields)
+ * updated seq/verb/nfields but left the PREVIOUS occupant's body in the slot.
+ * /api/history then showed a frame from 64 entries ago under a fresh sequence
+ * number, and the per-verb diff mask was computed against stale text - for
+ * exactly the frames whose layout is still being worked out.
+ */
+static bool store_body(const hr_frame_t *f, char *out, size_t cap)
+{
+    if (hr_frame_tostring(f, out, cap) > 0) {
+        return false;
+    }
+    /* Rebuild into a full-size scratch buffer and keep the head. */
+    char full[HR_MAX_FRAME];
+    size_t n = hr_frame_tostring(f, full, sizeof(full));
+    if (n == 0) {
+        /* Cannot happen for a frame hr_frame_parse() accepted, but never
+         * leave the slot with someone else's text. */
+        snprintf(out, cap, "%s", f->verb);
+        return true;
+    }
+    if (cap < 5) {
+        out[0] = '\0';
+        return true;
+    }
+    size_t keep = cap - 4; /* room for "..." and the NUL */
+    memcpy(out, full, keep);
+    memcpy(out + keep, "...", 4);
+    return true;
+}
+
 uint32_t hr_history_add(hr_history_t *h, const hr_frame_t *f, uint32_t t_ms)
 {
     if (h == NULL || f == NULL) {
@@ -70,20 +105,21 @@ uint32_t hr_history_add(hr_history_t *h, const hr_frame_t *f, uint32_t t_ms)
     e->seq = seq;
     e->t_ms = t_ms;
     snprintf(e->verb, sizeof(e->verb), "%s", f->verb);
-    hr_frame_tostring(f, e->body, sizeof(e->body));
+    e->truncated = store_body(f, e->body, sizeof(e->body)) ? 1 : 0;
     e->nfields = (uint8_t)(f->nfields > 255 ? 255 : f->nfields);
 
     hr_hist_verb_t *v = find_or_add_verb(h, f->verb);
     if (v != NULL) {
-        if (v->count > 0) {
+        if (v->count > 0 && !v->truncated && !e->truncated) {
             v->changed_mask = diff_mask(f, v->last_body);
         } else {
-            v->changed_mask = 0;
+            v->changed_mask = 0; /* no honest comparison involving a head */
         }
         v->count++;
         v->last_seq = seq;
         v->nfields = e->nfields;
-        hr_frame_tostring(f, v->last_body, sizeof(v->last_body));
+        v->truncated =
+            store_body(f, v->last_body, sizeof(v->last_body)) ? 1 : 0;
     }
 
     return seq;
@@ -210,8 +246,9 @@ size_t hr_hist_entry_json(const hr_hist_entry_t *e, char *out, size_t cap)
 
     int n = snprintf(out, cap,
                      "{\"seq\":%" PRIu32 ",\"t\":%" PRIu32
-                     ",\"verb\":\"%s\",\"body\":\"%s\",\"n\":%u}",
-                     e->seq, e->t_ms, verb, body, (unsigned)e->nfields);
+                     ",\"verb\":\"%s\",\"body\":\"%s\",\"n\":%u%s}",
+                     e->seq, e->t_ms, verb, body, (unsigned)e->nfields,
+                     e->truncated ? ",\"trunc\":true" : "");
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }

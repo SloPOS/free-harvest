@@ -5,12 +5,16 @@
 #include "hr_http.h"
 #include "hr_log.h"
 #include "hr_mqtt.h"
+#include "hr_reboot.h"
 #include "hr_telemetry.h"
 #include "hr_trend.h"
 #include "hr_usb.h"
 #include "hr_wifi.h"
+#include "hr_compat.h"
 
 #include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -48,6 +52,7 @@ static httpd_handle_t s_httpd;
 /* Latest decoded telemetry, published by the frame observer in main.c. */
 static hr_telemetry_t s_tel;
 static bool s_tel_valid;
+static uint32_t s_tel_ms; /* when it arrived, for the staleness check */
 /*
  * Running/idle is decided by whether the dryer's elapsed counter is actually
  * ADVANCING - it retains the previous batch's value when idle, so a non-zero
@@ -57,23 +62,48 @@ static hr_phase_tracker_t s_tracker;
 static bool s_tracker_ready;
 /* 30s graph series, owned by main.c and guarded by the shared s_lock. */
 static hr_trend_t *s_trend;
+/* Recent encoded frames, owned by main.c, guarded by the shared s_lock. */
+static hr_encring_t *s_encring;
 
 /* Learns how often drying had to be extended - see hr_recipe.h. */
 static hr_dry_tracker_t s_dry = {-1, 0};
 
 int32_t hr_http_extra_dry_s(void)
 {
+    /* Called from on_inbound() on the USB task, outside the lock; the
+     * tracker is two ints and the read is racy only against itself. */
     return hr_dry_extra_s(&s_dry);
 }
+
+/*
+ * The frame history is written from the USB RX task and read from httpd
+ * tasks, so guard it. The app supplies this mutex (it is the writer) via
+ * hr_http_use_lock() so both sides serialise on one lock.
+ *
+ * The same lock covers s_tel / s_tracker / s_dry: they are ~80-100 byte
+ * structs written by the USB task (and s_tracker by the main loop every
+ * 250 ms) and read by httpd. Without it a reader could see half of one STAT
+ * and half of the next - and live_screen() is what decides whether a CLICK
+ * goes out. The setters may run before hr_http_use_lock(); they skip locking
+ * until it exists.
+ */
+static SemaphoreHandle_t s_lock;
+#define LOCK() xSemaphoreTake(s_lock, portMAX_DELAY)
+#define UNLOCK() xSemaphoreGive(s_lock)
+#define LOCK_IF() do { if (s_lock) LOCK(); } while (0)
+#define UNLOCK_IF() do { if (s_lock) UNLOCK(); } while (0)
 
 void hr_http_set_telemetry(const hr_telemetry_t *t)
 {
     if (t != NULL && t->valid) {
+        LOCK_IF();
         s_tel = *t;
         s_tel_valid = true;
+        s_tel_ms = (uint32_t)(esp_timer_get_time() / 1000);
         /* Watch the SCREEN rather than our own commands: most
          * More Dry Time presses happen on the panel by hand. */
         hr_dry_observe(&s_dry, (int)t->type);
+        UNLOCK_IF();
     }
 }
 
@@ -82,22 +112,20 @@ void hr_http_set_trend(hr_trend_t *tr)
     s_trend = tr;
 }
 
+void hr_http_set_encring(hr_encring_t *r)
+{
+    s_encring = r;
+}
+
 void hr_http_set_tracker(const hr_phase_tracker_t *tr)
 {
     if (tr != NULL) {
+        LOCK_IF();
         s_tracker = *tr;
         s_tracker_ready = true;
+        UNLOCK_IF();
     }
 }
-
-/*
- * The frame history is written from the USB RX task and read from httpd
- * tasks, so guard it. The app supplies this mutex (it is the writer) via
- * hr_http_use_lock() so both sides serialise on one lock.
- */
-static SemaphoreHandle_t s_lock;
-#define LOCK() xSemaphoreTake(s_lock, portMAX_DELAY)
-#define UNLOCK() xSemaphoreGive(s_lock)
 
 /* -------------------------------------------------------------------- */
 /* Small helpers                                                         */
@@ -108,6 +136,31 @@ static esp_err_t send_json(httpd_req_t *req, const char *json, size_t len)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json, len);
 }
+
+/*
+ * One scratch area for every handler that needs more than the 8 KB httpd
+ * stack can carry.
+ *
+ * esp_http_server runs every handler on its single worker task, one after
+ * another, so no two of these can ever be live at the same time - yet each
+ * handler used to own a static buffer of its own: two 12.5 KB history
+ * snapshots, a 9.6 KB verb table, a 5.7 KB recipe body, a 4.5 KB batch ring
+ * and a 1 KB stream buffer, 46 KB of DRAM for a peak need of 12.5 KB. On a
+ * board without PSRAM that difference is the whole Wi-Fi stack's working
+ * heap. A union costs the largest member once. Nothing here survives the
+ * handler that filled it, and nothing may: a handler that returns still
+ * holding a pointer into s_scratch is a bug.
+ */
+#define RCP_SLOTS  8    /* recipe slots in NVS - see the recipe code below */
+#define BATCH_SHOW 40   /* logbook entries /api/batches renders */
+static union {
+    hr_hist_entry_t hist[HR_HIST_CAP];         /* h_history, h_capture */
+    hr_hist_verb_t  verbs[HR_HIST_VERBS];      /* h_verbs */
+    char            recipes[RCP_SLOTS * 700 + 64]; /* h_recipes */
+    hr_batch_t      batches[BATCH_SHOW];       /* h_batches */
+    char            bytes[1024];               /* h_capture, h_batches_csv */
+    hr_encring_t    enc;                       /* h_enc snapshot, ~5.4 KB */
+} s_scratch;
 
 /* -------------------------------------------------------------------- */
 /* GET /  -> embedded HTML                                               */
@@ -153,6 +206,7 @@ static bool pin_is_set(char *out, size_t cap);
  * Returns true when the request may proceed, and has already sent the
  * refusal when it returns false. */
 static bool pin_guard(httpd_req_t *req, const char *body);
+static bool pin_guard_small(httpd_req_t *req);
 
 static esp_err_t h_state(httpd_req_t *req)
 {
@@ -168,20 +222,33 @@ static esp_err_t h_state(httpd_req_t *req)
     hr_json_escape(s_session->info.uid, uid, sizeof(uid));
     char dryer_sn[64];
     hr_json_escape(s_session->info.dryer_sn, dryer_sn, sizeof(dryer_sn));
+    char fwver[48];
+    hr_json_escape(s_session->info.fw_version, fwver, sizeof(fwver));
     unsigned long fin = s_session->frames_in, fout = s_session->frames_out;
     unsigned long unk = s_session->unknown_verbs;
     unsigned long bad = s_session->stream.frames_bad;
+    /* The 6.0.644170 encoded transport: how much of it, and how recently. */
+    unsigned long enc_frames = s_session->stream.enc_frames;
+    unsigned long enc_bytes = s_session->stream.enc_bytes;
+    unsigned long enc_bad = s_session->stream.enc_bad;
+    unsigned long enc_last_ms = s_session->last_enc_ms;
+    unsigned enc_last_len = (unsigned)s_session->last_enc_len;
     const char *link = s_session->link == HR_LINK_UP ? "up" : "down";
     uint32_t latest = hr_history_latest_seq(s_history);
+    /* Snapshot the telemetry under the same lock its writers take. */
+    hr_telemetry_t tel = s_tel;
+    bool tel_valid = s_tel_valid;
+    hr_phase_tracker_t tracker = s_tracker;
+    bool tracker_ready = s_tracker_ready;
     UNLOCK();
 
     /* Cycle phase + live readings (empty/idle values when nothing seen yet). */
-    hr_phase_t ph = s_tel_valid
-                        ? hr_phase_of_tracked(&s_tel,
-                                              s_tracker_ready ? &s_tracker : NULL)
+    hr_phase_t ph = tel_valid
+                        ? hr_phase_of_tracked(&tel,
+                                              tracker_ready ? &tracker : NULL)
                         : HR_PHASE_UNKNOWN;
     char mode_esc[32];
-    hr_json_escape(s_tel_valid ? s_tel.mode : "", mode_esc, sizeof(mode_esc));
+    hr_json_escape(tel_valid ? tel.mode : "", mode_esc, sizeof(mode_esc));
 
     /*
      * The actions the machine is offering RIGHT NOW. The UI renders from this
@@ -192,7 +259,7 @@ static esp_err_t h_state(httpd_req_t *req)
     size_t ai = 0;
     acts[ai++] = '[';
     const hr_action_t *av[8];
-    size_t an = hr_control_for_screen(s_tel_valid ? (int)s_tel.type : -1, av, 8);
+    size_t an = hr_control_for_screen(tel_valid ? (int)tel.type : -1, av, 8);
     for (size_t i = 0; i < an; i++) {
         int w = snprintf(acts + ai, sizeof(acts) - ai,
                          "%s{\"name\":\"%s\",\"label\":\"%s\",\"sev\":%d}",
@@ -208,12 +275,31 @@ static esp_err_t h_state(httpd_req_t *req)
     }
     acts[ai] = '\0';
 
-    char body[2048];
+    multi_heap_info_t heap;
+    heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL);
+
+    /* Age of the last encoded frame in ms; -1 when none has arrived. */
+    long enc_age_ms = -1;
+    if (enc_frames > 0) {
+        unsigned long now = (unsigned long)(esp_timer_get_time() / 1000);
+        enc_age_ms = (long)(now - enc_last_ms);
+    }
+
+    char body[2304];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"dryer_sn\":\"%s\","
+                     /* The dryer's own firmware build, from UID field 2, and
+                      * whether the 6.0.644170 handshake variant is on. */
+                     "\"fw_version\":\"%s\",\"compat644170\":%s,"
                      "\"frames_in\":%lu,\"frames_out\":%lu,"
                      "\"unknown_verbs\":%lu,\"frames_bad\":%lu,"
+                     /* Encoded transport (")S" + length, 6.0.644170 after
+                      * "UNIQUE lH"): complete frames framed and stored,
+                      * their bytes, frames abandoned as partial/cut, and the
+                      * length and age of the most recent one. See /api/enc. */
+                     "\"enc_frames\":%lu,\"enc_bytes\":%lu,\"enc_bad\":%lu,"
+                     "\"enc_last_len\":%u,\"enc_last_age_ms\":%ld,"
                      "\"latest_seq\":%" PRIu32 ",\"wifi\":\"%s\",\"ip\":\"%s\","
                      "\"ssid\":\"%s\","
                      "\"phase\":%d,\"phase_label\":\"%s\",\"have_tel\":%s,"
@@ -227,6 +313,12 @@ static esp_err_t h_state(httpd_req_t *req)
                       * console is not. See hr_usb.h for how to read them. */
                      "\"usb_mounted\":%s,\"usb_suspended\":%s,"
                      "\"usb_mounts\":%u,\"usb_rx_bytes\":%lu,"
+                     /* Internal heap: free now, the low-water mark since
+                      * boot, and the largest block still allocatable. The
+                      * last two are what a slow leak and fragmentation
+                      * look like from outside - see the 60 s heap line in
+                      * main.c. */
+                     "\"heap_free\":%u,\"heap_min\":%u,\"heap_largest\":%u,"
                      "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
                      "\"control\":%s,\"actions\":%s,\"pin\":%s,"
                      /* Raw frame: the config screens carry the live
@@ -235,25 +327,32 @@ static esp_err_t h_state(httpd_req_t *req)
                       * rather than from a remembered default. */
                      "\"last_stat\":\"%s\","
                      "\"version\":\"" FREEHARVEST_VERSION "\"}",
-                     link, serial, uid, dryer_sn, fin, fout, unk, bad, latest,
+                     link, serial, uid, dryer_sn, fwver,
+                     hr_compat_644170() ? "true" : "false",
+                     fin, fout, unk, bad,
+                     enc_frames, enc_bytes, enc_bad, enc_last_len, enc_age_ms,
+                     latest,
                      wifi_status_str(), ip, ssid,
-                     (int)ph, hr_phase_label(ph), s_tel_valid ? "true" : "false",
-                     s_tel_valid ? s_tel.temperature_f : 0,
-                     s_tel_valid ? s_tel.pressure_raw : 0,
-                     s_tel_valid ? s_tel.batch_elapsed_s : 0,
-                     s_tel_valid ? s_tel.prep_remaining_s : 0,
-                     mode_esc, s_tel_valid ? s_tel.type : 0,
-                     s_tel_valid ? s_tel.freeze_pct : 0,
-                     (s_tel_valid && s_tracker_ready)
-                         ? hr_freeze_eta_s(&s_tracker, &s_tel)
+                     (int)ph, hr_phase_label(ph), tel_valid ? "true" : "false",
+                     tel_valid ? tel.temperature_f : 0,
+                     tel_valid ? tel.pressure_raw : 0,
+                     tel_valid ? tel.batch_elapsed_s : 0,
+                     tel_valid ? tel.prep_remaining_s : 0,
+                     mode_esc, tel_valid ? tel.type : 0,
+                     tel_valid ? tel.freeze_pct : 0,
+                     (tel_valid && tracker_ready)
+                         ? hr_freeze_eta_s(&tracker, &tel)
                          : -1,
-                     s_tel_valid ? s_tel.phase_pct : 0,
-                     s_tel_valid ? s_tel.phase_elapsed_s : 0,
-                     s_tel_valid ? s_tel.pressure_microns : 0,
-                     (s_tel_valid && s_tel.pressure_valid) ? "true" : "false",
+                     tel_valid ? tel.phase_pct : 0,
+                     tel_valid ? tel.phase_elapsed_s : 0,
+                     tel_valid ? tel.pressure_microns : 0,
+                     (tel_valid && tel.pressure_valid) ? "true" : "false",
                      hr_usb_mounted() ? "true" : "false",
                      hr_usb_suspended() ? "true" : "false",
                      hr_usb_mount_events(), hr_usb_rx_bytes(),
+                     (unsigned)heap.total_free_bytes,
+                     (unsigned)heap.minimum_free_bytes,
+                     (unsigned)heap.largest_free_block,
                      (unsigned long)(esp_timer_get_time() / 1000000),
                      reset_reason_str(), ctrl_enabled() ? "true" : "false",
                      acts, pin_is_set(pinbuf, sizeof(pinbuf))
@@ -280,7 +379,7 @@ static uint32_t query_since(httpd_req_t *req)
 static esp_err_t h_history(httpd_req_t *req)
 {
     uint32_t since = query_since(req);
-    static hr_hist_entry_t out[HR_HIST_CAP]; /* static: too big for stack */
+    hr_hist_entry_t *out = s_scratch.hist; /* too big for the stack */
     int n;
 
     LOCK();
@@ -310,14 +409,29 @@ static esp_err_t h_history(httpd_req_t *req)
 /* -------------------------------------------------------------------- */
 static esp_err_t h_verbs(httpd_req_t *req)
 {
+    /*
+     * Snapshot under the lock, stream outside it - the same shape as
+     * h_history(). This handler used to hold s_lock across up to 48
+     * httpd_resp_send_chunk() calls, each of which can sit in a 5 s send
+     * timeout on a slow or vanished client. The USB RX task takes the same
+     * lock with portMAX_DELAY for every frame, so one stuck browser stalled
+     * the TinyUSB task, which the dryer's host stack treats as a dead device.
+     */
+    hr_hist_verb_t *snap = s_scratch.verbs; /* ~10 KB */
+    LOCK();
+    int nv = s_history->nverbs;
+    if (nv > HR_HIST_VERBS) {
+        nv = HR_HIST_VERBS;
+    }
+    memcpy(snap, s_history->verbs, (size_t)nv * sizeof(snap[0]));
+    UNLOCK();
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr_chunk(req, "[");
 
-    LOCK();
-    int nv = s_history->nverbs;
     for (int i = 0; i < nv; i++) {
-        const hr_hist_verb_t *v = &s_history->verbs[i];
+        const hr_hist_verb_t *v = &snap[i];
         char body[HR_HIST_BODY * 2], verb[HR_MAX_VERB * 2];
         hr_json_escape(v->last_body, body, sizeof(body));
         hr_json_escape(v->verb, verb, sizeof(verb));
@@ -328,9 +442,13 @@ static esp_err_t h_verbs(httpd_req_t *req)
                          PRIu32 ",\"last\":\"%s\"}",
                          i ? "," : "", verb, v->count, v->last_seq,
                          (unsigned)v->nfields, v->changed_mask, body);
-        httpd_resp_send_chunk(req, obj, n);
+        if (n < 0 || (size_t)n >= sizeof(obj)) {
+            continue;
+        }
+        if (httpd_resp_send_chunk(req, obj, n) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
-    UNLOCK();
 
     httpd_resp_sendstr_chunk(req, "]");
     return httpd_resp_sendstr_chunk(req, NULL);
@@ -356,9 +474,10 @@ static esp_err_t h_capture(httpd_req_t *req)
                  (int)hr_capture_ready(), (unsigned)hr_capture_size(),
                  h ? "ok" : "FAILED");
         if (h != NULL) {
-            static char buf[1024];
+            char *buf = s_scratch.bytes;
+            const size_t bufsz = sizeof(s_scratch.bytes);
             int n;
-            int first = hr_capture_read(h, buf, sizeof(buf));
+            int first = hr_capture_read(h, buf, bufsz);
             if (first <= 0) {
                 /*
                  * stat() said there were bytes and the file opened, yet it
@@ -378,7 +497,7 @@ static esp_err_t h_capture(httpd_req_t *req)
                 hr_capture_close(h);
                 return ESP_FAIL;
             }
-            while ((n = hr_capture_read(h, buf, sizeof(buf))) > 0) {
+            while ((n = hr_capture_read(h, buf, bufsz)) > 0) {
                 if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
                     hr_capture_close(h);
                     return ESP_FAIL;
@@ -409,7 +528,7 @@ ram_fallback:;
         httpd_resp_send_chunk(req, k_warn, sizeof(k_warn) - 1);
     }
 
-    static hr_hist_entry_t out[HR_HIST_CAP];
+    hr_hist_entry_t *out = s_scratch.hist;
     int n;
     LOCK();
     n = hr_history_since(s_history, 0, out, HR_HIST_CAP);
@@ -449,6 +568,9 @@ static esp_err_t h_capture_info(httpd_req_t *req)
 /* POST /api/capture/clear -> erase the persistent log */
 static esp_err_t h_capture_clear(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_capture_clear();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
                      ok ? 11 : 12);
@@ -463,6 +585,91 @@ static esp_err_t h_capture_clear(httpd_req_t *req)
  * protocol exposes no cycle control at all), and the dryer already handles
  * detach/attach - that is exactly what it sees whenever we reboot for an OTA.
  */
+/* -------------------------------------------------------------------- */
+/* GET /api/enc -> the last encoded frames (6.0.644170 transport)         */
+/* -------------------------------------------------------------------- */
+/*
+ * Read-only view of the ring main.c fills from the USB task:
+ *
+ *   {"frames":N,"bytes":B,"bad":X,"last_len":L,"last_age_ms":A,"held":K,
+ *    "items":[{"ms":123456,"len":80,"raw":")S$3..."},...]}
+ *
+ * `frames`/`bytes`/`bad` are the stream's lifetime counters (same as
+ * /api/state), `held` is how many frames the ring has, oldest first in
+ * `items`. `raw` is the frame exactly as received, header included; `trunc`
+ * appears (true) only if the ring kept fewer bytes than `len` - the capture
+ * log always has the whole frame. Nothing here decodes anything.
+ *
+ * Snapshot under the lock, stream outside it - the same shape as h_verbs(),
+ * for the same reason: a stuck client must never hold the USB task.
+ */
+static esp_err_t h_enc(httpd_req_t *req)
+{
+    if (s_encring == NULL || s_session == NULL) {
+        const char *empty = "{\"frames\":0,\"bytes\":0,\"bad\":0,"
+                            "\"last_len\":0,\"last_age_ms\":-1,\"held\":0,"
+                            "\"items\":[]}";
+        return send_json(req, empty, strlen(empty));
+    }
+
+    hr_encring_t *snap = &s_scratch.enc;
+    unsigned long frames, bytes, bad, last_ms;
+    unsigned last_len;
+    LOCK();
+    *snap = *s_encring;
+    frames = s_session->stream.enc_frames;
+    bytes = s_session->stream.enc_bytes;
+    bad = s_session->stream.enc_bad;
+    last_ms = s_session->last_enc_ms;
+    last_len = (unsigned)s_session->last_enc_len;
+    UNLOCK();
+
+    long age_ms = -1;
+    if (frames > 0) {
+        age_ms = (long)((unsigned long)(esp_timer_get_time() / 1000) - last_ms);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char head[192];
+    int n = snprintf(head, sizeof(head),
+                     "{\"frames\":%lu,\"bytes\":%lu,\"bad\":%lu,"
+                     "\"last_len\":%u,\"last_age_ms\":%ld,\"held\":%u,"
+                     "\"items\":[",
+                     frames, bytes, bad, last_len, age_ms,
+                     hr_encring_count(snap));
+    if (n < 0 || (size_t)n >= sizeof(head) ||
+        httpd_resp_send_chunk(req, head, n) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    unsigned held = hr_encring_count(snap);
+    for (unsigned i = 0; i < held; i++) {
+        hr_enc_rec_t rec;
+        if (!hr_encring_get(snap, i, &rec)) {
+            break;
+        }
+        /* Worst case every byte escapes to \uXXXX (6x) - the alphabet is
+         * printable so in practice only backslash and quote ever do. */
+        char raw[HR_ENCRING_RAW * 6 + 8];
+        hr_json_escape(rec.raw, raw, sizeof(raw));
+        char obj[sizeof(raw) + 80];
+        int w = snprintf(obj, sizeof(obj),
+                         "%s{\"ms\":%" PRIu32 ",\"len\":%u,%s\"raw\":\"%s\"}",
+                         i ? "," : "", rec.t_ms, (unsigned)rec.len,
+                         rec.kept < rec.len ? "\"trunc\":true," : "", raw);
+        if (w < 0 || (size_t)w >= sizeof(obj)) {
+            continue;
+        }
+        if (httpd_resp_send_chunk(req, obj, w) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    httpd_resp_sendstr_chunk(req, "]}");
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
 /* -------------------------------------------------------------------- */
 /* GET /api/trend -> the 30s temperature/pressure series                 */
 /* -------------------------------------------------------------------- */
@@ -584,6 +791,9 @@ static esp_err_t h_trend(httpd_req_t *req)
 
 static esp_err_t h_usb_reattach(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_usb_bus_reattach();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}",
                      ok ? 11 : 12);
@@ -625,28 +835,71 @@ static esp_err_t h_scan(httpd_req_t *req)
     return send_json(req, json, n);
 }
 
-static esp_err_t h_wifi_post(httpd_req_t *req)
+/*
+ * Reads a small form body whole, or fails. `cap` must cover the largest legal
+ * body: the previous version silently clipped the body to its buffer and
+ * ignored ESP_ERR_HTTPD_RESULT_TRUNC from httpd_query_key_value(), so a
+ * 63-character passphrase with a few percent-encoded characters was saved
+ * truncated and the adapter sat at "connecting…" for good.
+ */
+static int read_form(httpd_req_t *req, char *buf, size_t cap)
 {
-    char buf[160];
-    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
-                                                        : (int)sizeof(buf) - 1;
+    int total = req->content_len;
+    if (total < 0 || total >= (int)cap) {
+        return -1;
+    }
     int got = 0;
     while (got < total) {
         int r = httpd_req_recv(req, buf + got, total - got);
         if (r <= 0) {
-            return httpd_resp_send_500(req);
+            return -1;
         }
         got += r;
     }
     buf[got] = '\0';
+    return got;
+}
 
-    char ssid[64] = {0}, pw[96] = {0};
-    httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
-    httpd_query_key_value(buf, "password", pw, sizeof(pw));
-    /* httpd_query_key_value does NOT percent-decode; do it ourselves so
-     * passwords with %-escaped characters (!, @, #, &, =, spaces) work. */
-    hr_url_decode(ssid);
-    hr_url_decode(pw);
+/* A form field, or false if it is longer than `cap` allows (never clipped). */
+static bool form_field(const char *body, const char *key, char *out,
+                       size_t cap)
+{
+    esp_err_t e = httpd_query_key_value(body, key, out, cap);
+    if (e == ESP_ERR_NOT_FOUND) {
+        out[0] = '\0';
+        return true;
+    }
+    if (e != ESP_OK) {
+        out[0] = '\0';
+        return false; /* ESP_ERR_HTTPD_RESULT_TRUNC or worse */
+    }
+    hr_url_decode(out);
+    return true;
+}
+
+static esp_err_t h_wifi_post(httpd_req_t *req)
+{
+    /* SSID 32 bytes and passphrase 64, each up to 3x when percent-encoded,
+     * plus keys and a PIN. */
+    char buf[400];
+    if (read_form(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
+    }
+
+    /* Pointing the adapter at another network is a takeover primitive, so it
+     * sits behind the same PIN as the control endpoints. */
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
+    char ssid[33 * 3 + 1] = {0}, pw[64 * 3 + 1] = {0};
+    if (!form_field(buf, "ssid", ssid, sizeof(ssid)) ||
+        !form_field(buf, "password", pw, sizeof(pw))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"value too long\"}");
+    }
 
     if (!hr_wifi_set_credentials(ssid, pw)) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -657,6 +910,9 @@ static esp_err_t h_wifi_post(httpd_req_t *req)
 
 static esp_err_t h_forget(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     hr_wifi_forget();
     return send_json(req, "{\"ok\":true}", 11);
 }
@@ -772,6 +1028,16 @@ static esp_err_t h_cmd(httpd_req_t *req)
         httpd_resp_set_status(req, "403 Forbidden");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"not allowed\"}");
     }
+    /*
+     * CONFIG verbs change the dryer's settings, clock and names. Settings says
+     * nothing changes the machine until control is switched on; make that true
+     * here as well, not only for /api/control. SAFE verbs are reads.
+     */
+    if (cls == HR_CMD_CONFIG && !ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
 
     /* send_config carries the args and re-checks the class itself, so the
      * allow-list stays enforced in the tested core rather than here. */
@@ -789,21 +1055,23 @@ static esp_err_t h_cmd(httpd_req_t *req)
  * next boot partition and reboots. Lets you update over WiFi without
  * unplugging the board from the dryer.
  *
- * Reboot is deferred slightly so the HTTP 200 reaches the browser first.
+ * The restart is deferred slightly so the HTTP 200 reaches the browser first,
+ * and goes through hr_reboot_request() so the capture filesystem is quiesced
+ * and unmounted before esp_restart() - see hr_capture_shutdown() for what an
+ * unclean unmount, and an unmount under a busy writer, each did.
  */
-static void ota_reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    /* Unmount before restarting. An OTA reboot that leaves SPIFFS mounted has
-     * been corrupting the capture log - see hr_capture_shutdown(). */
-    hr_capture_shutdown();
-    ESP_LOGW(TAG, "rebooting into new firmware");
-    esp_restart();
-}
-
 static esp_err_t h_ota(httpd_req_t *req)
 {
+    /*
+     * Firmware replacement is the one action that can undo every other
+     * safeguard in this file - a hostile image is free to send DUTY/HCS/SPC.
+     * The README has always said the PIN gates updates; now it does. The body
+     * is the raw image, so the PIN arrives in the X-HR-Pin header.
+     */
+    if (!pin_guard(req, NULL)) {
+        return ESP_OK;
+    }
+
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (target == NULL) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -825,6 +1093,18 @@ static esp_err_t h_ota(httpd_req_t *req)
     int written = 0;
     int stalls = 0;
     bool checked = false;
+    /*
+     * The first bytes of an ESP image are the image header (24 bytes), the
+     * first segment header (8 bytes) and then esp_app_desc_t - the same
+     * structure esp_app_get_description() returns for the running build. The
+     * head of the upload is accumulated here until that much has arrived, so
+     * the project name can be compared before the image is accepted. A
+     * random ESP32 binary starts with 0xE9 too; the name is what tells
+     * "another build of this firmware" from "some other project".
+     */
+    uint8_t head[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) +
+                 sizeof(esp_app_desc_t)];
+    size_t head_len = 0;
     while (remaining > 0) {
         int r = httpd_req_recv(req, buf, remaining < (int)sizeof(buf)
                                               ? remaining
@@ -866,6 +1146,33 @@ static esp_err_t h_ota(httpd_req_t *req)
                     req, "{\"ok\":false,\"reason\":\"not a firmware image\"}");
             }
         }
+        if (head_len < sizeof(head)) {
+            size_t take = sizeof(head) - head_len;
+            if ((size_t)r < take) {
+                take = (size_t)r;
+            }
+            memcpy(head + head_len, buf, take);
+            head_len += take;
+            if (head_len == sizeof(head)) {
+                const esp_app_desc_t *incoming =
+                    (const esp_app_desc_t *)(head + sizeof(esp_image_header_t) +
+                                             sizeof(esp_image_segment_header_t));
+                const esp_app_desc_t *running = esp_app_get_description();
+                if (incoming->magic_word != ESP_APP_DESC_MAGIC_WORD ||
+                    strncmp(incoming->project_name, running->project_name,
+                            sizeof(incoming->project_name)) != 0) {
+                    esp_ota_abort(ota);
+                    ESP_LOGE(TAG, "OTA image is not this project (magic 0x%08lx, "
+                                  "name \"%.32s\")",
+                             (unsigned long)incoming->magic_word,
+                             incoming->project_name);
+                    httpd_resp_set_status(req, "400 Bad Request");
+                    return httpd_resp_sendstr(
+                        req, "{\"ok\":false,\"reason\":\"image is not this "
+                             "project\"}");
+                }
+            }
+        }
         err = esp_ota_write(ota, buf, r);
         if (err != ESP_OK) {
             esp_ota_abort(ota);
@@ -878,6 +1185,14 @@ static esp_err_t h_ota(httpd_req_t *req)
         remaining -= r;
     }
     ESP_LOGI(TAG, "OTA received %d bytes, verifying image", written);
+
+    if (head_len < sizeof(head)) {
+        /* Too short to even carry an app descriptor - not a firmware image. */
+        esp_ota_abort(ota);
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"image too short\"}");
+    }
 
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
@@ -895,7 +1210,7 @@ static esp_err_t h_ota(httpd_req_t *req)
 
     ESP_LOGI(TAG, "OTA complete, will boot %s", target->label);
     send_json(req, "{\"ok\":true}", 11);
-    xTaskCreate(ota_reboot_task, "ota_reboot", 3072, NULL, 5, NULL);
+    hr_reboot_request("new firmware installed", 1200);
     return ESP_OK;
 }
 
@@ -965,6 +1280,10 @@ static esp_err_t h_wififlags(httpd_req_t *req)
     }
     buf[got] = '\0';
 
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
     char reg[4] = {0}, cld[4] = {0};
     httpd_query_key_value(buf, "registered", reg, sizeof(reg));
     httpd_query_key_value(buf, "cloud", cld, sizeof(cld));
@@ -979,6 +1298,58 @@ static esp_err_t h_wififlags(httpd_req_t *req)
     int n = snprintf(out, sizeof(out),
                      "{\"ok\":true,\"registered\":%d,\"cloud\":%d}",
                      (int)registered, (int)cloud);
+    return send_json(req, out, (size_t)n);
+}
+
+/*
+ * GET  /api/compat                 -> {"compat644170":bool}
+ * POST /api/compat  compat644170=0|1
+ *
+ * The 6.0.644170 handshake variant (hr_session_set_compat): "UNIQUE lH" and
+ * the genuine adapter's re-ask cadence. Persisted in NVS; the main loop applies
+ * it and re-introduces the adapter to the dryer, so an A/B test on a live
+ * machine is one POST followed by a look at /api/capture for SNM / CFG / STAT.
+ */
+static esp_err_t h_compat_get(httpd_req_t *req)
+{
+    char out[48];
+    int n = snprintf(out, sizeof(out), "{\"compat644170\":%s}",
+                     hr_compat_644170() ? "true" : "false");
+    return send_json(req, out, (size_t)n);
+}
+
+static esp_err_t h_compat_post(httpd_req_t *req)
+{
+    char buf[64];
+    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
+                                                        : (int)sizeof(buf) - 1;
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
+    char v[4] = {0};
+    if (httpd_query_key_value(buf, "compat644170", v, sizeof(v)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"compat644170=0|1 required\"}");
+    }
+    bool on = (v[0] == '1');
+    bool stored = hr_compat_set_644170(on);
+
+    char out[80];
+    int n = snprintf(out, sizeof(out),
+                     "{\"ok\":true,\"compat644170\":%s,\"stored\":%s}",
+                     on ? "true" : "false", stored ? "true" : "false");
     return send_json(req, out, (size_t)n);
 }
 
@@ -1001,6 +1372,13 @@ static esp_err_t h_wififlags(httpd_req_t *req)
  */
 static esp_err_t h_dryer_reboot(httpd_req_t *req)
 {
+    /* Rebooting the dryer mid-batch is about as state-changing as it gets;
+     * it was the one control route that skipped the control switch. */
+    if (!ctrl_enabled()) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"control is disabled in settings\"}");
+    }
     char buf[96];
     int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
                                                         : (int)sizeof(buf) - 1;
@@ -1046,27 +1424,33 @@ static esp_err_t h_mqtt_get(httpd_req_t *req)
 /* POST /api/mqtt  body: host=..&port=..&user=..&password=.. */
 static esp_err_t h_mqtt_post(httpd_req_t *req)
 {
-    char buf[320];
-    int total = req->content_len < (int)sizeof(buf) - 1 ? req->content_len
-                                                        : (int)sizeof(buf) - 1;
-    int got = 0;
-    while (got < total) {
-        int r = httpd_req_recv(req, buf + got, total - got);
-        if (r <= 0) {
-            return httpd_resp_send_500(req);
-        }
-        got += r;
+    char buf[640];
+    if (read_form(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
     }
-    buf[got] = '\0';
 
-    char host[80] = {0}, ports[8] = {0}, user[64] = {0}, pass[96] = {0};
-    httpd_query_key_value(buf, "host", host, sizeof(host));
-    httpd_query_key_value(buf, "port", ports, sizeof(ports));
-    httpd_query_key_value(buf, "user", user, sizeof(user));
-    httpd_query_key_value(buf, "password", pass, sizeof(pass));
-    hr_url_decode(host);
-    hr_url_decode(user);
-    hr_url_decode(pass);
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+
+    /* Sized to what hr_mqtt stores (host 64, user 64, pass 96) times the
+     * percent-encoding expansion, so a legal value is never clipped. */
+    char host[64 * 3] = {0}, ports[8] = {0}, user[64 * 3] = {0},
+         pass[96 * 3] = {0};
+    if (!form_field(buf, "host", host, sizeof(host)) ||
+        !form_field(buf, "port", ports, sizeof(ports)) ||
+        !form_field(buf, "user", user, sizeof(user)) ||
+        !form_field(buf, "password", pass, sizeof(pass))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"value too long\"}");
+    }
+    if (strlen(host) >= 64 || strlen(user) >= 64 || strlen(pass) >= 96) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+                                  "{\"ok\":false,\"reason\":\"value too long\"}");
+    }
     int port = ports[0] ? atoi(ports) : 1883;
 
     if (!hr_mqtt_set_broker(host, port, user, pass)) {
@@ -1138,6 +1522,11 @@ static bool ctrl_enabled(void)
     return v != 0;
 }
 
+bool hr_http_control_enabled(void)
+{
+    return ctrl_enabled();
+}
+
 static bool ctrl_set_enabled(bool on)
 {
     nvs_handle_t nh;
@@ -1154,26 +1543,85 @@ static bool ctrl_set_enabled(bool on)
  * Next counter value, persisted so it does not restart after a reboot and
  * collide with values the dryer has already seen this power cycle.
  */
+/*
+ * Returns 0 if the counter could not be persisted. Callers must then refuse
+ * to send: the dryer treats a repeated counter as a retry of the previous
+ * press and ignores it, so a counter that silently restarted at HR_SEQ_START
+ * on every call (the old behaviour when nvs_open failed) made every CLICK
+ * after the first a no-op while the API kept answering ok:true.
+ */
 static uint32_t ctrl_next_seq(void)
 {
     nvs_handle_t nh;
     uint32_t seq = HR_SEQ_START;
-    if (nvs_open(CTRL_NVS_NS, NVS_READWRITE, &nh) == ESP_OK) {
-        if (nvs_get_u32(nh, "seq", &seq) != ESP_OK) {
-            seq = HR_SEQ_START;
-        }
-        seq++;
-        nvs_set_u32(nh, "seq", seq);
-        nvs_commit(nh);
-        nvs_close(nh);
+    esp_err_t err = nvs_open(CTRL_NVS_NS, NVS_READWRITE, &nh);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "click counter: nvs_open %s", esp_err_to_name(err));
+        return 0;
+    }
+    if (nvs_get_u32(nh, "seq", &seq) != ESP_OK) {
+        seq = HR_SEQ_START;
+    }
+    seq++;
+    err = nvs_set_u32(nh, "seq", seq);
+    if (err == ESP_OK) {
+        err = nvs_commit(nh);
+    }
+    nvs_close(nh);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "click counter: could not persist %lu: %s",
+                 (unsigned long)seq, esp_err_to_name(err));
+        return 0;
     }
     return seq;
 }
 
-/* The screen currently on the panel, or -1 when we genuinely do not know. */
+static esp_err_t refuse_no_counter(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    return httpd_resp_sendstr(
+        req, "{\"ok\":false,\"reason\":\"could not persist the command "
+             "counter (NVS)\"}");
+}
+
+/*
+ * The screen currently on the panel, or -1 when we genuinely do not know.
+ *
+ * "Know" means: a STAT has been decoded, the protocol link is up, the host has
+ * us enumerated, and the STAT is recent. s_tel_valid alone is not enough - it
+ * is set by the first STAT ever and never cleared, so after the dryer rebooted
+ * or an hour of silence a CLICK was still built against the screen last seen.
+ * Call under LOCK(); s_session->link is read here.
+ */
 static int live_screen(void)
 {
-    return s_tel_valid ? (int)s_tel.type : -1;
+    if (!s_tel_valid) {
+        return -1;
+    }
+    if (s_session == NULL || s_session->link != HR_LINK_UP) {
+        return -1;
+    }
+    if (!hr_usb_mounted()) {
+        return -1;
+    }
+    uint32_t age = (uint32_t)(esp_timer_get_time() / 1000) - s_tel_ms;
+    if (age > HR_LINK_TIMEOUT_MS) {
+        return -1;
+    }
+    return (int)s_tel.type;
+}
+
+/*
+ * Screens from which a recipe frame may carry the start flag. Ready (1) is
+ * where the genuine app is used; the recipe editors (31 Custom, 43 Candy) are
+ * where the setup panel seeds itself from. A run in progress (17, 2, 4-7),
+ * diagnostics, or no live telemetry at all are refused: the effect of a
+ * "start now" recipe on a machine already running is undocumented, and
+ * without a live screen we cannot tell which case we are in.
+ */
+static bool recipe_start_allowed(int live)
+{
+    return live == 1 || live == 31 || live == 43;
 }
 
 /*
@@ -1245,6 +1693,9 @@ static esp_err_t h_control(httpd_req_t *req)
     /* One counter per press. Taken once - calling ctrl_next_seq() twice would
      * burn a value and, worse, send a different number than we logged. */
     uint32_t seq = ctrl_next_seq();
+    if (seq == 0) {
+        return refuse_no_counter(req);
+    }
 
     LOCK();
     hr_builder_t b;
@@ -1285,6 +1736,10 @@ static esp_err_t h_control_enable(httpd_req_t *req)
         got += r;
     }
     buf[got] = '\0';
+    /* Switching control on is itself a control action. */
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
     char on_s[8] = {0};
     httpd_query_key_value(buf, "on", on_s, sizeof(on_s));
     bool on = (on_s[0] == '1');
@@ -1298,7 +1753,7 @@ static esp_err_t h_control_enable(httpd_req_t *req)
 /* Recipes                                                               */
 /* -------------------------------------------------------------------- */
 #define RCP_NVS_NS "hrrcp"
-#define RCP_SLOTS  8
+/* RCP_SLOTS is defined with s_scratch near the top of the file. */
 
 static bool rcp_load(int slot, hr_recipe_t *out)
 {
@@ -1359,41 +1814,73 @@ static int read_body(httpd_req_t *req, char *buf, size_t cap)
 }
 
 /* GET /api/recipes */
+/*
+ * One slot serialises to at most ~650 bytes (escaped 191-byte notes, ten
+ * numbers). Each slot is rendered into its own buffer first and appended only
+ * if it fits whole, so the static body can never be overrun. The earlier
+ * version added snprintf's return value unchecked and tested the size *after*
+ * writing a slot; a slot begun near the end of the buffer wrote past it and
+ * send_json() then shipped the following .bss to the client.
+ */
 static esp_err_t h_recipes(httpd_req_t *req)
 {
-    static char body[2048];
+    char *body = s_scratch.recipes;
+    const size_t bodysz = sizeof(s_scratch.recipes);
     size_t at = 0;
-    at += (size_t)snprintf(body + at, sizeof(body) - at,
-                           "{\"extra_dry_s\":%ld,\"slots\":[",
-                           (long)hr_dry_extra_s(&s_dry));
+    int w = snprintf(body, bodysz, "{\"extra_dry_s\":%ld,\"slots\":[",
+                     (long)hr_dry_extra_s(&s_dry));
+    if (w < 0 || (size_t)w >= bodysz) {
+        return httpd_resp_send_500(req);
+    }
+    at = (size_t)w;
     bool first = true;
     for (int i = 0; i < RCP_SLOTS; i++) {
         hr_recipe_t r;
         if (!rcp_load(i, &r)) {
             continue;
         }
-        char nm[64], nt[400];
+        char nm[HR_RECIPE_NAME_MAX * 2 + 2], nt[HR_RECIPE_NOTES_MAX * 2 + 2];
         hr_json_escape(r.name, nm, sizeof(nm));
         hr_json_escape(r.notes, nt, sizeof(nt));
-        at += (size_t)snprintf(body + at, sizeof(body) - at,
-                               "%s{\"slot\":%d,\"family\":%d,\"name\":\"%s\","
-                               "\"notes\":\"%s\",\"runs\":%lu,\"nnum\":%u,"
-                               "\"suggest_dry_s\":%ld,\"num\":[",
-                               first ? "" : ",", i, (int)r.family, nm, nt,
-                               (unsigned long)r.runs, (unsigned)r.nnum,
-                               (long)hr_recipe_suggested_dry_s(&r, &s_dry));
-        for (uint8_t k = 0; k < r.nnum && at < sizeof(body) - 16; k++) {
-            at += (size_t)snprintf(body + at, sizeof(body) - at, "%s%ld",
-                                   k ? "," : "", (long)r.num[k]);
+        char slot[700];
+        int n = snprintf(slot, sizeof(slot),
+                         "%s{\"slot\":%d,\"family\":%d,\"name\":\"%s\","
+                         "\"notes\":\"%s\",\"runs\":%lu,\"nnum\":%u,"
+                         "\"suggest_dry_s\":%ld,\"num\":[",
+                         first ? "" : ",", i, (int)r.family, nm, nt,
+                         (unsigned long)r.runs, (unsigned)r.nnum,
+                         (long)hr_recipe_suggested_dry_s(&r, &s_dry));
+        if (n < 0 || (size_t)n >= sizeof(slot)) {
+            continue;
         }
-        at += (size_t)snprintf(body + at, sizeof(body) - at, "]}");
-        first = false;
-        if (at > sizeof(body) - 320) {
+        bool fits = true;
+        for (uint8_t k = 0; k < r.nnum && k < HR_RECIPE_MAX_NUM; k++) {
+            int m = snprintf(slot + n, sizeof(slot) - (size_t)n, "%s%ld",
+                             k ? "," : "", (long)r.num[k]);
+            if (m < 0 || (size_t)m >= sizeof(slot) - (size_t)n) {
+                fits = false;
+                break;
+            }
+            n += m;
+        }
+        if (!fits || (size_t)n + 2 >= sizeof(slot)) {
+            continue;
+        }
+        slot[n++] = ']';
+        slot[n++] = '}';
+        slot[n] = '\0';
+        /* Reserve the closing "]}" and the NUL. */
+        if (at + (size_t)n + 3 > bodysz) {
             break;
         }
+        memcpy(body + at, slot, (size_t)n);
+        at += (size_t)n;
+        first = false;
     }
-    at += (size_t)snprintf(body + at, sizeof(body) - at, "]}");
-    return send_json(req, body, (int)at);
+    body[at++] = ']';
+    body[at++] = '}';
+    body[at] = '\0';
+    return send_json(req, body, at);
 }
 
 /* POST /api/recipes/save   slot,family,name,notes,num=csv */
@@ -1403,6 +1890,9 @@ static esp_err_t h_recipe_save(httpd_req_t *req)
     if (read_body(req, buf, sizeof(buf)) < 0) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"bad body\"}");
+    }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
     }
     char slot_s[8] = {0}, fam_s[8] = {0}, nums[256] = {0};
     hr_recipe_t r;
@@ -1460,6 +1950,9 @@ static esp_err_t h_recipe_delete(httpd_req_t *req)
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false}");
     }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
     char slot_s[8] = {0};
     httpd_query_key_value(buf, "slot", slot_s, sizeof(slot_s));
     bool ok = rcp_store(atoi(slot_s), NULL);
@@ -1505,6 +1998,23 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
             req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
     }
 
+    LOCK();
+    int live = live_screen();
+    UNLOCK();
+    if (live < 0) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"no live telemetry from the dryer\"}");
+    }
+    if (start && !recipe_start_allowed(live)) {
+        char body[128];
+        int n = snprintf(body, sizeof(body),
+                         "{\"ok\":false,\"reason\":\"dryer is not on the Ready "
+                         "screen\",\"live_screen\":%d}", live);
+        httpd_resp_set_status(req, "409 Conflict");
+        return send_json(req, body, n);
+    }
+
     hr_recipe_t r;
     if (!rcp_load(atoi(slot_s), &r)) {
         httpd_resp_set_status(req, "404 Not Found");
@@ -1513,6 +2023,9 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
 
     char frame[320];
     uint32_t seq = ctrl_next_seq();
+    if (seq == 0) {
+        return refuse_no_counter(req);
+    }
     if (hr_recipe_build(&r, start, seq, frame, sizeof(frame)) == 0) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(
@@ -1527,8 +2040,10 @@ static esp_err_t h_recipe_send(httpd_req_t *req)
     LOCK();
     bool ok = hr_session_send_raw(s_session, frame);
     UNLOCK();
-    ESP_LOGW(TAG, "recipe %s sent%s: %s", r.name, start ? " WITH START" : "",
-             ok ? "ok" : "failed");
+    /* The full frame and the live screen, so a capture can be matched to
+     * what the machine did next. */
+    ESP_LOGW(TAG, "recipe %s sent%s (live screen %d): %s -> %s", r.name,
+             start ? " WITH START" : "", live, frame, ok ? "ok" : "failed");
 
     char out[160];
     int n = snprintf(out, sizeof(out),
@@ -1584,6 +2099,23 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
             req, "{\"ok\":false,\"reason\":\"confirmation required\"}");
     }
 
+    LOCK();
+    int live = live_screen();
+    UNLOCK();
+    if (live < 0) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"no live telemetry from the dryer\"}");
+    }
+    if (start && !recipe_start_allowed(live)) {
+        char out[128];
+        int n = snprintf(out, sizeof(out),
+                         "{\"ok\":false,\"reason\":\"dryer is not on the Ready "
+                         "screen\",\"live_screen\":%d}", live);
+        httpd_resp_set_status(req, "409 Conflict");
+        return send_json(req, out, n);
+    }
+
     r.family = (hr_family_t)atoi(fam_s);
     r.used = true;
     char *p = nums;
@@ -1608,15 +2140,19 @@ static esp_err_t h_recipe_apply(httpd_req_t *req)
     }
 
     char frame[320];
-    if (hr_recipe_build(&r, start, ctrl_next_seq(), frame, sizeof(frame)) == 0) {
+    uint32_t seq = ctrl_next_seq();
+    if (seq == 0) {
+        return refuse_no_counter(req);
+    }
+    if (hr_recipe_build(&r, start, seq, frame, sizeof(frame)) == 0) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"build failed\"}");
     }
     LOCK();
     bool ok = hr_session_send_raw(s_session, frame);
     UNLOCK();
-    ESP_LOGW(TAG, "recipe applied %s%s: %s", r.name,
-             start ? " WITH START" : "", ok ? "ok" : "failed");
+    ESP_LOGW(TAG, "recipe applied %s%s (live screen %d): %s -> %s", r.name,
+             start ? " WITH START" : "", live, frame, ok ? "ok" : "failed");
 
     char out[160];
     int n = snprintf(out, sizeof(out),
@@ -1695,10 +2231,27 @@ static pin_result_t pin_check(const char *supplied)
     if (!pin_is_set(want, sizeof(want))) {
         return PIN_OK;              /* no PIN configured: nothing to enforce */
     }
-    if (s_pin_locked_until != 0 && ms_now() < s_pin_locked_until) {
-        return PIN_LOCKED;
+    /*
+     * Signed difference so the comparison survives the 32-bit millisecond
+     * wrap at 49.7 days of uptime; `now < until` there either ends the lock
+     * early or extends it for another 49 days.
+     */
+    if (s_pin_locked_until != 0) {
+        if ((int32_t)(ms_now() - s_pin_locked_until) < 0) {
+            return PIN_LOCKED;
+        }
+        s_pin_locked_until = 0; /* lock expired: start counting afresh */
+        s_pin_fails = 0;
     }
-    if (supplied != NULL && supplied[0] && pin_equal(supplied, want)) {
+    if (supplied == NULL || supplied[0] == '\0') {
+        /*
+         * No PIN offered at all. The web UI's first request in a session is
+         * exactly this - it asks for the PIN only after being told one is
+         * needed - so it must not spend one of the five attempts.
+         */
+        return PIN_WRONG;
+    }
+    if (pin_equal(supplied, want)) {
         s_pin_fails = 0;
         return PIN_OK;
     }
@@ -1720,12 +2273,19 @@ static pin_result_t pin_check(const char *supplied)
 /*
  * Guard for a control endpoint. Returns true when the request may proceed;
  * otherwise it has already sent the refusal.
+ *
+ * The PIN is read from the form body (pin=...) or, for requests whose body is
+ * not a form - the OTA upload is a raw binary - from an X-HR-Pin header.
  */
 static bool pin_guard(httpd_req_t *req, const char *body)
 {
     char supplied[PIN_MAX + 1] = {0};
     if (body != NULL) {
         httpd_query_key_value(body, "pin", supplied, sizeof(supplied));
+    }
+    if (supplied[0] == '\0') {
+        httpd_req_get_hdr_value_str(req, "X-HR-Pin", supplied,
+                                    sizeof(supplied));
     }
     switch (pin_check(supplied)) {
     case PIN_OK:
@@ -1742,6 +2302,29 @@ static bool pin_guard(httpd_req_t *req, const char *body)
             "{\"ok\":false,\"reason\":\"PIN required\",\"pin\":true}");
         return false;
     }
+}
+
+/*
+ * pin_guard() for handlers that carry no form fields of their own (forget,
+ * clear, format, reattach). Reads whatever small body the client sent so the
+ * PIN can travel in it, then applies the same check.
+ */
+static bool pin_guard_small(httpd_req_t *req)
+{
+    char buf[64] = {0};
+    int total = req->content_len;
+    if (total > 0 && total < (int)sizeof(buf)) {
+        int got = 0;
+        while (got < total) {
+            int r = httpd_req_recv(req, buf + got, total - got);
+            if (r <= 0) {
+                break;
+            }
+            got += r;
+        }
+        buf[got > 0 ? got : 0] = '\0';
+    }
+    return pin_guard(req, buf);
 }
 
 /* GET /api/pin -> whether one is set. Never returns the PIN itself. */
@@ -1849,9 +2432,9 @@ static esp_err_t h_batches_csv(httpd_req_t *req)
     if (h == NULL) {
         return httpd_resp_sendstr(req, "");
     }
-    static char buf[512];
+    char *buf = s_scratch.bytes;
     int n;
-    while ((n = hr_batchstore_read(h, buf, sizeof(buf))) > 0) {
+    while ((n = hr_batchstore_read(h, buf, sizeof(s_scratch.bytes))) > 0) {
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) {
             hr_batchstore_close(h);
             return ESP_FAIL;
@@ -1867,12 +2450,11 @@ static esp_err_t h_batches_csv(httpd_req_t *req)
  * Streamed a record at a time. With no PSRAM there is no holding a thousand
  * batches in memory to sort them, so the file is read once into a bounded
  * ring of the most recent entries and only those are rendered.
+ * BATCH_SHOW is defined with s_scratch near the top of the file.
  */
-#define BATCH_SHOW 40
-
 static esp_err_t h_batches(httpd_req_t *req)
 {
-    static hr_batch_t ring[BATCH_SHOW];
+    hr_batch_t *ring = s_scratch.batches;
     size_t have = 0, next = 0;
 
     void *h = hr_batchstore_open();
@@ -1970,6 +2552,9 @@ static esp_err_t h_batches(httpd_req_t *req)
  */
 static esp_err_t h_storage_format(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_capture_format();
     if (ok) {
         hr_batchstore_init();
@@ -1982,6 +2567,9 @@ static esp_err_t h_storage_format(httpd_req_t *req)
 /* POST /api/batches/clear */
 static esp_err_t h_batches_clear(httpd_req_t *req)
 {
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
     bool ok = hr_batchstore_clear();
     return send_json(req, ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
 }
@@ -2002,10 +2590,71 @@ static esp_err_t h_batches_clear(httpd_req_t *req)
  */
 static int s_routes;
 
+/*
+ * Cross-site request forgery.
+ *
+ * Every POST here is a "simple request" in browser terms - form body, no
+ * custom header - so a page in another tab can fetch("http://<adapter>/api/…",
+ * {method:"POST", body}) without a CORS preflight, and the browser sends it.
+ * With no PIN configured that is the whole control surface, driven from any
+ * website the owner's phone happens to open on the same LAN.
+ *
+ * Browsers attach an Origin header to every cross-origin POST (and modern ones
+ * to same-origin POSTs as well). If it is present it has to name this host; if
+ * the client is a script with no Origin at all - curl, Home Assistant - it is
+ * not a browser and CSRF does not apply. Only the host part is compared, so
+ * reaching the adapter by IP or by a DHCP hostname both work, and the port is
+ * whatever the browser put in both headers.
+ */
+static bool same_origin(httpd_req_t *req)
+{
+    char origin[128];
+    if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) !=
+        ESP_OK) {
+        return true; /* no Origin header: not a browser cross-site POST */
+    }
+    if (strcmp(origin, "null") == 0) {
+        return false; /* sandboxed / file:// page */
+    }
+    char host[96];
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+        return false;
+    }
+    const char *p = strstr(origin, "://");
+    if (p == NULL) {
+        return false;
+    }
+    p += 3;
+    return strcmp(p, host) == 0;
+}
+
+typedef esp_err_t (*route_fn_t)(httpd_req_t *);
+static route_fn_t s_post_fns[40];
+static int s_post_count;
+
+static esp_err_t h_post_guarded(httpd_req_t *req)
+{
+    route_fn_t fn = *(route_fn_t *)req->user_ctx;
+    if (!same_origin(req)) {
+        ESP_LOGW(TAG, "refused cross-origin POST to %s", req->uri);
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(
+            req, "{\"ok\":false,\"reason\":\"cross-origin request refused\"}");
+    }
+    return fn(req);
+}
+
 static void reg(const char *uri, httpd_method_t method,
                 esp_err_t (*fn)(httpd_req_t *))
 {
     httpd_uri_t u = {.uri = uri, .method = method, .handler = fn};
+    if (method == HTTP_POST &&
+        s_post_count < (int)(sizeof(s_post_fns) / sizeof(s_post_fns[0]))) {
+        s_post_fns[s_post_count] = fn;
+        u.handler = h_post_guarded;
+        u.user_ctx = &s_post_fns[s_post_count];
+        s_post_count++;
+    }
     esp_err_t err = httpd_register_uri_handler(s_httpd, &u);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ROUTE LOST: %s (#%d) - %s. Raise max_uri_handlers.",
@@ -2095,6 +2744,7 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/capture/clear", HTTP_POST, h_capture_clear);
     reg("/api/usb/reattach", HTTP_POST, h_usb_reattach);
     reg("/api/trend", HTTP_GET, h_trend);
+    reg("/api/enc", HTTP_GET, h_enc);
     reg("/api/scan", HTTP_GET, h_scan);
     reg("/api/wifi", HTTP_POST, h_wifi_post);
     reg("/api/forget", HTTP_POST, h_forget);
@@ -2109,6 +2759,8 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/log", HTTP_GET, h_log);
     reg("/api/log", HTTP_POST, h_log);
     reg("/api/wififlags", HTTP_POST, h_wififlags);
+    reg("/api/compat", HTTP_GET, h_compat_get);
+    reg("/api/compat", HTTP_POST, h_compat_post);
     reg("/api/dryer/reboot", HTTP_POST, h_dryer_reboot);
     reg("/img/*", HTTP_GET, h_img);
     /* Captive-portal probes (Android/Apple/Windows). */

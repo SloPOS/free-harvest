@@ -129,8 +129,57 @@ static void test_verb_diff_mask_marks_changed_fields(void)
     CHECK_INT(stat->changed_mask, (1u << 1));
 }
 
+static void test_long_frame_is_truncated_not_stale(void)
+{
+    /*
+     * A frame longer than HR_HIST_BODY used to leave the slot's body untouched
+     * - hr_frame_tostring() refused to write and its result was ignored - so
+     * /api/history showed whatever frame had occupied the slot before, under
+     * the new seq. Now the head is kept with a "..." marker and a flag.
+     */
+    TEST_CASE("long frame is truncated, not replaced by stale text");
+    hr_history_t h;
+    hr_history_init(&h);
+    add_line(&h, "STAT,1,short\r", 1);
+
+    char big[HR_MAX_FRAME];
+    int n = snprintf(big, sizeof(big), "STAT,15");
+    for (int i = 0; i < 30 && n < (int)sizeof(big) - 12; i++) {
+        n += snprintf(big + n, sizeof(big) - n, ",field%02d", i);
+    }
+    n += snprintf(big + n, sizeof(big) - n, "\r");
+    CHECK(strlen(big) > HR_HIST_BODY);
+    add_line(&h, big, 2);
+
+    hr_hist_entry_t out[4];
+    int got = hr_history_since(&h, 1, out, 4);
+    CHECK_INT(got, 1);
+    CHECK_INT(out[0].seq, 2);
+    CHECK_INT(out[0].truncated, 1);
+    CHECK(strncmp(out[0].body, "STAT,15,field00", 15) == 0);
+    CHECK_STR(out[0].body + strlen(out[0].body) - 3, "...");
+    CHECK_INT(strlen(out[0].body), HR_HIST_BODY - 1);
+
+    const hr_hist_verb_t *stat = hr_history_verb(&h, "STAT");
+    CHECK(stat != NULL);
+    CHECK_INT(stat->truncated, 1);
+    CHECK_INT(stat->changed_mask, 0); /* no diff against a truncated head */
+
+    char json[HR_HIST_BODY * 3];
+    CHECK(hr_hist_entry_json(&out[0], json, sizeof(json)) > 0);
+    CHECK(strstr(json, "\"trunc\":true") != NULL);
+
+    /* A short frame afterwards clears the flag and diffs normally again. */
+    add_line(&h, "STAT,1,short\r", 3);
+    add_line(&h, "STAT,1,other\r", 4);
+    stat = hr_history_verb(&h, "STAT");
+    CHECK_INT(stat->truncated, 0);
+    CHECK_INT(stat->changed_mask, (1u << 1));
+}
+
 int main(void)
 {
+    test_long_frame_is_truncated_not_stale();
     test_add_assigns_increasing_seq();
     test_since_returns_only_newer_entries();
     test_since_zero_returns_all_available();

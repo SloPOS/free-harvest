@@ -9,6 +9,7 @@
  *   GET  /api/history?since=N   JSON array of frames with seq > N
  *   GET  /api/verbs        JSON: per-verb latest body, count, changed mask
  *   GET  /api/capture      text/plain download of all retained frames
+ *   GET  /api/enc          JSON: the last encoded frames (6.0.644170 transport)
  *   GET  /api/scan         start a WiFi scan / return last results
  *   POST /api/wifi         set credentials  {ssid,password}  (form-encoded)
  *   POST /api/forget       clear stored credentials
@@ -19,6 +20,7 @@
 #ifndef HR_HTTP_H
 #define HR_HTTP_H
 
+#include "hr_encring.h"
 #include "hr_history.h"
 #include "hr_session.h"
 #include "hr_telemetry.h"
@@ -41,6 +43,13 @@ void hr_http_use_lock(void *mutex);
  * before hr_http_start().
  */
 void hr_http_set_trend(hr_trend_t *tr);
+
+/*
+ * Provide the ring of recent encoded frames for GET /api/enc. Owned by the
+ * app; read under the same lock as history. Must be called before
+ * hr_http_start().
+ */
+void hr_http_set_encring(hr_encring_t *r);
 
 void hr_http_start(hr_session_t *session, hr_history_t *history);
 
@@ -67,5 +76,12 @@ int32_t hr_http_extra_dry_s(void);
  * running" from "stale elapsed counter left over from the last batch".
  */
 void hr_http_set_tracker(const hr_phase_tracker_t *tr);
+
+/*
+ * Whether the owner has switched remote control on (Settings). Off until set,
+ * and off if the setting cannot be read. Every path that can change the
+ * dryer's state - HTTP or MQTT - must consult this, not only /api/control.
+ */
+bool hr_http_control_enabled(void);
 
 #endif /* HR_HTTP_H */

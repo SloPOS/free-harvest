@@ -229,18 +229,62 @@ void hr_trend_reset(hr_trend_t *tr)
     hr_trend_init(tr);
 }
 
+/* One empty bucket: a span with no frames in it. */
+static hr_trend_point_t gap_point(void)
+{
+    hr_trend_point_t gap;
+    gap.temp_raw_f = HR_TREND_NO_TEMP;
+    gap.temp_smooth_cf = HR_TREND_NO_TEMP;
+    gap.pressure_raw = 0;
+    return gap;
+}
+
 void hr_trend_tick(hr_trend_t *tr, unsigned long now_ms)
 {
     if (tr == NULL || !tr->have_bucket) {
         return;
     }
     /*
+     * Signed on purpose. The main loop reads its clock, then waits for the
+     * lock; if the USB task opened a bucket in the meantime, bucket_start_ms
+     * is a few ms AHEAD of this caller's now_ms. Unsigned, that difference
+     * is ~2^32 ms and the loop below closes 143 000 "elapsed" buckets -
+     * every one past the 3600th shifting the 28 KB ring - which held the
+     * lock, and with it the USB task and the web server, for five minutes
+     * on real hardware (docs/09, 2026-09-15). A clock that has not yet
+     * reached the bucket simply has nothing to close.
+     */
+    const long behind = (long)(now_ms - tr->bucket_start_ms);
+    if (behind < (long)HR_TREND_BUCKET_MS) {
+        return;
+    }
+
+    /*
+     * A gap longer than the whole window leaves nothing worth keeping: every
+     * point the loop would produce is a gap marker, and it would produce
+     * one ring shift per missing bucket to get there. Write the result
+     * directly. Only the bucket about to be closed carries real samples.
+     */
+    if ((unsigned long)behind >= HR_TREND_BUCKET_MS * (HR_TREND_CAPACITY + 1)) {
+        commit_bucket(tr); /* keeps the smoothing level current */
+        const hr_trend_point_t gap = gap_point();
+        for (size_t i = 0; i < HR_TREND_CAPACITY; i++) {
+            tr->pts[i] = gap;
+        }
+        tr->count = HR_TREND_CAPACITY;
+        tr->overflowed = true;
+        tr->gap_run = (uint16_t)-1;
+        tr->have_bucket = false;
+        return;
+    }
+
+    /*
      * Close every bucket the clock has passed. Gaps produce empty buckets so
      * the series stays on a true 30s grid - the graph's x-axis and the curve
      * fit both depend on that.
      */
     while (tr->have_bucket &&
-           now_ms - tr->bucket_start_ms >= HR_TREND_BUCKET_MS) {
+           (long)(now_ms - tr->bucket_start_ms) >= (long)HR_TREND_BUCKET_MS) {
         unsigned long next = tr->bucket_start_ms + HR_TREND_BUCKET_MS;
         commit_bucket(tr);
         if (now_ms - next >= HR_TREND_BUCKET_MS) {
@@ -316,11 +360,7 @@ void hr_trend_restore_gap(hr_trend_t *tr, size_t n)
      * would assert something we cannot know.
      */
     for (size_t i = 0; i < n && tr->count < HR_TREND_CAPACITY; i++) {
-        hr_trend_point_t gap;
-        gap.temp_raw_f = HR_TREND_NO_TEMP;
-        gap.temp_smooth_cf = HR_TREND_NO_TEMP;
-        gap.pressure_raw = 0;
-        tr->pts[tr->count++] = gap;
+        tr->pts[tr->count++] = gap_point();
     }
 }
 
