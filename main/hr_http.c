@@ -205,6 +205,9 @@ static const char *wifi_status_str(void)
  * it here to report whether control is switched on. */
 static bool ctrl_enabled(void);
 static bool pin_is_set(char *out, size_t cap);
+static bool pin_present(void);
+/* True while /api/state is leaving out a last_stat too big to send. */
+static bool s_state_trimmed;
 /* Defined with the PIN code below; the control endpoints above need it.
  * Returns true when the request may proceed, and has already sent the
  * refusal when it returns false. */
@@ -220,7 +223,6 @@ static esp_err_t h_state(httpd_req_t *req)
     hr_wifi_noip_stats(&noip);
 
     char laststat[HR_MAX_FRAME * 2];
-    char pinbuf[16];
     LOCK();
     hr_json_escape(s_session->info.last_stat, laststat, sizeof(laststat));
     hr_json_escape(s_session->info.serial, serial, sizeof(serial));
@@ -292,6 +294,7 @@ static esp_err_t h_state(httpd_req_t *req)
         enc_age_ms = (long)(now - enc_last_ms);
     }
 
+    bool pin_set = pin_present();
     char body[2432];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
@@ -339,13 +342,7 @@ static esp_err_t h_state(httpd_req_t *req)
                       * main.c. */
                      "\"heap_free\":%u,\"heap_min\":%u,\"heap_largest\":%u,"
                      "\"uptime_s\":%lu,\"reset_reason\":\"%s\","
-                     "\"control\":%s,\"actions\":%s,\"pin\":%s,"
-                     /* Raw frame: the config screens carry the live
-                      * recipe in fields we do not decode here, and the
-                      * editor seeds itself from what is on the panel
-                      * rather than from a remembered default. */
-                     "\"last_stat\":\"%s\","
-                     "\"version\":\"" FREEHARVEST_VERSION "\"}",
+                     "\"control\":%s,\"actions\":%s,\"pin\":%s,",
                      link, serial, uid, dryer_sn, fwver,
                      hr_compat_644170() ? "true" : "false",
                      fin, fout, unk, bad,
@@ -377,9 +374,42 @@ static esp_err_t h_state(httpd_req_t *req)
                      (unsigned)heap.largest_free_block,
                      (unsigned long)(esp_timer_get_time() / 1000000),
                      reset_reason_str(), ctrl_enabled() ? "true" : "false",
-                     acts, pin_is_set(pinbuf, sizeof(pinbuf))
-                         ? "true" : "false", laststat);
-    return send_json(req, body, n);
+                     acts, pin_set ? "true" : "false");
+    /*
+     * snprintf reports the length it WANTED, and until 1.2.1 this handler sent
+     * that many bytes whether or not they fit - reading past body, into its own
+     * stack. Everything above is bounded well under the buffer. last_stat is
+     * not: up to ~1 KB escaped straight off the wire. So it goes last, on its
+     * own, and is left out rather than cut when it will not fit - the dashboard
+     * keeps working and only the recipe editor loses its seed for that reply.
+     */
+    if (n < 0 || n >= (int)sizeof(body)) {
+        return httpd_resp_send_500(req);
+    }
+    size_t room = sizeof(body) - (size_t)n;
+    /* Raw frame: the config screens carry the live recipe in fields we do not
+     * decode here, and the editor seeds itself from what is on the panel
+     * rather than from a remembered default. */
+    int t = snprintf(body + n, room,
+                     "\"last_stat\":\"%s\",\"version\":\"" FREEHARVEST_VERSION
+                     "\"}", laststat);
+    if (t < 0 || (size_t)t >= room) {
+        if (!s_state_trimmed) { /* once per episode, not once per poll */
+            ESP_LOGW(TAG, "/api/state: last_stat (%u bytes escaped) does not "
+                          "fit; sending the state without it",
+                     (unsigned)strlen(laststat));
+        }
+        s_state_trimmed = true;
+        t = snprintf(body + n, room,
+                     "\"last_stat\":\"\",\"version\":\"" FREEHARVEST_VERSION
+                     "\"}");
+        if (t < 0 || (size_t)t >= room) {
+            return httpd_resp_send_500(req);
+        }
+    } else {
+        s_state_trimmed = false;
+    }
+    return send_json(req, body, (size_t)n + (size_t)t);
 }
 
 /* -------------------------------------------------------------------- */
@@ -2216,6 +2246,24 @@ static bool pin_is_set(char *out, size_t cap)
     }
     size_t len = cap;
     bool ok = nvs_get_str(nh, "pin", out, &len) == ESP_OK && out[0] != '\0';
+    nvs_close(nh);
+    return ok;
+}
+
+/*
+ * Whether a PIN is stored, without reading it: with a NULL buffer nvs_get_str
+ * reports only the length, NUL included, so an empty PIN is 1. For callers
+ * that need the yes/no and must not hold the PIN itself - /api/state, which
+ * anyone may read, used to load it onto the same stack as its reply.
+ */
+static bool pin_present(void)
+{
+    nvs_handle_t nh;
+    if (nvs_open(PIN_NVS_NS, NVS_READONLY, &nh) != ESP_OK) {
+        return false;
+    }
+    size_t len = 0;
+    bool ok = nvs_get_str(nh, "pin", NULL, &len) == ESP_OK && len > 1;
     nvs_close(nh);
     return ok;
 }
