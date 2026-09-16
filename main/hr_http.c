@@ -181,6 +181,9 @@ static const char *wifi_status_str(void)
     case HR_WIFI_CONNECTED: return "connected";
     case HR_WIFI_CONNECTING: return "connecting";
     case HR_WIFI_AP_SETUP: return "setup-ap";
+    /* Associated, no address: the lease was lost and DHCP is not answering.
+     * Deliberately not "connected" - nothing is reachable in this state. */
+    case HR_WIFI_NO_IP: return "no-ip";
     default: return "booting";
     }
 }
@@ -213,6 +216,8 @@ static esp_err_t h_state(httpd_req_t *req)
     char ip[16], ssid[33], serial[64], uid[128];
     hr_wifi_ip(ip, sizeof(ip));
     hr_wifi_current_ssid(ssid, sizeof(ssid));
+    hr_wifi_noip_stats_t noip;
+    hr_wifi_noip_stats(&noip);
 
     char laststat[HR_MAX_FRAME * 2];
     char pinbuf[16];
@@ -287,7 +292,7 @@ static esp_err_t h_state(httpd_req_t *req)
         enc_age_ms = (long)(now - enc_last_ms);
     }
 
-    char body[2304];
+    char body[2432];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"dryer_sn\":\"%s\","
@@ -308,6 +313,14 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"enc_decoded\":%lu,\"enc_undecoded\":%lu,"
                      "\"latest_seq\":%" PRIu32 ",\"wifi\":\"%s\",\"ip\":\"%s\","
                      "\"ssid\":\"%s\","
+                     /* The no-IP watchdog (hr_netwatch.h): the driver's
+                      * view of the link, seconds associated without an
+                      * address, and the remedies issued since boot. A
+                      * "connected" wifi with sta_assoc:true and ip
+                      * 0.0.0.0 is the bug this exists to make visible;
+                      * it now reads wifi:"no-ip" with noip_s counting. */
+                     "\"sta_assoc\":%s,\"noip_s\":%lu,\"noip_episodes\":%u,"
+                     "\"noip_dhcp_restarts\":%u,\"noip_reconnects\":%u,"
                      "\"phase\":%d,\"phase_label\":\"%s\",\"have_tel\":%s,"
                      "\"temp_f\":%ld,\"pressure\":%ld,\"elapsed_s\":%ld,"
                      "\"prep_s\":%ld,\"mode\":\"%s\",\"stat_type\":%d,"
@@ -340,6 +353,8 @@ static esp_err_t h_state(httpd_req_t *req)
                      enc_decoded, enc_undecoded,
                      latest,
                      wifi_status_str(), ip, ssid,
+                     noip.associated ? "true" : "false", noip.noip_s,
+                     noip.episodes, noip.dhcp_restarts, noip.reconnects,
                      (int)ph, hr_phase_label(ph), tel_valid ? "true" : "false",
                      tel_valid ? tel.temperature_f : 0,
                      tel_valid ? tel.pressure_raw : 0,
