@@ -73,13 +73,14 @@ Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 | 🎛️ **Remote control** | Start, end, skip a stage, add drying time, defrost — the buttons the dryer is offering right now |
 | 🧪 **Recipe editor** | The dryer's own Candy and Custom setup screens, with sliders, replicated in the app |
 | 💾 **Saved recipes** | Store recipes with notes and a run count; the adapter suggests extra drying time when a batch needed it |
-| 📊 **Live dashboard** | Cycle phase, temperature, vacuum (microns), batch + phase timers, countdowns |
+| 📊 **Live dashboard** | Cycle phase, temperature in °F or °C, vacuum (microns), batch + phase timers, countdowns |
 | 🧭 **Phase-aware guidance** | Shows only the options valid right now, using the owner's-manual wording |
 | 🏠 **Home Assistant** | MQTT auto-discovery — sensors appear automatically, no YAML |
 | 📈 **Trend graph** | Temperature over the whole run, smoothed to kill the ±1 °F sensor flapping |
 | 📡 **Raw data feed** | Every frame the dryer sends, with changed-field highlighting |
 | 🩺 **USB diagnostics** | USB-level counters that tell you *why* the dryer is not being seen |
 | ⬆️ **OTA updates** | Flash new firmware from the web page; no cable |
+| 📶 **Self-healing Wi-Fi** | Gets back on the network by itself after a router outage or a lost DHCP lease — no trip to the machine |
 | 🔒 **Local only** | Setup hotspot auto-closes after 5 minutes; nothing phones home |
 
 Two ways to run it:
@@ -335,6 +336,11 @@ browser when you open the app. Records written before that ever happens say
 
 The interface follows your system theme, or you can pin it in Settings.
 
+Temperatures can be shown in **°F or °C** (Settings → Temperature unit). Like
+the theme, the choice is saved in the browser you make it in, so it needs no
+PIN. The adapter and the dryer keep working in °F, and recipe setpoints stay in
+°F because they go to the dryer in its own unit.
+
 | Dark | Light |
 |---|---|
 | ![Dark](docs/img/dashboard-running.png) | ![Light](docs/img/dashboard-light.png) |
@@ -366,7 +372,7 @@ with these entities:
 
 | Entity | Type |
 |---|---|
-| Temperature | sensor (°F) |
+| Temperature | sensor (°F — Home Assistant shows it in your own unit) |
 | Pressure (raw) | sensor |
 | State Code / Mode | sensor |
 | Batch Elapsed / Prep Remaining | sensor (duration) |
@@ -393,6 +399,7 @@ hrdryer/<id>/config/set   → set batch name
 
 | Section | Contains |
 |---|---|
+| **Appearance / Temperature unit** | Light or dark, °F or °C — both saved in this browser |
 | **Batch** | Name the current batch |
 | **Recipes** | Save, edit, send and delete Candy and Custom recipes |
 | **Logbook** | Past batches, CSV download, clear |
@@ -464,6 +471,7 @@ visible in the browser and names the actual error.
 | Can't find the setup hotspot | It closes after 5 minutes. Power-cycle the board to reopen it |
 | Shows "Ready" during a real batch | Normal for ~30s after a reboot: it must observe the elapsed counter advance before claiming a run |
 | Page unreachable after Wi-Fi change | Its IP probably changed — check your router's client list |
+| Page unreachable, but the router still lists the adapter | Its IP lease lapsed while the Wi-Fi link stayed up. Give it a minute: it notices within seconds, restarts DHCP at 15 s and rejoins the network at 45 s, and keeps retrying for as long as it's powered. Afterwards, `noip_episodes` in `/api/state` counts how often it has happened |
 
 ---
 
@@ -488,9 +496,10 @@ your PC:
 bash test/run_tests.sh
 ```
 
-**201 checks across 8 suites.** Covers frame parsing, stream reassembly, frame
-building, the command allow-list, telemetry decoding, phase detection, URL decoding,
-and JSON output.
+**About 10,000 checks across 17 suites.** Covers frame parsing, stream reassembly,
+frame building, the command allow-list, telemetry decoding, phase detection, URL
+decoding, JSON output, the batch logbook, the trend store, the 6.0.644170 decoder
+and the Wi-Fi no-IP watchdog.
 
 ### Layout
 
