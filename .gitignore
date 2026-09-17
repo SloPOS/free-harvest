@@ -57,3 +57,7 @@ tools/screen-map-*.txt
 # Vendor firmware cipher key - publishing this is the maintainer's decision,
 # not something a stray "git add -A" gets to make.
 tools/decode_h6r.py
+
+# Python bytecode from the local tools
+__pycache__/
+*.pyc

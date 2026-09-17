@@ -914,7 +914,7 @@ enumerates, one entry per call, where index is a page number:
 Format is `FDFILELIST,<name>,<index>,<size>`. `HH.<id>` looks like a history
 header and `HB.<id><nn>` per-batch records, sharing the machine id 37935.
 
-**FILEREAD does not yet yield contents.** Sent as `FILEREAD <name>`,
+**FILEREAD does not yet yield contents.** [SOLVED - see the 2026-09-17 section at the end.]  Sent as `FILEREAD <name>`,
 `FILEREAD <name> 0` and `FILEREAD <name> 0 0`, the dryer replied `A1` to each -
 two characters, not a 258-byte file. `A1` is unparsed by us and counted as a bad
 frame. It is probably an error or status code, so the argument shape is wrong.
@@ -1594,3 +1594,83 @@ uses. That fits what we see: the long-form screens read exactly 10000 at
 atmosphere, while the short-form screens (1, 7, 8) print the raw sensor value,
 39,000-155,000. `hr_telemetry`'s rule - anything at or above 10000 is "no
 vacuum" - is unchanged and still right; only the explanation was wrong.
+
+## FILEREAD, solved: the dryer is a file server (2026-09-17)
+
+The 2026-08-25 entry above has `FILEREAD` answering `A1` and calls the request
+shape wrong. The request shape was right. `A1` was the END of the answer: the
+two-character checksum that closes a block frame, the only part of it that
+survived a reassembler built for short printable lines. The rest - a kilobyte
+of file data carrying line feeds, commas and a substituted control byte - had
+already been chopped into rejected fragments by the time it arrived.
+
+Reported by vskiwi in PR #11, confirmed live on a 6.0.644170 machine: a
+listing, four hundred blocks, no checksum failures, and a 276 KB batch log read
+whole. Everything below is the wire, which anyone can check against their own
+dryer; Free Harvest's own client is `components/hr_protocol/hr_files.[ch]`.
+
+### The two requests
+
+    FDFILES <pattern> <index>
+        -> FDFILELIST,<name>,<index>,<size>      the index-th match
+        -> FDFILELIST,NULL,<index>,0             past the last match
+
+    FILEREAD <name> <block>
+        -> FDFILEBLOCK,<name>,<bytes>,<block>,<size>,<data...>XX
+
+Both go out in plaintext on either firmware - a 6.0.644170 machine encodes what
+it SENDS, not what it accepts - and both are already in the SAFE verb set.
+
+- The pattern is matched anywhere in the name, and one entry comes back per
+  request, so a listing is a walk: ask for 0, then 1, until the NULL entry.
+  `.csv` finds the batch logs, `.dat` the older summary records.
+- `<block>` is an offset in kilobytes. A block carries up to 1024 bytes; a
+  short one is the end of the file. A file the dryer does not have answers
+  `FDFILEBLOCK,,0,0,0,00`.
+- The data are the file's own bytes with every carriage return sent as BEL
+  (0x07), so they cannot end the frame early. Line feeds and commas travel as
+  they are. `XX` is the data bytes summed mod 256, in upper-case hex.
+- **The field order is name, bytes, block, size.** Reading it as
+  block-then-bytes puts the file back together in the wrong order, and only the
+  first 1 KB of a file is short enough to hide it.
+- Timing, measured: about 170 ms a block whatever the Wi-Fi is doing, so a
+  transfer runs at 5-6 KB/s and a 276 KB log takes the better part of a minute.
+  STAT kept its 15-second cadence throughout.
+
+### What a batch log holds
+
+A row a minute, `\r\n`-terminated: the timestamp as `M/D/YYYY H:MM`, vacuum in
+microns (uncapped here - 60245 at atmosphere, where a live STAT frame would
+report the 10000 clamp), whole degrees F for the shelf thermocouples and for
+**the ambient one, which no live frame carries at all**, the heater state, and
+a phase word: Startup, Load, Prefreeze, Freeze, FreezeVAC, Drying-3Z, FinalDry,
+Finished, PreDefrost.
+
+The header line names its own columns, which is what Free Harvest keys on
+rather than positions, and carries the batch name first and the machine's own
+note - firmware, serial, presets, pump type - after the last column. Names look
+like `<serial>.<date>_<time>.csv`.
+
+The dryer also serves a handful of named records that never appear in a
+listing, among them the one holding the panel's own temperature unit. The web
+UI reads that one on request, to make the page follow the machine.
+
+### Why this needs a side buffer, and what it cost us
+
+A block frame breaks all three rules the line reassembler is built on: it is
+longer than HR_MAX_FRAME, it is not printable, and it does not end at the first
+control byte. Free Harvest lends the stream a buffer and a way to recognise one
+(`hr_stream_set_long`), collects the frame whole, and hands it over intact. If
+nobody lends a buffer the frame is SWALLOWED and counted rather than parsed -
+so a dryer that sends one unasked still cannot inject anything into the frame
+path. That is the part the old `A1` note got at from the wrong end.
+
+### One thing to be careful with
+
+The dispatcher matches a verb anywhere in the line, in its own order, so what
+we put in an ARGUMENT can be read as a command: a name containing `DEL`, or a
+carriage return followed by anything at all, is a command we did not mean to
+send. `hr_files_arg_ok()` is the gate every name and pattern passes first -
+printable ASCII only, no separators or path characters, and no verb the dryer
+tests before FDFILES. The same hazard, and the same fix, as recipe names
+(`hr_recipe_check_name`).

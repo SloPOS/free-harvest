@@ -75,6 +75,34 @@ config HR_COMPAT_644170
         This is only the value used until the switch is changed at runtime
         (Settings > Debug, or POST /api/compat), which is stored in NVS.
 
+config HR_BATCH_HISTORY
+    bool "Batch history: read the dryer's own batch logs (FDFILES / FILEREAD)"
+    default y
+    help
+        The dryer keeps a CSV log of every batch on its own drive, a row a
+        minute, including the ambient thermocouple that no live frame carries.
+        With this on, Settings > Batch history lists those files and reads one
+        over the same USB link, and the browser charts it.
+
+        Reads only: both verbs are already in the safe set, every name and
+        pattern is checked before it can reach the wire, and nothing here can
+        start, stop or change a run. A transfer runs in the background - the
+        bytes go to the browser as they arrive and nothing is stored on the
+        adapter - and is refused while a batch is running unless the request
+        asks to go ahead anyway.
+
+        Costs about 2 KB of static RAM for the frame side buffer, plus 8 KB of
+        heap for as long as a transfer lasts.
+
+config HR_BATCH_HISTORY_DEFAULT_ON
+    bool "Batch history: switched on at first boot"
+    depends on HR_BATCH_HISTORY
+    default y
+    help
+        What the runtime switch (Settings > Batch history, kept in NVS) reads
+        before anyone changes it. On or off, nothing is sent to the dryer
+        until someone asks for a listing or a file.
+
 config HR_HTTP_LOG_TO_UART
     bool "Also echo received frames to the UART console"
     default y

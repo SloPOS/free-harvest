@@ -78,6 +78,39 @@ void hr_stream_init(hr_stream_t *s)
     s->enc_bad = 0;
     s->enc = NULL;
     s->enc_user = NULL;
+    s->long_buf = NULL;
+    s->long_cap = 0;
+    s->long_len = 0;
+    s->long_need = 0;
+    s->long_skip = 0;
+    s->long_enc = false;
+    s->long_not = false;
+    s->long_frames = 0;
+    s->long_dropped = 0;
+    s->long_measure = NULL;
+    s->long_cb = NULL;
+    s->long_user = NULL;
+}
+
+void hr_stream_set_long(hr_stream_t *s, char *buf, size_t cap,
+                        hr_long_measure_fn measure, hr_long_cb cb, void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    const bool usable = (buf != NULL && cap >= HR_MAX_FRAME);
+    s->long_buf = usable ? buf : NULL;
+    s->long_cap = usable ? cap : 0;
+    s->long_cb = usable ? cb : NULL;
+    s->long_user = usable ? user : NULL;
+    /*
+     * The measure function is kept even with no buffer: knowing one of these
+     * frames is coming is what lets the stream SWALLOW it instead of letting
+     * a kilobyte of file data loose in the frame path.
+     */
+    s->long_measure = measure;
+    s->long_len = 0;
+    s->long_need = 0;
 }
 
 void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user)
@@ -150,9 +183,45 @@ static void enc_deliver(hr_stream_t *s)
     s->enc_need = 0;
 }
 
+/* Give up on the oversize frame being collected; show the head of it. */
+static void long_abandon(hr_stream_t *s, const char *why)
+{
+    s->long_dropped++;
+    if (s->reject != NULL && s->long_len > 0) {
+        const size_t show = s->long_len < 96 ? s->long_len : 96;
+        s->reject(s->long_buf, show, why, s->reject_user);
+    }
+    s->long_len = 0;
+    s->long_need = 0;
+}
+
+static void long_deliver(hr_stream_t *s)
+{
+    s->long_buf[s->long_len] = '\0';
+    s->long_frames++;
+    if (s->long_cb != NULL) {
+        s->long_cb(s->long_buf, s->long_len, s->long_enc, s->long_user);
+    }
+    s->long_len = 0;
+    s->long_need = 0;
+}
+
 bool hr_stream_discard_partial(hr_stream_t *s, const char *why)
 {
-    if (s == NULL || (s->len == 0 && !s->overflowed)) {
+    if (s == NULL) {
+        return false;
+    }
+    if (s->long_need > 0) {
+        long_abandon(s, "long partial");
+        s->len = 0;
+        s->overflowed = false;
+        return true;
+    }
+    if (s->long_skip > 0) {
+        s->long_skip = 0;   /* whatever is left of it is noise now */
+        return true;
+    }
+    if (s->len == 0 && !s->overflowed) {
         return false;
     }
     if (s->enc_need > 0) {
@@ -176,6 +245,36 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
     for (size_t i = 0; i < n; i++) {
         const unsigned char uc = p[i];
         char ch = (char)uc;
+
+        /*
+         * SWALLOWING an oversize frame nobody lent us room for. These bytes
+         * are file data, not frames; dropping them silently is the whole
+         * point, and the CR that follows closes an empty line.
+         */
+        if (s->long_skip > 0) {
+            s->long_skip--;
+            continue;
+        }
+
+        /*
+         * OVERSIZE FRAME IN PROGRESS - see hr_long_cb. A plaintext one takes
+         * any byte at all, because that is what file data is; an encoded one
+         * still has to be printable, since that envelope is base64.
+         */
+        if (s->long_need > 0) {
+            if (s->long_enc && (uc < 0x20 || uc >= 0x7f)) {
+                long_abandon(s, "long interrupted");
+                if (ch != '\r' && ch != '\n') {
+                    s->noise_bytes++;
+                }
+                continue;
+            }
+            s->long_buf[s->long_len++] = ch;
+            if (s->long_len == s->long_need) {
+                long_deliver(s);
+            }
+            continue;
+        }
 
         /*
          * ENCODED FRAME IN PROGRESS. The header declared how many bytes the
@@ -218,6 +317,7 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
                     reject(s, "binary noise");
                     s->len = 0;
                     s->overflowed = false;
+                    s->long_not = false;
                 }
                 s->noise_bytes++;
                 continue;
@@ -238,6 +338,21 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
              */
             if (s->len == HR_ENC_HDR && s->buf[0] == ')' && s->buf[1] == 'S') {
                 int need = hr_enc_decode_len(s->buf);
+                /*
+                 * Longer than the line buffer, but it fits the side buffer:
+                 * an encoded frame carrying a file block. Move the header
+                 * across and collect the rest there.
+                 */
+                if (need > HR_ENC_MAX_FRAME && s->long_buf != NULL &&
+                    (size_t)need < s->long_cap) {
+                    s->enc_seen = true;
+                    memcpy(s->long_buf, s->buf, HR_ENC_HDR);
+                    s->long_len = HR_ENC_HDR;
+                    s->long_need = (size_t)need;
+                    s->long_enc = true;
+                    s->len = 0;
+                    continue;
+                }
                 if (need > HR_ENC_MAX_FRAME) {
                     s->enc_seen = true;
                     s->enc_need = (size_t)need; /* so the observer sees why */
@@ -270,6 +385,34 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
                 s->buf[1] = 'S';
                 s->len = 2;
             }
+
+            /*
+             * IS THIS LINE AN OVERSIZE FRAME? Ask the owner's measure
+             * function as the line grows. A "no" stands for the rest of the
+             * line; a "yes" moves what we have to the side buffer and the
+             * remaining bytes follow it there. With no buffer lent, the rest
+             * is swallowed instead - unparsed, counted, and unable to
+             * masquerade as frames.
+             */
+            if (s->long_measure != NULL && !s->long_not && !s->overflowed) {
+                size_t total = 0;
+                const int verdict = s->long_measure(s->buf, s->len, &total);
+                if (verdict < 0) {
+                    s->long_not = true;
+                } else if (verdict > 0 && total > s->len) {
+                    if (s->long_buf != NULL && total < s->long_cap) {
+                        memcpy(s->long_buf, s->buf, s->len);
+                        s->long_len = s->len;
+                        s->long_need = total;
+                        s->long_enc = false;
+                    } else {
+                        s->long_dropped++;
+                        reject(s, "long frame unheld");
+                        s->long_skip = total - s->len;
+                    }
+                    s->len = 0;
+                }
+            }
             continue;
         }
 
@@ -291,6 +434,7 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
         /* len == 0 with no overflow: empty frame, silently ignored. */
         s->len = 0;
         s->overflowed = false;
+        s->long_not = false;   /* the next line gets asked about afresh */
     }
 }
 

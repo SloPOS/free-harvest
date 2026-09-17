@@ -69,6 +69,7 @@ Stop by our discord and say hey: https://discord.gg/KphHBYh9KC
 | | |
 |---|---|
 | 📒 **Batch logbook** | Every run recorded: duration, coldest point, deepest vacuum, pull-down time, extra drying |
+| 🗂️ **Batch history** | The dryer's own per-batch CSV logs, read off the machine and charted — including runs from before you had an adapter |
 | 🔑 **Control PIN** | Optional PIN on anything that changes the dryer; monitoring stays open |
 | 🎛️ **Remote control** | Start, end, skip a stage, add drying time, defrost — the buttons the dryer is offering right now |
 | 🧪 **Recipe editor** | The dryer's own Candy and Custom setup screens, with sliders, replicated in the app |
@@ -332,6 +333,33 @@ The adapter has no clock and does not use SNTP, so it learns the time from your
 browser when you open the app. Records written before that ever happens say
 "date not recorded" rather than claiming 1970.
 
+### Batch history — the dryer's own logs
+
+The dryer keeps a CSV log of every batch it has ever run, a row a minute, on
+its own drive. **Settings → Batch history** lists those files and reads one
+over the same USB cable, so you get runs from before this adapter existed, and
+the **ambient thermocouple**, which no live frame carries.
+
+Opening one charts it: shelf and room temperature, vacuum on its own scale, and
+the dryer's own phases as coloured bands, with a table of how long each phase
+took and how cold and how deep it got. The raw file is a download away.
+
+The dryer hands over a kilobyte about every 170 ms whatever the Wi-Fi is doing,
+so a small batch reads in a second and a 50-hour one takes about a minute. The
+transfer runs in the background and the page shows it arriving; the dashboard
+stays live while it does, and **nothing is stored on the adapter** — the
+bytes go to your browser as they arrive.
+
+Reading is refused while a batch is running unless you say otherwise on that
+page, because a running machine has better things to do with its USB port. The
+whole feature has an on/off switch, and nothing is sent to the dryer until you
+ask for a listing or a file.
+
+> The two verbs involved read and nothing else. Every file name and pattern is
+> checked before it can reach the wire — the dryer picks commands by
+> searching the whole line, so an unchecked name is a command waiting to
+> happen.
+
 ### Light and dark, phone and desktop
 
 The interface follows your system theme, or you can pin it in Settings.
@@ -408,6 +436,7 @@ hrdryer/<id>/config/set   → set batch name
 | **Wi-Fi** | Network status, change network, forget network |
 | **Home Assistant / MQTT** | Broker host, port, credentials, connection status |
 | **Live data feed** | Verbs seen, live frame log, download capture |
+| **Batch history** | The dryer's own batch logs: list, chart, phases, download; on/off switch |
 | **Firmware update** | OTA upload |
 | **Debug & advanced** | Device log, set dryer clock, raw commands, counters |
 | **About** | Version number — quote this when reporting issues |
@@ -496,10 +525,10 @@ your PC:
 bash test/run_tests.sh
 ```
 
-**About 10,000 checks across 17 suites.** Covers frame parsing, stream reassembly,
+**About 10,500 checks across 18 suites.** Covers frame parsing, stream reassembly,
 frame building, the command allow-list, telemetry decoding, phase detection, URL
-decoding, JSON output, the batch logbook, the trend store, the 6.0.644170 decoder
-and the Wi-Fi no-IP watchdog.
+decoding, JSON output, the batch logbook, the trend store, the 6.0.644170
+decoder, the Wi-Fi no-IP watchdog and the dryer's file protocol.
 
 ### Layout
 

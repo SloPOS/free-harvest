@@ -11,6 +11,10 @@
 #include "hr_usb.h"
 #include "hr_wifi.h"
 #include "hr_compat.h"
+#include "sdkconfig.h"
+#if CONFIG_HR_BATCH_HISTORY
+#include "hr_dryerfiles.h"
+#endif
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
@@ -160,6 +164,12 @@ static union {
     hr_batch_t      batches[BATCH_SHOW];       /* h_batches */
     char            bytes[1024];               /* h_capture, h_batches_csv */
     hr_encring_t    enc;                       /* h_enc snapshot, ~5.4 KB */
+#if CONFIG_HR_BATCH_HISTORY
+    struct {
+        hr_df_snapshot_t snap;                 /* ~1.5 KB */
+        char bytes[2048];                      /* one drained chunk */
+    } df;                                      /* h_df_state, h_df_data */
+#endif
 } s_scratch;
 
 /* -------------------------------------------------------------------- */
@@ -295,7 +305,7 @@ static esp_err_t h_state(httpd_req_t *req)
     }
 
     bool pin_set = pin_present();
-    char body[2432];
+    char body[2688];
     int n = snprintf(body, sizeof(body),
                      "{\"link\":\"%s\",\"serial\":\"%s\",\"uid\":\"%s\","
                      "\"dryer_sn\":\"%s\","
@@ -390,6 +400,11 @@ static esp_err_t h_state(httpd_req_t *req)
     if (n < 0 || n >= (int)sizeof(body)) {
         return httpd_resp_send_500(req);
     }
+#if CONFIG_HR_BATCH_HISTORY
+    /* The file client's counters: short, bounded, and 0 if they
+     * would not fit rather than half-written. */
+    n += hr_dryerfiles_state_json(body + n, sizeof(body) - (size_t)n);
+#endif
     size_t room = sizeof(body) - (size_t)n;
     /* Raw frame: the config screens carry the live recipe in fields we do not
      * decode here, and the editor seeds itself from what is on the panel
@@ -2718,6 +2733,227 @@ static bool same_origin(httpd_req_t *req)
     return strcmp(p, host) == 0;
 }
 
+#if CONFIG_HR_BATCH_HISTORY
+/* -------------------------------------------------------------------- */
+/* The dryer's own files: /api/dryer/files*   (hr_dryerfiles.h)           */
+/* -------------------------------------------------------------------- */
+/*
+ * Gated by what they do, not by their method:
+ *
+ *   GET /api/dryer/files reports what the adapter already knows - the last
+ *   listing, how a transfer is going - and says nothing to the dryer, so it
+ *   is open to the LAN like the other monitoring GETs.
+ *
+ *   Everything that makes the adapter SPEAK to the dryer carries the PIN,
+ *   including the GET that drains a transfer, because draining is what lets
+ *   the next block be asked for. They are reads on the wire, so they do not
+ *   need remote control switched on - but hr_dryerfiles refuses them while a
+ *   batch is running unless the request says force, and refuses everything
+ *   while the feature is switched off.
+ *
+ * No handler here holds the web server for the length of a transfer: the
+ * bytes are collected in the background and taken a chunk at a time.
+ */
+static esp_err_t df_reply(httpd_req_t *req, hr_df_result_t r)
+{
+    char out[128];
+    if (r == HR_DF_OK) {
+        return send_json(req, "{\"ok\":true}", 11);
+    }
+    httpd_resp_set_status(req, r == HR_DF_BUSY ? "409 Conflict"
+                                               : "400 Bad Request");
+    const int n = snprintf(out, sizeof(out),
+                           "{\"ok\":false,\"reason\":\"%s\",\"code\":%d}",
+                           hr_df_result_str(r), (int)r);
+    return send_json(req, out, (size_t)n);
+}
+
+/* Read a small form body; false if it did not fit or did not arrive. */
+static bool df_body(httpd_req_t *req, char *buf, size_t cap)
+{
+    const int total = req->content_len;
+    if (total < 0 || (size_t)total >= cap) {
+        return false;
+    }
+    int got = 0;
+    while (got < total) {
+        const int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) {
+            return false;
+        }
+        got += r;
+    }
+    buf[got] = '\0';
+    return true;
+}
+
+/* GET /api/dryer/files - the switch, the transfer, the last listing. */
+static esp_err_t h_df_state(httpd_req_t *req)
+{
+    hr_df_snapshot_t *s = &s_scratch.df.snap;
+    hr_dryerfiles_snapshot(s);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    char head[512];
+    char esc[HR_FILE_NAME_MAX * 2];
+    hr_json_escape(s->file, esc, sizeof(esc));
+    int n = snprintf(head, sizeof(head),
+                     "{\"enabled\":%s,\"link\":%s,\"dryer_running\":%s,"
+                     "\"state\":\"%s\",\"error\":\"%s\",\"busy\":%s,"
+                     "\"file\":\"%s\",\"received\":%ld,\"size\":%ld,"
+                     "\"pct\":%d,\"elapsed_ms\":%lu,\"list_valid\":%s,"
+                     "\"max_size\":%ld,\"requests\":%lu,\"timeouts\":%lu,"
+                     "\"blocks_ok\":%lu,\"blocks_bad\":%lu,"
+                     "\"blocks_in\":%lu,\"blocks_dropped\":%lu,"
+                     "\"transfers\":%lu,\"files\":[",
+                     s->enabled ? "true" : "false",
+                     s->link_up ? "true" : "false",
+                     s->dryer_running ? "true" : "false",
+                     hr_files_state_str(s->state), hr_files_err_str(s->err),
+                     s->busy ? "true" : "false", esc, s->received, s->size,
+                     s->pct, s->elapsed_ms,
+                     s->list_valid ? "true" : "false",
+                     (long)HR_FILE_SIZE_MAX, s->requests, s->timeouts,
+                     s->blocks_ok, s->blocks_bad, s->blocks_in,
+                     s->blocks_dropped, s->transfers);
+    if (n < 0 || (size_t)n >= sizeof(head) ||
+        httpd_resp_send_chunk(req, head, n) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    for (unsigned i = 0; i < s->nlist; i++) {
+        char row[160];
+        hr_json_escape(s->list[i].name, esc, sizeof(esc));
+        const int rn = snprintf(row, sizeof(row),
+                                "%s{\"name\":\"%s\",\"size\":%ld}",
+                                i ? "," : "", esc, s->list[i].size);
+        if (rn < 0 || (size_t)rn >= sizeof(row) ||
+            httpd_resp_send_chunk(req, row, rn) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    if (httpd_resp_send_chunk(req, "]}", 2) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
+/* POST /api/dryer/files/list   [pattern=.csv] [force=1] */
+static esp_err_t h_df_list(httpd_req_t *req)
+{
+    char buf[128];
+    if (!df_body(req, buf, sizeof(buf))) {
+        return httpd_resp_send_500(req);
+    }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+    char pattern[HR_FILE_NAME_MAX] = {0}, force[4] = {0};
+    httpd_query_key_value(buf, "pattern", pattern, sizeof(pattern));
+    httpd_query_key_value(buf, "force", force, sizeof(force));
+    hr_url_decode(pattern);
+    return df_reply(req, hr_dryerfiles_list(pattern, force[0] == '1'));
+}
+
+/* POST /api/dryer/files/read   name=X [force=1] */
+static esp_err_t h_df_read(httpd_req_t *req)
+{
+    char buf[192];
+    if (!df_body(req, buf, sizeof(buf))) {
+        return httpd_resp_send_500(req);
+    }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+    char name[HR_FILE_NAME_MAX * 3] = {0}, force[4] = {0};
+    if (httpd_query_key_value(buf, "name", name, sizeof(name)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req,
+            "{\"ok\":false,\"reason\":\"name required\"}");
+    }
+    httpd_query_key_value(buf, "force", force, sizeof(force));
+    hr_url_decode(name);
+    return df_reply(req, hr_dryerfiles_read(name, force[0] == '1'));
+}
+
+/* POST /api/dryer/files/cancel */
+static esp_err_t h_df_cancel(httpd_req_t *req)
+{
+    if (!pin_guard_small(req)) {
+        return ESP_OK;
+    }
+    hr_dryerfiles_cancel();
+    return send_json(req, "{\"ok\":true}", 11);
+}
+
+/* POST /api/dryer/files/enable   on=0|1 */
+static esp_err_t h_df_enable(httpd_req_t *req)
+{
+    char buf[96];
+    if (!df_body(req, buf, sizeof(buf))) {
+        return httpd_resp_send_500(req);
+    }
+    if (!pin_guard(req, buf)) {
+        return ESP_OK;
+    }
+    char on[4] = {0};
+    if (httpd_query_key_value(buf, "on", on, sizeof(on)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"on=0|1\"}");
+    }
+    const bool stored = hr_dryerfiles_set_enabled(on[0] == '1');
+    char out[80];
+    const int n = snprintf(out, sizeof(out),
+                           "{\"ok\":true,\"enabled\":%s,\"stored\":%s}",
+                           hr_dryerfiles_enabled() ? "true" : "false",
+                           stored ? "true" : "false");
+    return send_json(req, out, (size_t)n);
+}
+
+/*
+ * GET /api/dryer/files/data - take whatever has arrived.
+ *
+ * The bytes of the file, as they came off the dryer, in the order they were
+ * read; the caller keeps asking until X-HR-More says 0. Everything else about
+ * the transfer travels in headers so that one request per poll is enough.
+ *
+ * This is also what un-pauses a transfer whose ring filled up, which is why
+ * it carries the PIN like the POSTs: draining is what asks for the next
+ * block.
+ */
+static esp_err_t h_df_data(httpd_req_t *req)
+{
+    char q[160];
+    q[0] = '\0';
+    httpd_req_get_url_query_str(req, q, sizeof(q));
+    /* the query has the same key=value shape a form body has */
+    if (!pin_guard(req, q)) {
+        return ESP_OK;
+    }
+
+    bool more = false;
+    const size_t n = hr_dryerfiles_take(s_scratch.df.bytes,
+                                        sizeof(s_scratch.df.bytes), &more);
+    hr_df_snapshot_t *s = &s_scratch.df.snap;
+    hr_dryerfiles_snapshot(s);
+
+    char got[24], of[24];
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-HR-More", more ? "1" : "0");
+    httpd_resp_set_hdr(req, "X-HR-State", hr_files_state_str(s->state));
+    httpd_resp_set_hdr(req, "X-HR-Error", hr_files_err_str(s->err));
+    /* set_hdr keeps the pointer rather than a copy, so each number needs
+     * its own buffer, alive until the reply has gone out below. */
+    snprintf(got, sizeof(got), "%ld", s->received);
+    snprintf(of, sizeof(of), "%ld", s->size);
+    httpd_resp_set_hdr(req, "X-HR-Received", got);
+    httpd_resp_set_hdr(req, "X-HR-Size", of);
+    return httpd_resp_send(req, s_scratch.df.bytes, n);
+}
+#endif /* CONFIG_HR_BATCH_HISTORY */
+
 typedef esp_err_t (*route_fn_t)(httpd_req_t *);
 static route_fn_t s_post_fns[40];
 static int s_post_count;
@@ -2850,6 +3086,14 @@ void hr_http_start(hr_session_t *session, hr_history_t *history)
     reg("/api/log", HTTP_GET, h_log);
     reg("/api/log", HTTP_POST, h_log);
     reg("/api/wififlags", HTTP_POST, h_wififlags);
+#if CONFIG_HR_BATCH_HISTORY
+    reg("/api/dryer/files", HTTP_GET, h_df_state);
+    reg("/api/dryer/files/data", HTTP_GET, h_df_data);
+    reg("/api/dryer/files/list", HTTP_POST, h_df_list);
+    reg("/api/dryer/files/read", HTTP_POST, h_df_read);
+    reg("/api/dryer/files/cancel", HTTP_POST, h_df_cancel);
+    reg("/api/dryer/files/enable", HTTP_POST, h_df_enable);
+#endif
     reg("/api/compat", HTTP_GET, h_compat_get);
     reg("/api/compat", HTTP_POST, h_compat_post);
     reg("/api/dryer/reboot", HTTP_POST, h_dryer_reboot);

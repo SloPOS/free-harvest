@@ -65,6 +65,13 @@ typedef void (*hr_observer_fn)(const hr_frame_t *f, void *user);
  */
 typedef void (*hr_enc_observer_fn)(const char *frame, size_t len, void *user);
 
+/*
+ * A whole file block, in wire form and decoded if it arrived encoded - see
+ * hr_session_set_file_sink(). `frame` is the side buffer the caller lent and
+ * is only valid for the length of the call; hr_files writes to it in place.
+ */
+typedef void (*hr_block_fn)(char *frame, size_t len, void *user);
+
 /* Everything we have learned about the attached dryer. */
 typedef struct {
     /*
@@ -128,6 +135,12 @@ typedef struct {
      * one task only. */
     char enc_plain[HR_MAX_FRAME];
     hr_frame_t enc_frame;
+
+    /* File blocks (hr_files.h), delivered whole out of the side buffer and
+     * counted apart from frames, one being a kilobyte of somebody's data. */
+    hr_block_fn block_fn;
+    void *block_user;
+    unsigned long blocks_in;
 
     /*
      * Payload placed in the GOTIT ack. UNVERIFIED - the genuine adapter's
@@ -294,6 +307,20 @@ void hr_session_set_compat(hr_session_t *s, bool unique_tag, bool reask);
 
 /* Override the GOTIT ack payload. */
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload);
+
+/*
+ * Lend the session a buffer for file blocks and say where whole ones go.
+ *
+ * `buf` must hold HR_FILE_LONGBUF bytes (hr_files.h) and live as long as the
+ * session; it is written from the RX task. Called with NULL, blocks are
+ * swallowed by the stream instead - never parsed, never delivered.
+ *
+ * The REQUEST side is ordinary hr_session_send(): FDFILES and FILEREAD go out
+ * in plaintext on either firmware, exactly as FDNAME and REQCFG do, because a
+ * 6.0.644170 machine encodes only what it sends.
+ */
+void hr_session_set_file_sink(hr_session_t *s, char *buf, size_t cap,
+                              hr_block_fn fn, void *user);
 
 /* Feed received bytes with a monotonic millisecond timestamp. */
 void hr_session_rx(hr_session_t *s, const void *data, size_t n,

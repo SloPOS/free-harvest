@@ -112,6 +112,36 @@ int hr_enc_decode_len(const char *hdr);
  * header and payload, `len` bytes, NUL-terminated for convenience. */
 typedef void (*hr_enc_cb)(const char *frame, size_t len, void *user);
 
+/* ------------------------------------------------------------------ */
+/* Oversize frames                                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * Almost everything the dryer says is a short, printable, CR-terminated line,
+ * and the reassembler above is built for exactly that. One answer is not: a
+ * file block (hr_files.h) carries up to a kilobyte of file data - line feeds,
+ * commas, any byte at all - and runs well past HR_MAX_FRAME. Fed to the line
+ * rules it disintegrates into rubbish frames.
+ *
+ * So a caller that wants those frames lends the stream a SIDE BUFFER and a way
+ * to recognise one:
+ *
+ *   measure(buf, len, &total) is asked, as a line grows, whether it is going
+ *   to be an oversize frame:  1 yes and it will be `total` bytes long
+ *                             0 cannot tell yet
+ *                            -1 no (and it is not asked again for this line)
+ *
+ * From the moment it says yes, every byte goes to the side buffer and no other
+ * rule applies until `total` of them have arrived; then the whole frame goes
+ * to the callback. An encoded ")S" frame too long for the line buffer is
+ * collected there too, and arrives with `encoded` set.
+ *
+ * With NO side buffer lent, such a frame's bytes are SWALLOWED and counted in
+ * long_dropped rather than parsed - so a dryer that sends one cannot inject
+ * anything into the frame path, whether or not anybody wanted the file.
+ */
+typedef int (*hr_long_measure_fn)(const char *buf, size_t len, size_t *total);
+typedef void (*hr_long_cb)(char *frame, size_t len, bool encoded, void *user);
+
 /*
  * Accumulates bytes arriving in arbitrary chunk sizes (USB CDC reads do not
  * respect frame boundaries) and emits whole frames.
@@ -138,6 +168,24 @@ typedef struct {
     unsigned long enc_bad;    /* encoded frames abandoned (partial, cut, oversize) */
     hr_enc_cb enc;            /* optional; see hr_enc_cb */
     void *enc_user;
+
+    /*
+     * Oversize frames - see hr_long_cb. While long_need is non-zero the frame
+     * in progress lives in the caller's buffer and every other rule is
+     * suspended; long_skip counts down the bytes of one nobody can hold.
+     */
+    char *long_buf;             /* NULL: oversize frames are swallowed */
+    size_t long_cap;
+    size_t long_len;
+    size_t long_need;           /* total being collected; 0 = not collecting */
+    size_t long_skip;           /* bytes still to swallow */
+    bool long_enc;              /* what is being collected is a ")S" frame */
+    bool long_not;              /* this line cannot be an oversize frame */
+    unsigned long long_frames;  /* delivered whole */
+    unsigned long long_dropped; /* swallowed, or abandoned part-way */
+    hr_long_measure_fn long_measure;
+    hr_long_cb long_cb;
+    void *long_user;
 } hr_stream_t;
 
 void hr_stream_init(hr_stream_t *s);
@@ -147,6 +195,14 @@ void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user);
 
 /* Register (or clear, with NULL) the encoded-frame observer. */
 void hr_stream_set_enc_cb(hr_stream_t *s, hr_enc_cb cb, void *user);
+
+/*
+ * Lend the stream a buffer for oversize frames, and the means to spot one.
+ * `cap` must be at least HR_MAX_FRAME. Passing NULL takes it back, and
+ * oversize frames go back to being swallowed.
+ */
+void hr_stream_set_long(hr_stream_t *s, char *buf, size_t cap,
+                        hr_long_measure_fn measure, hr_long_cb cb, void *user);
 
 /*
  * Throw away a frame that began but never got its terminator, reporting it

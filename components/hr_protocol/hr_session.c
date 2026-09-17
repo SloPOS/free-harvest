@@ -1,5 +1,6 @@
 #include "hr_session.h"
 #include "hr_enc.h"
+#include "hr_files.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -273,6 +274,78 @@ static void on_enc(const char *frame, size_t len, void *user)
     }
 }
 
+/*
+ * A whole oversize frame out of the stream's side buffer (hr_long_cb). Two
+ * shapes arrive:
+ *
+ *   plaintext - a file block, as sent on either firmware;
+ *   encoded   - a ")S" frame too long for the line buffer, which is decoded
+ *               IN PLACE. Base64 shrinks four characters to three bytes, so
+ *               the writer never catches the reader and the plaintext lands
+ *               at the front of the same buffer.
+ *
+ * What comes out is either a file block, which goes to whoever asked for one,
+ * or an ordinary frame that simply did not fit - which takes the usual path.
+ */
+static void on_long(char *frame, size_t len, bool encoded, void *user)
+{
+    hr_session_t *s = (hr_session_t *)user;
+
+    s->last_rx_ms = s->now_ms;
+    s->link = HR_LINK_UP;
+
+    char *plain = frame;
+    size_t plen = len;
+    if (encoded) {
+        s->last_enc_ms = s->now_ms;
+        s->last_enc_len = len;
+        s->stream.enc_frames++;
+        s->stream.enc_bytes += len;
+        if (s->enc_observer != NULL) {
+            s->enc_observer(frame, len, s->enc_observer_user);
+        }
+        const int pn = hr_enc_decode(frame, len, frame, s->stream.long_cap);
+        if (pn <= 0) {
+            s->enc_undecoded++;
+            return;
+        }
+        s->enc_decoded++;
+        plen = (size_t)pn;
+    }
+
+    if (s->block_fn != NULL && plen > 12 &&
+        memcmp(plain, "FDFILEBLOCK,", 12) == 0) {
+        s->frames_in++;
+        s->blocks_in++;
+        s->block_fn(plain, plen, s->block_user);
+        return;
+    }
+    if (plen < HR_MAX_FRAME && hr_frame_parse(plain, &s->enc_frame)) {
+        on_frame(&s->enc_frame, s);
+    } else if (encoded) {
+        s->enc_undecoded++;
+    } else {
+        s->stream.frames_bad++;
+    }
+}
+
+void hr_session_set_file_sink(hr_session_t *s, char *buf, size_t cap,
+                              hr_block_fn fn, void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->block_fn = fn;
+    s->block_user = user;
+    /*
+     * The measure function goes in whether or not a buffer came with it: a
+     * dryer can send a block unasked, and the stream has to know enough to
+     * swallow it rather than shred it into frames.
+     */
+    hr_stream_set_long(&s->stream, buf, cap, hr_file_block_measure,
+                       buf != NULL ? on_long : NULL, s);
+}
+
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user)
 {
     if (s == NULL) {
@@ -321,7 +394,10 @@ void hr_session_rx(hr_session_t *s, const void *data, size_t n,
         return;
     }
     s->now_ms = now_ms;
-    if (s->stream.len > 0 &&
+    /* A frame half-collected in the side buffer goes stale the same way a
+     * half-collected line does, and has to be let go of as readily. */
+    if ((s->stream.len > 0 || s->stream.long_need > 0 ||
+         s->stream.long_skip > 0) &&
         now_ms - s->last_byte_ms > HR_PARTIAL_STALE_MS) {
         hr_stream_discard_partial(&s->stream, "stale");
     }
