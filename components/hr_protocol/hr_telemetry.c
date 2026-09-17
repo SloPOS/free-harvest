@@ -76,8 +76,8 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
         out->prep_active = true;
         out->prep_remaining_s = hr_frame_field_int(f, 16, 0);
         copy_field(out->mode, sizeof(out->mode), f, 9);
-    } else if (out->type == 4 || out->type == 5 ||
-               out->type == 6 || out->type == 7) {
+    } else if (out->type == 4 || out->type == 5 || out->type == 6 ||
+               out->type == 7 || out->type == 44) {
         /*
          * In-cycle frames (freezing = 4, drying = 5). Same field layout as the
          * prep frame: mode at [9], phase-progress percent at [11].
@@ -93,6 +93,22 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
             out->freeze_pct = out->phase_pct; /* compat alias */
         }
         copy_field(out->mode, sizeof(out->mode), f, 9);
+    } else if (out->type == 8) {
+        /*
+         * Pump purge before a defrost. This screen uses the SHORT header -
+         * no mode block - so its own fields follow the status code directly:
+         * [9] flags, [10] the purge countdown, [11] the defrost time the
+         * panel is offering. Bit 2 of the flags is the pump actually
+         * venting; the other bits track the pump type and the range of
+         * defrost times allowed, neither of which we act on.
+         *
+         * Captured 2026-09-17: ...,50,3,0,7200 with the screen open and the
+         * pump idle, then ...,50,7,300,7200 the moment it started.
+         */
+        out->purge_active = true;
+        out->purge_pump_on = (hr_frame_field_int(f, 9, 0) & 0x4) != 0;
+        out->purge_remaining_s = hr_frame_field_int(f, 10, 0);
+        out->defrost_offer_s = hr_frame_field_int(f, 11, 0);
     } else if (out->type == 1) {
         /* Idle frame: mode at [11], version at [12]. */
         copy_field(out->mode, sizeof(out->mode), f, 11);
@@ -106,7 +122,7 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
      * nonsense: a screen walk showed mode reported as "5" on type 2,
      * "-15" on type 31 and "5" on type 15, because field [11] means
      * something different on each of those screens. STAT is multiplexed on
-     * the type discriminator and only types 1, 4-7 and 17 have been
+     * the type discriminator and only types 1, 4-8, 17 and 44 have been
      * confirmed against real captures.
      *
      * Leaving the field empty is honest; showing a number as if it were a
@@ -223,6 +239,24 @@ void hr_phase_tracker_update(hr_phase_tracker_t *tr, const hr_telemetry_t *t,
      */
     if (t->type == 17) {
         tr->have = true;
+        return;
+    }
+
+    /*
+     * The pump purge (type 8) is the one screen where the batch-elapsed
+     * counter advances with no batch behind it: the run finished, the owner
+     * chose DEFROST, and the counter kept moving for the five minutes the
+     * pump vented (+311 s over one captured purge) before freezing on Ready.
+     *
+     * Take the value as the new baseline so the Ready frame that follows is
+     * compared against something current, but never call this a run - the
+     * dashboard would otherwise announce a batch that has already ended.
+     */
+    if (t->type == 8) {
+        tr->have = true;
+        tr->last_elapsed = t->batch_elapsed_s;
+        tr->last_change_ms = now_ms;
+        tr->running = false;
         return;
     }
 
@@ -368,9 +402,22 @@ hr_phase_t hr_phase_of(const hr_telemetry_t *t)
     case 5:
         return HR_PHASE_DRYING;
     case 6:
+    /*
+     * 44 is the same screen as 6. The dryer sends exactly one type-44 frame,
+     * in the type-6 layout, as "dry to completion" hands over to the timed
+     * final dry, and then goes back to sending 6. This is the frame the notes
+     * had as "seen once inside final dry, unmapped".
+     */
+    case 44:
         return HR_PHASE_FINAL_DRY;
     case 7:
         return HR_PHASE_COMPLETE;
+    case 8:
+        return HR_PHASE_PUMP_PURGE;
+    case 9:
+        return HR_PHASE_DEFROST;
+    case 10:
+        return HR_PHASE_DEFROST_DONE;
     case 2:
         return HR_PHASE_TRANSITION;
     case 15:
@@ -400,6 +447,9 @@ const char *hr_phase_label(hr_phase_t p)
     case HR_PHASE_DRYING:      return "Drying";
     case HR_PHASE_FINAL_DRY:   return "Final dry";
     case HR_PHASE_COMPLETE:    return "Batch complete";
+    case HR_PHASE_PUMP_PURGE:  return "Pump purge";
+    case HR_PHASE_DEFROST:     return "Defrosting";
+    case HR_PHASE_DEFROST_DONE: return "Defrost complete";
     default:                   return "Unknown";
     }
 }
@@ -417,11 +467,13 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap)
                      "{\"type\":%d,\"temp_f\":%ld,\"pressure\":%ld,"
                      "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld,"
                      "\"freeze_pct\":%ld,\"phase_pct\":%ld,"
-                     "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s}",
+                     "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s,"
+                     "\"purge_s\":%ld}",
                      t->type, t->temperature_f, t->pressure_raw,
                      t->batch_elapsed_s, mode, t->prep_remaining_s,
                      t->freeze_pct, t->phase_pct, t->phase_elapsed_s,
-                     t->pressure_microns, t->pressure_valid ? "true" : "false");
+                     t->pressure_microns, t->pressure_valid ? "true" : "false",
+                     t->purge_remaining_s);
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }

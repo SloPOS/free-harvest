@@ -51,6 +51,20 @@ typedef struct {
     long freeze_pct;     /* alias of phase_pct while freezing (compat) */
     char mode[16];       /* mode string when present (e.g. "Auto","QUALITY") */
     char version[24];    /* firmware version string when present */
+    /*
+     * Type 8, the pump purge the dryer runs on the way to a defrost (see
+     * HR_PHASE_PUMP_PURGE). Field indices are the ones hr_frame_field()
+     * counts, where [0] is the type.
+     *
+     * purge_active is true for every type-8 frame; purge_pump_on only once
+     * the pump is actually venting (bit 2 of the flags in [9]).
+     * purge_remaining_s is the dryer's own countdown in [10], and
+     * defrost_offer_s the defrost duration the panel offers in [11].
+     */
+    bool purge_active;
+    bool purge_pump_on;
+    long purge_remaining_s;
+    long defrost_offer_s;
 } hr_telemetry_t;
 
 /*
@@ -63,7 +77,8 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out);
  * Build a compact JSON object of the telemetry into `buf` for publishing to
  * the MQTT state topic. Returns bytes written (excluding NUL), 0 on overflow.
  * Example: {"type":1,"temp_f":69,"pressure":151882,"elapsed_s":0,
- *           "mode":"QUALITY","prep_s":0}
+ *           "mode":"QUALITY","prep_s":0,...,"purge_s":0}
+ * purge_s is the type-8 pump-purge countdown, 0 on every other screen.
  */
 size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap);
 
@@ -74,10 +89,10 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap);
  * Phase of the freeze-drying cycle, used to decide which screen and which
  * (panel) options to show - mirroring the owner's manual screens.
  *
- * CONFIDENCE: IDLE / PREPARING / FREEZING / RUNNING and the DIAGNOSTICS and
- * RECIPE views are confirmed against real captures. The remaining sub-phases
- * the manual describes (Drying vs Extra Dry vs Complete vs Defrost) have NOT
- * been observed on the wire yet, so they are not guessed at here.
+ * CONFIDENCE: IDLE / PREPARING / TRANSITION / FREEZING / DRYING / FINAL_DRY /
+ * COMPLETE / RUNNING, the DIAGNOSTICS and RECIPE views, and PUMP_PURGE are
+ * confirmed against real captures. DEFROST and DEFROST_DONE are not: they
+ * carry a label and nothing else until someone captures the frames.
  */
 typedef enum {
     HR_PHASE_UNKNOWN = 0,
@@ -113,6 +128,34 @@ typedef enum {
      * end-of-cycle marker.
      */
     HR_PHASE_COMPLETE,
+    /*
+     * Everything below is APPENDED so the numbers above never move: the web
+     * UI and MQTT consumers compare against them.
+     */
+    /*
+     * type 8 - the screen between "batch complete" and a defrost, reached by
+     * choosing DEFROST when the batch ends. On a machine with an oil-free
+     * pump the dryer vents the pump for five minutes while the owner sets the
+     * defrost time: [9] carries flags whose bit 2 is "venting now", [10]
+     * counts 300 seconds down to zero, and [11] is the defrost time offered.
+     *
+     * Captured 2026-09-17 on a 6.0.644170 machine (22 frames): flags 3 -> 7
+     * as the pump started, the countdown running out, then the Ready frame.
+     * The batch-elapsed counter keeps ADVANCING on this screen although the
+     * batch is over, so this is deliberately not a running phase.
+     *
+     * This screen uses the short STAT header - no mode block - which is why
+     * its own fields start right after the status code, as on types 1 and 7.
+     */
+    HR_PHASE_PUMP_PURGE,
+    /*
+     * type 9 - the defrost itself; type 10 - defrost finished. Reported from
+     * a read of the dryer's own screen table (vskiwi, PR #10), NOT from a
+     * capture: neither frame has been seen on the wire, so nothing beyond the
+     * shared header is decoded and the label is all that is claimed.
+     */
+    HR_PHASE_DEFROST,
+    HR_PHASE_DEFROST_DONE,
 } hr_phase_t;
 
 /* Short human label, e.g. "Preparing dryer". Never NULL. */

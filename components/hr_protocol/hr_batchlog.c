@@ -12,6 +12,20 @@
 #define SCR_FINAL_DRY 6
 #define SCR_COMPLETE  7
 #define SCR_PREPARING 17
+/*
+ * The dryer sends one frame of this type, in the final-dry layout, as drying
+ * to completion hands over to the timed final dry, then goes back to 6. Left
+ * as its own number it breaks the chain phase time is accumulated along -
+ * neither the frame before it nor the one after is "the same phase" - and two
+ * sample intervals of final dry go uncounted. It is the same screen, so it is
+ * folded into 6 on the way in.
+ */
+#define SCR_FINAL_DRY_ALT 44
+
+static int fold_screen(int phase)
+{
+    return (phase == SCR_FINAL_DRY_ALT) ? SCR_FINAL_DRY : phase;
+}
 
 /*
  * Largest gap between two samples that still counts as time spent in a phase.
@@ -36,6 +50,7 @@
 
 static bool phase_is_running(int p)
 {
+    p = fold_screen(p);
     return p == SCR_PREPARING || p == SCR_STARTING || p == SCR_FREEZING ||
            p == SCR_DRYING || p == SCR_FINAL_DRY;
 }
@@ -270,6 +285,7 @@ hr_batch_event_t hr_batch_observe(hr_batch_tracker_t *t, int phase,
         return HR_BATCH_NOTHING;
     }
 
+    phase = fold_screen(phase);
     hr_batch_event_t ev = HR_BATCH_NOTHING;
     const bool running = phase_is_running(phase);
 

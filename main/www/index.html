@@ -1233,6 +1233,32 @@ const PHASE = {
       {k:"NO DEFROST", d:"End here and let the ice melt on its own"}],
     note:"Break a thick piece in half to check it's dry all the way through "+
          "before packaging — one moist piece can spoil a whole bag." },
+  11:{ /* PUMP PURGE - STAT type 8, after choosing DEFROST */
+    head:"Clearing the pump before defrosting",
+    body:"You chose <b>DEFROST</b> when the batch finished. An oil-free pump "+
+         "is run for about five minutes first to clear the moisture out of "+
+         "it, and the panel lets you set how long to defrost while it does. "+
+         "<b>Nothing to do until the countdown ends.</b>",
+    opts:[
+      {k:"CONTINUE", d:"Begin defrosting once the pump has finished"},
+      {k:"TURN PUMP OFF", d:"Stop clearing the pump early"},
+      {k:"NO DEFROST", d:"Skip defrosting and go back to Ready"}],
+    note:"The batch itself is already over; the elapsed time still counting "+
+         "up on this screen is not a run." },
+  12:{ /* DEFROSTING - STAT type 9, never captured */
+    head:"Defrosting the chamber",
+    body:"The shelves are warming to melt the ice off the chamber walls. "+
+         "<b>Leave the drain valve open</b> with the hose in a bucket.",
+    opts:[],
+    note:"This screen is known from the dryer's own screen list, not from a "+
+         "capture — if you see it, a saved capture would be welcome." },
+  13:{ /* DEFROST COMPLETE - STAT type 10, never captured */
+    head:"Defrost complete",
+    body:"The chamber has defrosted. Wipe it dry, and check the pump oil if "+
+         "the panel asks you to.",
+    opts:[],
+    note:"This screen is known from the dryer's own screen list, not from a "+
+         "capture — if you see it, a saved capture would be welcome." },
 };
 
 /*
@@ -2267,6 +2293,7 @@ function paintDash(st){
   const frz    = phase === 7;                 /* HR_PHASE_FREEZING  */
   const dry    = phase === 8 || phase === 9;  /* DRYING / FINAL_DRY */
   const done   = phase === 10;                /* HR_PHASE_COMPLETE  */
+  const purge  = phase === 11;                /* HR_PHASE_PUMP_PURGE */
   const eta    = (st.freeze_eta_s === undefined) ? -1 : st.freeze_eta_s;
   const pct    = (st.phase_pct === undefined) ? st.freeze_pct : st.phase_pct;
 
@@ -2290,6 +2317,10 @@ function paintDash(st){
     : dry     ? (st.vacuum_ok ? (st.vacuum_um + " microns · " + fmtTU(st.temp_f))
                               : ("drying · " + fmtTU(st.temp_f)))
     : done    ? "Venting — open the drain valve on the dryer"
+    /* The dryer's own five-minute countdown, or nothing yet if the pump has
+       not been started from the panel. */
+    : purge   ? (st.purge_s > 0 ? "Clearing the pump · " + hhmmss(st.purge_s) + " left"
+                                : "Waiting for the pump to start")
     : running ? "Running for " + hhmmss(st.elapsed_s)
     /* With control switched on the app can start a batch itself, so telling
        the reader to walk to the machine is simply wrong. */
@@ -2316,6 +2347,12 @@ function paintDash(st){
     ring.style.setProperty("--p", 100);
     $("#ringval").textContent = "Done";
     $("#ringlab").textContent = "venting";
+  } else if(purge){
+    /* Fills as the dryer's 300-second purge runs down; "—" before it starts. */
+    const left = st.purge_s || 0;
+    ring.style.setProperty("--p", Math.min(100,Math.max(0,(300-left)/300*100)).toFixed(0));
+    $("#ringval").textContent = left > 0 ? hhmmss(left) : "—";
+    $("#ringlab").textContent = "pump purge";
   } else if(running){
     ring.style.setProperty("--p", 100);
     $("#ringval").textContent = hhmmss(clockNow("batch"));

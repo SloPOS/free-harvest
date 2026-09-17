@@ -29,7 +29,14 @@ static const char *TAG = "hr_mqtt";
  */
 #define PUB_QUEUE_DEPTH 4
 typedef struct {
-    char json[256];
+    /*
+     * Room for the state document at its longest. hr_telemetry_to_json()
+     * refuses rather than truncates, so a document that does not fit is a
+     * sample that never reaches Home Assistant, silently - and the worst
+     * case (every counter at full width, a 15-character mode) is 285 bytes,
+     * which 256 did not cover. Four of these sit in the queue.
+     */
+    char json[320];
 } pub_item_t;
 static QueueHandle_t s_pub_queue;
 static TaskHandle_t s_pub_task;

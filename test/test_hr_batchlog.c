@@ -110,6 +110,8 @@ static void test_short_buffer_writes_nothing(void)
 #define FINAL 6
 #define DONE 7
 #define PREP 17
+#define FINAL_ALT 44   /* the one-frame variant of FINAL the dryer sends */
+#define PURGE 8        /* pump purge, after DEFROST on the Complete screen */
 
 static void test_a_whole_run(void)
 {
@@ -501,8 +503,67 @@ static void test_a_run_resumes_across_a_power_loss(void)
     CHECK_INT((int)rec.duration_s, 70);
 }
 
+static void test_the_final_dry_variant_keeps_counting(void)
+{
+    /*
+     * The dryer drops a single type-44 frame into final dry at the handover
+     * to the timed stage. It is the same screen, so the phase total must run
+     * straight through it: treated as its own phase, the interval before it
+     * and the interval after are both uncredited, and a long final dry comes
+     * out short - the failure the phase totals exist to avoid.
+     */
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+
+    CHECK_INT(hr_batch_observe(&t, FREEZE, 100, -20, 0, "Auto", 100, &rec),
+              HR_BATCH_STARTED);
+    hr_batch_observe(&t, DRY,   200, -10, 900, "Auto", 200, &rec);
+    hr_batch_observe(&t, FINAL, 300, 100, 400, "Auto", 300, &rec);
+    hr_batch_observe(&t, FINAL, 400, 110, 350, "Auto", 400, &rec);
+    /* the handover frame, then business as usual */
+    hr_batch_observe(&t, FINAL_ALT, 500, 115, 300, "Auto", 500, &rec);
+    hr_batch_observe(&t, FINAL, 600, 120, 282, "Auto", 600, &rec);
+    CHECK_INT(hr_batch_observe(&t, DONE, 700, 69, 0, "Auto", 700, &rec),
+              HR_BATCH_FINISHED);
+
+    /* 300 -> 600 in final dry, every interval counted. */
+    CHECK_INT((int)rec.final_s, 300);
+    CHECK_INT(rec.outcome, HR_OUTCOME_COMPLETE);
+}
+
+static void test_a_purge_after_the_batch_starts_nothing(void)
+{
+    /*
+     * Choosing DEFROST when the batch ends leads to the pump-purge screen,
+     * whose elapsed counter keeps advancing although the run is over. The
+     * record is already closed by then and nothing may reopen it.
+     */
+    hr_batch_tracker_t t;
+    hr_batch_t rec;
+    hr_batch_tracker_reset(&t);
+
+    hr_batch_observe(&t, FREEZE, 100, -20, 0, "Auto", 100, &rec);
+    hr_batch_observe(&t, FINAL, 200, 120, 300, "Auto", 200, &rec);
+    CHECK_INT(hr_batch_observe(&t, DONE, 300, 69, 0, "Auto", 300, &rec),
+              HR_BATCH_FINISHED);
+    CHECK(!t.active);
+
+    CHECK_INT(hr_batch_observe(&t, PURGE, 400, 41, 0, "Auto", 400, &rec),
+              HR_BATCH_NOTHING);
+    CHECK_INT(hr_batch_observe(&t, PURGE, 500, 40, 0, "Auto", 500, &rec),
+              HR_BATCH_NOTHING);
+    CHECK(!t.active);
+    /* and the Ready frame that follows it does not either */
+    CHECK_INT(hr_batch_observe(&t, IDLE, 500, 36, 0, "Auto", 600, &rec),
+              HR_BATCH_NOTHING);
+    CHECK(!t.active);
+}
+
 int main(void)
 {
+    test_the_final_dry_variant_keeps_counting();
+    test_a_purge_after_the_batch_starts_nothing();
     test_round_trip();
     test_torn_lines_are_rejected();
     test_name_cannot_break_the_record();

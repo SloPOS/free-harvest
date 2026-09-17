@@ -80,7 +80,7 @@ static void test_json_output(void)
               "{\"type\":1,\"temp_f\":69,\"pressure\":151882,"
               "\"elapsed_s\":0,\"mode\":\"QUALITY\",\"prep_s\":0,"
               "\"freeze_pct\":0,\"phase_pct\":0,\"phase_s\":0,"
-              "\"vacuum_um\":0,\"vacuum_ok\":false}");
+              "\"vacuum_um\":0,\"vacuum_ok\":false,\"purge_s\":0}");
 
     /* mode is dryer-supplied text; a quote in it must not break the JSON */
     parse("STAT,1,0,0,0,69,151882,0,0,38,0,1,QU\"AL\\TY,v6.4,,\r", &t);
@@ -587,8 +587,134 @@ static void test_unconfirmed_types_do_not_invent_a_mode(void)
     CHECK_STR(t.mode, "Auto");
 }
 
+/* ---- the defrost path: types 8, 44, 9 and 10 (captures of 2026-09-17) ---- */
+
+static void test_type8_reads_the_pump_purge(void)
+{
+    /*
+     * Real frames from a 6.0.644170 machine after DEFROST was chosen on the
+     * Complete screen: the screen opens with the pump idle (flags 3, no
+     * countdown), the pump starts (flags 7, 300 s), and it runs down.
+     */
+    TEST_CASE("type8 reads the pump purge");
+    hr_telemetry_t idle_pump, started, nearly;
+
+    CHECK(parse("STAT,8,0,0,0,41,46221,159616,92830,50,3,0,7200,,\r",
+                &idle_pump));
+    CHECK(idle_pump.valid);
+    CHECK_INT(idle_pump.type, 8);
+    CHECK_INT(hr_phase_of(&idle_pump), HR_PHASE_PUMP_PURGE);
+    CHECK(idle_pump.purge_active);
+    CHECK(!idle_pump.purge_pump_on);          /* bit 2 clear: not venting yet */
+    CHECK_INT(idle_pump.purge_remaining_s, 0);
+    CHECK_INT(idle_pump.defrost_offer_s, 7200);
+    CHECK_INT(idle_pump.temperature_f, 41);
+    /* Short header, so no mode block to read - and 46221 is atmosphere. */
+    CHECK_STR(idle_pump.mode, "");
+    CHECK(!idle_pump.pressure_valid);
+
+    CHECK(parse("STAT,8,0,0,0,40,45735,159639,92830,50,7,300,7200,,\r",
+                &started));
+    CHECK(started.purge_pump_on);
+    CHECK_INT(started.purge_remaining_s, 300);
+
+    CHECK(parse("STAT,8,0,0,0,36,39793,159927,92830,50,7,12,7200,,\r",
+                &nearly));
+    CHECK(nearly.purge_pump_on);
+    CHECK_INT(nearly.purge_remaining_s, 12);
+    /* The batch counter keeps moving across the purge. */
+    CHECK(nearly.batch_elapsed_s > started.batch_elapsed_s);
+
+    /* Every other screen reports no purge at all. */
+    hr_telemetry_t ready;
+    CHECK(parse("STAT,1,0,0,0,36,38215,159939,92830,38,1,1,Auto,v6.5,,\r",
+                &ready));
+    CHECK(!ready.purge_active);
+    CHECK(!ready.purge_pump_on);
+    CHECK_INT(ready.purge_remaining_s, 0);
+    CHECK_INT(ready.defrost_offer_s, 0);
+}
+
+static void test_purge_is_never_a_run(void)
+{
+    /*
+     * The batch is over by the time this screen appears, but its elapsed
+     * counter advances - which is exactly the shape of a running batch. The
+     * tracker must not be fooled, and the Ready frame that follows (counter
+     * frozen) must read idle straight away rather than after the stale
+     * timeout.
+     */
+    TEST_CASE("a purge is never a run");
+    hr_phase_tracker_t tr;
+    hr_telemetry_t t;
+    hr_phase_tracker_init(&tr);
+    feed(&tr, "STAT,8,0,0,0,40,45735,159639,92830,50,7,300,7200,,\r",
+         100000, &t);
+    feed(&tr, "STAT,8,0,0,0,40,44847,159654,92830,50,7,285,7200,,\r",
+         115000, &t);
+    feed(&tr, "STAT,8,0,0,0,39,39808,159678,92830,50,7,261,7200,,\r",
+         139000, &t);
+    CHECK(!tr.running);
+    CHECK_INT(hr_phase_of_tracked(&t, &tr), HR_PHASE_PUMP_PURGE);
+
+    feed(&tr, "STAT,1,0,0,0,36,38215,159678,92830,38,1,1,Auto,v6.5,,\r",
+         154000, &t);
+    CHECK(!tr.running);
+    CHECK_INT(hr_phase_of_tracked(&t, &tr), HR_PHASE_IDLE);
+}
+
+static void test_type44_decodes_as_final_dry(void)
+{
+    /*
+     * The one type-44 frame, at the handover to the timed final dry: same
+     * layout as type 6, so mode and phase percentage must both come out.
+     */
+    TEST_CASE("type44 decodes as final dry");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,44,0,0,0,120,282,132103,92830,47,Auto,1,99,0,0,7,2,0,"
+                "31370,,\r", &t));
+    CHECK_INT(t.type, 44);
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_FINAL_DRY);
+    CHECK_STR(t.mode, "Auto");
+    CHECK_INT(t.phase_pct, 99);
+    CHECK(t.pressure_valid);
+    CHECK_INT(t.pressure_microns, 282);
+    CHECK(!t.purge_active);
+}
+
+static void test_defrost_screens_are_labelled_only(void)
+{
+    /*
+     * Types 9 and 10 have never been captured: they get a phase and a label,
+     * and nothing is invented from their tails.
+     */
+    TEST_CASE("defrost screens are labelled only");
+    hr_telemetry_t t;
+    CHECK(parse("STAT,9,0,0,0,45,46000,160000,0,51,1,0,7200,,\r", &t));
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_DEFROST);
+    CHECK_STR(t.mode, "");
+    CHECK(!t.purge_active);
+    CHECK_INT(t.phase_pct, 0);
+
+    CHECK(parse("STAT,10,0,0,0,60,46000,160000,0,52,,\r", &t));
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_DEFROST_DONE);
+    CHECK_STR(t.mode, "");
+
+    CHECK_STR(hr_phase_label(HR_PHASE_PUMP_PURGE), "Pump purge");
+    CHECK_STR(hr_phase_label(HR_PHASE_DEFROST), "Defrosting");
+    CHECK_STR(hr_phase_label(HR_PHASE_DEFROST_DONE), "Defrost complete");
+
+    /* A type the dryer's own screen list has nothing for stays unknown. */
+    CHECK(parse("STAT,38,0,0,0,60,46000,0,0,0,,\r", &t));
+    CHECK_INT(hr_phase_of(&t), HR_PHASE_UNKNOWN);
+}
+
 int main(void)
 {
+    test_type8_reads_the_pump_purge();
+    test_purge_is_never_a_run();
+    test_type44_decodes_as_final_dry();
+    test_defrost_screens_are_labelled_only();
     test_type6_is_final_dry();
     test_type7_is_complete_and_vents();
     test_new_phase_labels();

@@ -1519,3 +1519,78 @@ been sent a STATUS, which makes it the one untried path to telemetry.
 Added to the handshake and to the retry set in 1.0.5.6. Side benefit on a
 healthy dryer: first telemetry arrives in about 3 seconds instead of waiting
 up to 15 for the machine to volunteer it.
+
+## The defrost path: screens 8, 9, 10, and what 44 turned out to be (2026-09-17)
+
+Four STAT types the parser did not know. Two of them are now decoded from a
+real capture; two are named on the strength of a firmware reading we have not
+reproduced ourselves.
+
+**Sources, kept apart.** The 22 type-8 frames and the type-44 frame below are a
+capture from a 6.0.644170 LARGE machine, reported by vskiwi in PR #10 - wire
+evidence anyone can check against their own dryer. The claims about the screen
+list, the status-code table and the pressure clamp come from that same report's
+reading of the 641041 image; they are consistent with every frame we hold, but
+we have not repeated the analysis, so they are recorded as reported, not as
+ours. Field indices below are the ones `hr_frame_field()` counts, where `[0]`
+is the type.
+
+### Type 8 - the pump purge before a defrost
+
+Choosing DEFROST when a batch finishes leads here. On a machine with an
+oil-free pump the dryer runs the pump for five minutes to clear moisture out
+of it, while the panel offers a defrost duration:
+
+    STAT,7,0,0,0,41,46040,139303,92830,48,312,0,0,90,Auto,,  complete
+    STAT,8,0,0,0,41,46221,159616,92830,50,3,0,7200,,         screen open, pump idle
+    STAT,8,0,0,0,40,45735,159639,92830,50,7,300,7200,,       pump started
+    STAT,8,0,0,0,40,44847,159654,92830,50,7,285,7200,,       -15 s per frame
+    STAT,8,0,0,0,36,39793,159927,92830,50,7,12,7200,,
+    STAT,1,0,0,0,36,38215,159939,92830,38,1,1,Auto,v6.5,,    ready again
+
+- `[9]` flags. Bit 2 is the pump venting right now - the 3 -> 7 step is the
+  moment it started. The other bits track the pump type and which defrost
+  durations the screen will offer; we act on neither.
+- `[10]` seconds left in the purge, 300 down to 0, and 0 before it starts.
+- `[11]` the defrost time on offer, in seconds.
+- `[6]`, batch elapsed, **keeps advancing here** (+311 s across this purge)
+  even though the batch is over, and then freezes once the dryer is Ready.
+  `hr_phase_tracker` adopts the value as its baseline without calling it a
+  run - otherwise the dashboard announces a batch that has already ended.
+- This screen uses the short header form (no mode block), like types 1 and 7,
+  which is why its own fields start immediately after the status code.
+
+Free Harvest maps it to `HR_PHASE_PUMP_PURGE` and publishes `[10]` as
+`purge_s` in `/api/state` and in the MQTT state document.
+
+### Type 44 - final dry, once
+
+The dryer sends exactly one type-44 frame, in the type-6 layout, at the
+handover from "dry to completion" to the timed final dry, alongside
+`NTFY,44,7200,Auto,0,`; then it goes back to type 6. The status code `[8]`
+reads 46 before the handover and 47 after. This is the "seen once inside final
+dry" screen from the 2026-08-21 notes - not a separate screen, and `44` is now
+decoded exactly as `6`.
+
+### Types 9 and 10 - defrosting, and defrost finished
+
+Reported from the dryer's own screen list; **never captured**. They get a
+phase and a label and nothing else - no tail fields are decoded - and
+`tools/map_screens.py` still asks for the frames. If your machine defrosts
+while the adapter is plugged in, that capture is wanted.
+
+### Two side findings from the same report
+
+**`[8]` is a panel status code**, not a temperature and not the screen id. It
+is recomputed before every send, and the values we hold fit the table quoted
+in the report: 38 ready, 42 preparing, 43 load trays, 45 freezing, 46 drying
+and dry-to-completion, 47 timed final dry, 48 complete, 50 pre-defrost, with
+error states overriding it. Our parser does not read `[8]`; this is recorded
+so nobody mistakes it for a screen number later.
+
+**The 10000 pressure is a clamp, not a placeholder.** The report puts the
+`min(p, 10000)` in the part of the header builder that only the long form
+uses. That fits what we see: the long-form screens read exactly 10000 at
+atmosphere, while the short-form screens (1, 7, 8) print the raw sensor value,
+39,000-155,000. `hr_telemetry`'s rule - anything at or above 10000 is "no
+vacuum" - is unchanged and still right; only the explanation was wrong.
