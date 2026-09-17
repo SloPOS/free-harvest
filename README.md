@@ -332,6 +332,27 @@ The adapter has no clock and does not use SNTP, so it learns the time from your
 browser when you open the app. Records written before that ever happens say
 "date not recorded" rather than claiming 1970.
 
+### Batch history — the dryer's own logs
+
+The dryer itself keeps a CSV log of every batch, minute by minute: shelf, top
+and bottom thermocouples, vacuum, heater state, the phase — and the **room**
+thermocouple (J18), which no live frame carries. Settings → **Batch history**
+lists those files and reads them straight off the dryer over the same USB link
+(`FDFILES` / `FILEREAD`, both read-only). Open one for a chart with the phases
+as coloured bands, a phase table (start, end, duration, shelf min/max, deepest
+vacuum, room average) and a "Batch info" fold-out with what the dryer wrote in
+the header (firmware, serial, presets, pump). Or download the CSV as the dryer
+wrote it.
+
+The dryer hands out one 1 KB block per request and needs about 170 ms per
+block, so a file reads at 5–6 KB/s whatever the Wi-Fi does: a 6 KB test batch
+in a second, a 50-hour batch (276 KB) in under a minute. Nothing is stored on
+the adapter — the bytes go to the browser as they arrive. Reading is refused
+while a batch is running unless you tick "Allow while a batch is running"; a
+running machine has better things to do with its USB port than answer six
+requests a second. The switch for the whole feature is on the same page and
+lives in NVS.
+
 ### Light and dark, phone and desktop
 
 The interface follows your system theme, or you can pin it in Settings.
@@ -408,6 +429,7 @@ hrdryer/<id>/config/set   → set batch name
 | **Wi-Fi** | Network status, change network, forget network |
 | **Home Assistant / MQTT** | Broker host, port, credentials, connection status |
 | **Live data feed** | Verbs seen, live frame log, download capture |
+| **Batch history** | The dryer's own per-batch CSV logs: list, chart, phases, download; on/off switch |
 | **Firmware update** | OTA upload |
 | **Debug & advanced** | Device log, set dryer clock, raw commands, counters |
 | **About** | Version number — quote this when reporting issues |
@@ -510,6 +532,8 @@ components/hr_protocol/     portable core (no ESP-IDF deps, fully testable)
   hr_history.[ch]             frame ring buffer, per-verb table, field diffing
   hr_telemetry.[ch]           STAT decoding, cycle-phase detection
   hr_trend.[ch]               30s series + temperature-adaptive smoothing
+  hr_files.[ch]               the dryer's file protocol (FDFILES / FILEREAD),
+                              transfer state machine, batch CSV parser
 main/                       ESP-IDF layer
   main.c                      wiring
   hr_usb.[ch]                 TinyUSB CDC-ACM device (the dryer is USB host)
@@ -518,6 +542,7 @@ main/                       ESP-IDF layer
   hr_mqtt.[ch]                MQTT client + Home Assistant discovery
   hr_log.[ch]                 in-app log capture
   hr_capture.[ch]             persistent flash log of every frame
+  hr_dryerfiles.[ch]          streams the dryer's files to the browser
   www/index.html              the web app (single file, embedded in firmware)
 test/                       host unit tests
 tools/

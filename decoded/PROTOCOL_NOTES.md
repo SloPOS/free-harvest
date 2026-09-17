@@ -292,7 +292,7 @@ These are emitted by the dryer with live data. `%d`=int, `%ld`=long, `%s`=string
 | `LIM`  | `LIM,%d,%d,%d,%d,%d,%d,%u,%d,%d,` | Limits/setpoints (also used for shelf boards) |
 | `SCIRCP` | `SCIRCP,%d,%s,%s,%d,` | Recipe transfer |
 | `FDFILELIST` | `FDFILELIST,%s,%d,%ld` | File list entry (name, index, size) |
-| `FDFILEBLOCK`| `FDFILEBLOCK,%s,%d,%d,%ld,` | File data block (name, block#, ?, offset) |
+| `FDFILEBLOCK`| `FDFILEBLOCK,%s,%d,%d,%ld,` | File data block (name, BYTES in block, block#, file size), then the raw bytes and a `%02X` checksum - see "FILEREAD, solved" |
 | `FDEXT` | `FDEXT,%d` | File extension/type |
 | `REQINFO` | `REQINFO,` / `REQINFO,%d,` | Dryer asking adapter to report info |
 | `GOTIT` | `GOTIT,%s,` | Ack |
@@ -914,18 +914,19 @@ enumerates, one entry per call, where index is a page number:
 Format is `FDFILELIST,<name>,<index>,<size>`. `HH.<id>` looks like a history
 header and `HB.<id><nn>` per-batch records, sharing the machine id 37935.
 
-**FILEREAD does not yet yield contents.** Sent as `FILEREAD <name>`,
-`FILEREAD <name> 0` and `FILEREAD <name> 0 0`, the dryer replied `A1` to each -
-two characters, not a 258-byte file. `A1` is unparsed by us and counted as a bad
-frame. It is probably an error or status code, so the argument shape is wrong.
-FILEREAD is allow-listed as SAFE on the strength of the firmware's own verb
-grouping and of need, NOT on a demonstration that it is inert - the same
-reasoning that misfiled CLICK. It is harmless in practice so far: the link
-stayed up and the machine stayed idle through every attempt.
-
-Next: the block transfer almost certainly mirrors what the dryer itself sends
-for FDNAME - `FDFILELIST` to announce, then `FDFILEBLOCK,<name>,<seq>,<off>,<?>,
-<data>`. Finding the request that triggers a block is the remaining step.
+**FILEREAD did yield contents - the whole time.** Sent as `FILEREAD <name>`,
+`FILEREAD <name> 0` and `FILEREAD <name> 0 0`, the dryer appeared to reply `A1`
+to each - two characters, not a 258-byte file - and this was written up as a
+probable error code and a wrong argument shape. It was neither. `A1` is the
+CHECKSUM that ends every `FDFILEBLOCK` frame: the block itself (header, then
+up to 1024 raw file bytes carrying LF and non-printables, then the two hex
+digits) had been fed to a line parser built for short printable frames, which
+chopped it into rejected fragments and let only the two-character tail through
+as a "frame". `FILEREAD <name> 0` is the right request; the argument shape was
+right all along. The full format, confirmed live on 2026-09-17, is in
+"FILEREAD, solved" below. The SAFE classification stands, now on evidence:
+400+ blocks read from an idle and from a running machine, STAT cadence
+untouched, nothing changed on the dryer.
 
 ## Recipe configuration is a FRAME, not a file (2026-08-21)
 
@@ -1519,3 +1520,116 @@ been sent a STATUS, which makes it the one untried path to telemetry.
 Added to the handshake and to the retry set in 1.0.5.6. Side benefit on a
 healthy dryer: first telemetry arrives in about 3 seconds instead of waiting
 up to 15 for the machine to volunteer it.
+
+## FILEREAD, solved: the dryer's file protocol and its batch logs (2026-09-17)
+
+Read live from a dryer on 6.0.644170 (`v6.5.0.644170` in its own CSV header),
+first reconstructed from the G0641041 image - the addresses below are into that
+image - then checked against the wire. Two things the image reading got wrong
+the live machine put right; both are noted.
+
+### The requests
+
+Both are ordinary space-delimited commands, CR-terminated, sent in PLAINTEXT on
+either firmware: 6.0.644170 encodes only what it SENDS, and takes plain
+requests exactly as it takes STATE / FDNAME / REQCFG.
+
+    FDFILES <pattern> <index>     ->  FDFILELIST,<name>,<index>,<size>\r
+                                      FDFILELIST,NULL,<index>,0\r          past the end
+    FILEREAD <name> <block>       ->  FDFILEBLOCK,<name>,<bytes>,<block>,<size>,<data...>XX\r
+
+`FDFILES` (executor 0x2b868 -> 0x20eb0, directory walk 0x20df8) walks the root
+of the internal drive, skips dot-names and directories, keeps entries whose
+name CONTAINS the pattern (`strstr`), and answers with the `<index>`-th match -
+one entry per request, the index counted among matches. Past the end the name
+is the literal `NULL` (0x84980). `.csv` gives the per-batch logs; `.dat` the
+`HH.*` / `HB.*` history records seen earlier. On 6.0.644170 the FDFILELIST
+reply comes in the `)S` envelope like every other formatted frame and decodes
+normally.
+
+`FILEREAD` (0x2b960 -> 0x20f30) reads 0x400 = 1024 bytes at offset
+`block * 1024`, replaces every 0x0D in the data with 0x07 (BEL), sums the bytes
+mod 256, and sends `FDFILEBLOCK,%s,%d,%d,%ld,` + the raw bytes + `%02X\r`.
+
+- Field order is **name, bytes read, block, file size** - r3 = bytes read,
+  [sp] = block at the call. The image reading had block and bytes the other
+  way round; the first live block corrected it.
+- `<bytes>` is 1024 for a full block, less for the last one, 0 past the end.
+- The data are the file's bytes as they are: LF kept, commas kept, only CR
+  turned into BEL. Undo the substitution and the file round-trips byte for
+  byte (verified on a 2.7 KB and a 276 KB file).
+- `XX` is the sum of the data bytes (after the CR->BEL substitution) mod 256,
+  two upper-case hex digits. 0 mismatches over 400+ live blocks.
+- **The block frame arrives in PLAINTEXT on 6.0.644170 too.** The encoded
+  transport covers the dryer's formatted frames; this one is written straight
+  to the port. Expected the `)S` envelope; got the bytes.
+- A missing file: `FDFILEBLOCK,,0,0,0,00`. An existing empty file (`FDName.txt`):
+  `FDFILEBLOCK,FDName.txt,0,0,0,00`.
+- Timing: the dryer answers `FDFILES` in ~70-140 ms per entry and `FILEREAD`
+  in 93 ms for block 0 and 160-175 ms for every block after, request to
+  complete block. That is the ceiling: ~6 KB/s. Two requests in flight brings
+  a block every ~140 ms (the request's turnaround hidden, the FatFs read and
+  the send not); three is slower again (~200 ms). STAT kept its 15.0 s cadence
+  through a 55 s transfer and through every pipelined one.
+
+Why a line parser cannot carry a block: it is longer than any other frame, it
+contains LF and BEL and arbitrary bytes, and it ends in two hex digits before
+the CR. Fed to the CR/LF reassembler it shreds into one bogus "frame" per CSV
+line and a two-character tail - the `A1` above. The adapter now switches the
+stream into a side buffer the moment `FDFILEBLOCK,<name>,<bytes>,<block>,<size>,`
+is complete and collects exactly `<bytes> + 2` more bytes whatever they are
+(`hr_stream_set_big` in hr_protocol.h); without a side buffer the bytes are
+swallowed and counted, never mistaken for frames.
+
+### The batch log
+
+File names are `%05ld.%04d-%02d-%02d_%02d.%02d.csv` (0x8353c): serial number,
+then the batch's start as the dryer's clock read it, e.g.
+`42838.2026-09-05_08.55.csv`. Header (0x870c8 + the verbose tail 0x871c8):
+
+    <batch name>,TStamp,mTorr,HtrReq,HtrOn,Top-J20,Mid-J17,Bot-J19,Room-J18,Process,Master,TTT,HPP,mT~Hr,mT~Mid,LowF,v6.5.0.644170,SN=42838,HL/D,mT~50,HL/D/6,TmTyp=B,500,600,120,-System Name-,Oil-Free Pump,EndPump:Off,HLG4SA325B7A04906,
+
+Everything after `LowF` is metadata the dryer writes once - firmware, serial,
+settings, presets, dryer name, pump type, machine id - not columns. Two other
+thermocouple orders exist in the image (`Mid-J17,Bot-J19,J20,Room-J18` and
+`Trays-J17,J19,J20,Room-J18`), so columns are best taken from the header by
+name. Rows (0x2c2cc), `\r\n`-terminated, one a minute (2985 of 2985 intervals
+in a 50-hour file were exactly 60 s):
+
+    11,9/5/2026 8:55,60245,0,0,39,43,22,63,Startup,120,2500i 120o 500s,0:0:0,0,0,0,0,0,10/,10/, , , ,500,600,120,Auto,Pump Off,
+    11,9/6/2026 9:54,493,60,60,95,96,96,71,Drying-3Z,96,493i 96o 500s,20:17:30,0,2,1,95,96,
+    11,9/7/2026 10:40,50758,0,0,-36,-38,-41,51,PreDefrost,150,2500i 150o 500s,0:0:0,0,306,14,-39,-39,
+
+- Column 0 is a constant state code (11), not a counter. `TStamp` is
+  `M/D/YYYY H:MM` by the dryer's clock.
+- `mTorr` is the raw pressure in mTorr = microns, uncapped (60245 at
+  atmosphere, 493 in drying) - STAT field [5] without the pump-off clamp.
+- `HtrReq` / `HtrOn` are 0..150.
+- The four thermocouples are whole degrees F, in the header's order; `--`
+  when a probe is absent. **`Room-J18` is the room thermocouple** - the
+  ambient reading that no live frame carries (51..71 F across the night in
+  the sample). The first data row carries the mode and pump state once
+  (`Auto`, `Pump Off`) in columns later rows leave empty.
+- `Process` is the phase name: `Startup`, `Load`, `Prefreeze`, `Freeze`,
+  `FreezeVAC`, `Drying-3Z`, `FinalDry`, `Finished`, `PreDefrost`. The columns
+  after it vary in number by phase (19/21/29 seen) and are not interpreted.
+
+### Data-flash records read the same way
+
+Besides the FAT volume the firmware keeps a table of 33 named records in
+data-flash (0x7334c, 0x28 bytes an entry) that `FILEREAD` serves first, by
+name. They do not appear in any `FDFILES` listing. Read live:
+
+    HRTempFC.txt    ->  0,Celsius,          the panel's temperature unit ("<0|1>,<Fahrenheit|Celsius>, ")
+    HRShelves.txt   ->  On,1,80,[-],0,1,0,1,1,0,
+    HRFDExt.txt     ->  7200,90,14400,13,   the same numbers SYSPREF carries
+
+A record that has never been written comes back as the dryer's stale transmit
+buffer (`FDFILEBLOCK,HR...` as the "data") - recognisable by its prefix, not to
+be trusted. `HRFDName.txt`, `HRDryMode.txt`, `HRGeneral.txt`, `HRSummary.txt`
+and `Pharma.txt` were like that on this machine.
+
+### Not tried
+
+`FDFILES ""`, files over 512 KB (none exist), the `.dat` summaries' contents,
+and whether `HRTempFC.txt` follows a unit change on the panel without a reboot.
