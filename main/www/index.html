@@ -169,7 +169,27 @@
   .sw-t{background:var(--accent)}
   .sw-r{background:var(--muted); opacity:.55}
   .sw-p{background:#c98bff}
+  .sw-room{background:#3fb950}
   .chiptog{margin-left:auto; padding:6px 12px; font-size:12.5px}
+  /* Batch history: the "Batch info" fold-out and the phase table */
+  .dfinfo{margin:10px 0 12px; border:1px solid var(--line); border-radius:12px;
+    background:var(--surface2); padding:0 14px}
+  .dfinfo summary{cursor:pointer; padding:10px 0; font-weight:600; font-size:14px}
+  .dfinfo .kv{display:grid; grid-template-columns:max-content 1fr; gap:4px 14px;
+    font-size:13.5px; padding-bottom:10px}
+  .dfinfo .kv b{color:var(--muted); font-weight:500; white-space:nowrap}
+  .dfinfo .kv span{word-break:break-word}
+  .dfinfo .hint.mono{font-size:11.5px; word-break:break-all; padding-bottom:10px; margin-top:0}
+  .tblwrap{overflow-x:auto; margin-top:12px}
+  table.phases{border-collapse:collapse; width:100%; font-size:13px;
+    font-variant-numeric:tabular-nums}
+  table.phases th,table.phases td{padding:6px 8px; text-align:right;
+    border-bottom:1px solid var(--line); white-space:nowrap}
+  table.phases th{color:var(--muted); font-weight:500; font-size:12px}
+  table.phases td:first-child,table.phases th:first-child{text-align:left}
+  table.phases td:first-child i{display:inline-block; width:10px; height:10px;
+    border-radius:3px; margin-right:7px; vertical-align:-1px}
+  table.phases tr.total td{font-weight:650; border-bottom:0}
   .facts b{color:var(--accent); font-weight:650}
   @keyframes marq{from{transform:translateX(0)} to{transform:translateX(-50%)}}
   @media (prefers-reduced-motion:reduce){
@@ -586,6 +606,9 @@
         <div class="item" data-go="s-frames"><span>📡</span>
           <div class="t"><b>Live data feed</b><span>Frames &amp; verbs from the dryer</span></div>
           <span class="chev">›</span></div>
+        <div class="item" data-go="s-files" id="set-files-item"><span>🗂️</span>
+          <div class="t"><b>Batch history</b><span id="set-files-sub">The dryer's own batch logs</span></div>
+          <span class="chev">›</span></div>
         <div class="item" data-go="s-fw"><span>⬆️</span>
           <div class="t"><b>Firmware update</b><span>Install a new .bin over Wi-Fi</span></div>
           <span class="chev">›</span></div>
@@ -757,6 +780,70 @@
       <div id="otastatus" class="notice"></div>
       <div class="hint">Writes to the spare slot and verifies before switching.
         A bad file is rejected and the current firmware keeps running.</div>
+    </div>
+  </section>
+
+  <!-- ---------- settings: batch history (the dryer's own files) ---------- -->
+  <section id="v-s-files" class="view">
+    <button class="back" data-back>‹ Settings</button>
+
+    <div class="card">
+      <h2>Batch history</h2>
+      <div class="hint">The dryer keeps a CSV log of every batch — shelf, top
+        and bottom thermocouples, the <b>room</b> thermocouple no live frame
+        carries, vacuum and heater state, minute by minute. This page reads
+        those files over the same USB link (<span class="mono">FDFILES</span> /
+        <span class="mono">FILEREAD</span>, both read-only) straight from the
+        dryer. The dryer hands out one 1 KB block per request and needs
+        about 170 ms per block, so a file reads at roughly 5–6 KB/s whatever
+        the Wi-Fi does.</div>
+      <div id="df-status" class="notice" style="margin-top:10px"></div>
+      <div class="rcprow" style="margin-top:10px">
+        <button type="button" id="df-refresh" class="primary">Refresh list from dryer</button>
+        <button type="button" id="df-cancel" class="ghost">Cancel</button>
+        <button type="button" id="df-enable" class="ghost">Enabled: —</button>
+      </div>
+      <label class="hint" style="display:flex;gap:8px;align-items:center;margin-top:10px">
+        <input type="checkbox" id="df-force"> Allow while a batch is running
+        (about six requests a second on the dryer's USB link while a file is
+        read — off unless you are watching)</label>
+    </div>
+
+    <div class="card">
+      <h2>Files on the dryer</h2>
+      <div id="df-list"><div class="hint">Tap “Refresh list from dryer”.</div></div>
+      <div class="hint" id="df-listnote"></div>
+    </div>
+
+    <div class="card" id="df-chartcard" style="display:none">
+      <h2 id="df-title">Batch</h2>
+      <div class="hint" id="df-summary"></div>
+      <!-- The header line of the dryer's CSV carries, after the column
+           names, a verbose tail: firmware, serial, presets, pump type... The
+           page folds that into this block and builds the table and chart
+           from the named columns only. The raw CSV download is untouched. -->
+      <details id="df-info" class="dfinfo">
+        <summary>Batch info</summary>
+        <div class="kv" id="df-kv"></div>
+        <div class="hint mono" id="df-rawhdr"></div>
+      </details>
+      <div class="chartwrap"><svg id="df-chart" viewBox="0 0 600 240"
+           preserveAspectRatio="none" role="img"
+           aria-label="Shelf, room temperature and vacuum over the batch, with phase bands"></svg></div>
+      <div class="chartlegend">
+        <span><i class="sw sw-t"></i>Shelf</span>
+        <span><i class="sw sw-room"></i>Room</span>
+        <span id="df-lg-p"><i class="sw sw-p"></i>Vacuum</span>
+        <button id="df-press" class="ghost chiptog">Hide vacuum</button>
+      </div>
+      <div class="hint" id="df-note"></div>
+      <!-- Phases: contiguous runs of the Process column, segmented here in
+           the browser - the dryer's own log viewer shows the same structure,
+           and nothing about it needs firmware. -->
+      <div class="tblwrap"><table class="phases" id="df-phases"></table></div>
+      <div class="rcprow" style="margin-top:12px">
+        <button type="button" id="df-download" class="ghost">Download CSV</button>
+      </div>
     </div>
   </section>
 
@@ -1028,6 +1115,8 @@ function show(id){
       refreshLogbook();
       refreshPin();
     }
+    /* The dryer-files page polls only while it is showing (dfPoll checks). */
+    if(el.id === "v-s-files" && typeof dfRefresh === "function") dfRefresh();
   }
   /* Keep the tab highlight in step however the view changed - X, backdrop,
      Escape and back-buttons all route through here, not just tab taps. */
@@ -2785,6 +2874,7 @@ $$("#unitseg button").forEach(b=>b.addEventListener("click",()=>{
   if(lastState) paintDash(lastState);
   refreshTrend();
   refreshLogbook();
+  if(typeof dfData!=="undefined" && dfData) dfDraw(dfData);
 }));
 
 /* Remote-control master switch. A two-state segmented control rather than a
@@ -3020,6 +3110,458 @@ $("#trendpress").addEventListener("click",()=>{
   trendShowPress=!trendShowPress;
   $("#trendpress").textContent=trendShowPress?"Hide vacuum":"Show vacuum";
   refreshTrend();
+});
+
+/* ---------- Batch history: the dryer's own CSV files ----------
+   GET /api/dryer/files is what the adapter already knows (list, cache,
+   progress) and is polled while a transfer runs. The POSTs make the adapter
+   ask the dryer and go through ctrlPost for the PIN. The chart is the run
+   chart's twin: same helpers, same look, three series - shelf and room on
+   the degree axis, vacuum on its own axis at the right. */
+let dfLast=null, dfShowPress=true, dfOpen=null, dfTimer=null, dfData=null;
+
+function dfFmtSize(n){ return n>=10240 ? Math.round(n/1024)+" KB" : n+" B"; }
+/* "42838.2026-09-15_04.02.csv" -> "Batch of 2026-09-15 04:02" (the first
+   number is the machine's serial, the same on every file), else the name */
+function dfNameInfo(name){
+  const m=/^(\d+)\.(\d{2,4})-(\d{2})-(\d{2})_(\d{2})\.(\d{2})\.csv$/i.exec(name);
+  if(!m) return {title:name, sub:""};
+  const y=m[2].length===2?"20"+m[2]:m[2];
+  return {title:"Batch of "+y+"-"+m[3]+"-"+m[4]+" "+m[5]+":"+m[6], sub:""};
+}
+
+function dfRenderStatus(d){
+  const st=$("#df-status");
+  $("#df-enable").textContent="Enabled: "+(d.enabled?"yes":"no");
+  $("#set-files-sub").textContent = d.enabled
+    ? (d.list_valid ? d.files.length+" files on the dryer" : "The dryer's own batch logs")
+    : "Switched off";
+  let msg, kind="info";
+  if(!d.enabled){
+    msg="Switched off. Nothing is sent to the dryer until it is enabled here.";
+  }else if(d.busy){
+    msg=(d.state==="listing" ? "Listing files… "+(d.requests||0)+" asked"
+        : "Reading "+esc(d.file)+" — block "+d.block+
+          (d.size>0 ? ", "+dfFmtSize(d.received)+" of "+dfFmtSize(d.size)+" ("+d.pct+"%)" : ""));
+  }else if(dfBusyLocal){
+    return; /* the read in progress owns the status line */
+  }else if(d.error){
+    msg="Last transfer failed: "+esc(d.error)+(d.file?" ("+esc(d.file)+")":"")+".";
+    kind="bad";
+  }else if(d.state==="done"){
+    msg="Last transfer complete"+(d.file?": "+esc(d.file)+", "+dfFmtSize(d.received)+" in "+(d.elapsed_ms/1000).toFixed(1)+" s":"")+".";
+    kind="ok";
+  }else{
+    msg=d.link ? "Idle. Link to the dryer is up." : "Idle. No link to the dryer.";
+  }
+  if(d.dryer_running && d.enabled) msg+=" The dryer is running a batch — fetching is off unless allowed below.";
+  note(st,msg,kind);
+  $("#df-cancel").style.display=d.busy?"":"none";
+  $("#df-refresh").disabled=d.busy||!d.enabled;
+}
+
+function dfRenderList(d){
+  const box=$("#df-list");
+  if(!d.list_valid && !d.files.length){
+    box.innerHTML='<div class="hint">'+(d.busy&&d.state==="listing"
+      ? "Asking the dryer…" : "No list yet. Tap “Refresh list from dryer”.")+'</div>';
+    $("#df-listnote").textContent="";
+    return;
+  }
+  box.innerHTML="";
+  const files=(d.files||[]).slice().sort((a,b)=>b.name.localeCompare(a.name));
+  files.forEach(f=>{
+    const el=document.createElement("div");
+    el.className="rcp";
+    const info=dfNameInfo(f.name);
+    el.innerHTML="<h3></h3><div class='meta'></div><div class='rcprow'>"+
+      "<button type='button' class='df-open'>Open</button>"+
+      "<button type='button' class='df-dl ghost'>Download CSV</button></div>";
+    el.querySelector("h3").textContent=info.title;
+    /* ~5.5 KB/s measured (the dryer's ~170 ms a block): say how long the
+       read will take before it starts */
+    const secs=Math.max(1,Math.round(f.size/5600));
+    el.querySelector(".meta").textContent=
+      [info.sub, f.name, dfFmtSize(f.size), "~"+(secs>=60?Math.round(secs/60)+" min":secs+" s")+" to read"]
+        .filter(Boolean).join("  \u00b7  ");
+    const ob=el.querySelector(".df-open"), db=el.querySelector(".df-dl");
+    ob.disabled=db.disabled=d.busy||!d.enabled||f.size>d.max_size;
+    ob.addEventListener("click",()=>dfOpenFile(f.name,f.size));
+    db.addEventListener("click",()=>dfDownload(f.name,f.size));
+    box.appendChild(el);
+  });
+  $("#df-listnote").textContent = d.list_valid
+    ? files.length+" file"+(files.length===1?"":"s")+" matching .csv on the dryer"+
+      (d.list_age_ms>=0 ? ", listed "+fmtDur(Math.round(d.list_age_ms/1000))+" ago" : "")+
+      ". Files are read from the dryer each time; nothing is stored on the adapter. Files over "+
+      dfFmtSize(d.max_size)+" are refused."
+    : "";
+}
+
+async function dfRefresh(){
+  try{
+    const d=await (await fetch("/api/dryer/files")).json();
+    dfLast=d;
+    dfRenderStatus(d);
+    dfRenderList(d);
+    clearTimeout(dfTimer);
+    if(d.busy && $("#v-s-files").classList.contains("active")){
+      dfTimer=setTimeout(dfRefresh, 1000);
+    }
+  }catch(e){ note($("#df-status"),"Could not reach the adapter.","bad"); }
+}
+
+async function dfPost(url, body){
+  const j=await ctrlPost(url, body);
+  if(!j.ok) note($("#df-status"), j.pin ? "PIN required." : ("Refused: "+esc(j.reason||"unknown")), "bad");
+  setTimeout(dfRefresh, 300);
+  return j;
+}
+$("#df-refresh").addEventListener("click",()=>{
+  dfPost("/api/dryer/files/refresh","pattern=.csv"+($("#df-force").checked?"&force=1":""));
+});
+$("#df-cancel").addEventListener("click",()=>dfPost("/api/dryer/files/cancel",""));
+$("#df-enable").addEventListener("click",()=>{
+  const cur=dfLast?!!dfLast.enabled:false;
+  if(!cur && !confirm("Enable reading the dryer's files?\n\nThe adapter will send FDFILES / FILEREAD "+
+     "(read-only requests) when you ask it to. Do this first with the dryer idle."))
+    return;
+  dfPost("/api/dryer/files/enable","on="+(cur?"0":"1"));
+});
+
+/* One GET reads the whole file from the dryer and streams it back; the
+   adapter's web server is busy for the duration (~5.5 KB/s), so the page says
+   so and does not poll meanwhile. The PIN travels in a header, which is why
+   this is a fetch() and not a plain link. */
+let dfBusyLocal=false;
+async function dfRead(name, size, json){
+  if(dfBusyLocal) return null;
+  if(!await ensurePin()) return null;
+  dfBusyLocal=true;
+  const secs=Math.max(1,Math.round((size||0)/5600));
+  note($("#df-status"),"Reading "+esc(name)+" from the dryer — about "+
+    (secs>=60?Math.round(secs/60)+" min":secs+" s")+". The panel pauses while the adapter is busy.","info");
+  $$("#df-list button").forEach(b=>b.disabled=true);
+  const url="/api/dryer/files/get?name="+encodeURIComponent(name)+
+            (json?"&format=json":"")+($("#df-force").checked?"&force=1":"");
+  const hdrs=pinGet()?{"X-HR-Pin":pinGet()}:{};
+  const t0=performance.now();
+  try{
+    const r=await fetch(url,{headers:hdrs});
+    if(!r.ok){
+      const j=await r.json().catch(()=>({}));
+      if(j.pin){ pinPut(""); pinVerified=false; }
+      note($("#df-status"),"Refused: "+esc(j.reason||("HTTP "+r.status)),"bad");
+      return null;
+    }
+    const body=json? await r.json() : await r.text();
+    const dt=((performance.now()-t0)/1000).toFixed(1);
+    const bytes=json?(body.bytes||0):body.length;
+    const err=json?body.error:(/# TRANSFER FAILED/.test(body)?"incomplete":"");
+    note($("#df-status"),(err?"Transfer failed ("+esc(err)+") after ":"Read ")+dfFmtSize(bytes)+
+      " in "+dt+" s"+(bytes&&dt>0?" ("+(bytes/1024/dt).toFixed(1)+" KB/s)":"")+".",err?"bad":"ok");
+    return body;
+  }catch(e){
+    note($("#df-status"),"The read did not complete: "+esc(e.message||e),"bad");
+    return null;
+  }finally{
+    dfBusyLocal=false;
+    setTimeout(dfRefresh,500);
+  }
+}
+
+async function dfOpenFile(name, size){
+  const card=$("#df-chartcard");
+  card.style.display="";
+  const info=dfNameInfo(name);
+  $("#df-title").textContent=info.title+(info.sub?" \u00b7 "+info.sub:"");
+  $("#df-note").textContent="Reading from the dryer…";
+  const d=await dfRead(name,size,true);
+  if(!d){ $("#df-note").textContent="Could not read the file."; return; }
+  dfOpen=name; dfOpenSize=size;
+  dfDraw(d);
+  card.scrollIntoView({behavior:"smooth",block:"start"});
+}
+let dfOpenSize=0;
+async function dfDownload(name, size){
+  const text=await dfRead(name,size,false);
+  if(text===null) return;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([text],{type:"text/csv"}));
+  a.download=name;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1000);
+}
+$("#df-download").addEventListener("click",e=>{
+  e.preventDefault();
+  if(dfOpen) dfDownload(dfOpen, dfOpenSize);
+});
+/* ---- Batch info: the CSV header's verbose tail, folded into key/values ----
+   The dryer writes ONE header line: "<batch name>,TStamp,mTorr,...,LowF,
+   v6.5.0.644170,SN=42838,HL/D,mT~50,HL/D/6,TmTyp=B,500,600,120,-System Name-,
+   Oil-Free Pump,EndPump:Off,HLG4SA325B7A04906,". Everything after the last
+   column name is metadata, not a column. The first data row likewise carries
+   one-off settings (mode, pump state) in columns later rows leave empty. */
+const DF_COLS=/^(TStamp|mTorr|HtrReq|HtrOn|Process|Master|TTT|HPP|LowF|HeatCyc|VacCyc|Heater Relay|mT~(Hr|Mid)|J\d+|(Top|Mid|Bot|Room|Trays|Heat-M)(-J\d+)?)$/;
+function dfSplit(line){
+  const c=(line||"").split(",");
+  while(c.length && c[c.length-1].trim()==="") c.pop();
+  return c;
+}
+function dfParseInfo(d){
+  const hdr=dfSplit(d.hdr), row0=dfSplit(d.row0);
+  const info={name:hdr.length?hdr[0]:"", kv:[], tail:[], cols:hdr};
+  let last=0;
+  for(let i=1;i<hdr.length;i++) if(DF_COLS.test(hdr[i].trim())) last=i;
+  info.ncols=last+1;
+  const tail=hdr.slice(last+1).map(s=>s.trim()).filter(Boolean);
+  const other=[], nums=[];
+  tail.forEach(t=>{
+    let m;
+    if(/^v\d/.test(t)) info.kv.push(["Firmware",t]);
+    else if((m=/^SN=(.+)$/.exec(t))) info.kv.push(["Serial number",m[1]]);
+    else if(/^[A-Z0-9]{15,}$/.test(t)) info.kv.push(["Machine ID",t]);
+    else if((m=/^EndPump:(.*)$/.exec(t))) info.kv.push(["End-of-batch pump",m[1]]);
+    else if(/pump/i.test(t)) info.kv.push(["Pump",t]);
+    else if((m=/^TmTyp=(.*)$/.exec(t))) info.kv.push(["Thermocouple type",m[1]]);
+    else if(/^-.*-$/.test(t)) info.kv.push(["Dryer name",t.replace(/^-|-$/g,"")]);
+    else if(/^\d+$/.test(t)) nums.push(t);
+    else other.push(t);
+  });
+  if(nums.length) info.kv.push(["Presets",nums.join(" / ")]);
+  if(other.length) info.kv.push(["Settings",other.join(" · ")]);
+  /* the Startup row: mode and pump state, plus whatever sits past the header */
+  const extra=row0.slice(info.ncols).map(s=>s.trim()).filter(Boolean);
+  const mode=extra.find(s=>/^(Auto|Quality|Custom|Manual|Candy|Pharma|Liquid)/i.test(s));
+  const pump=extra.find(s=>/^Pump (On|Off)/i.test(s));
+  if(mode) info.kv.push(["Mode at start",mode]);
+  if(pump) info.kv.push(["Pump at start",pump]);
+  const ti=hdr.findIndex(h=>h.trim()==="TStamp");
+  info.start = ti>=0 && row0[ti] ? row0[ti].trim() : "";
+  info.tail=tail;
+  return info;
+}
+/* "M/D/YYYY H:MM" (the dryer's clock) -> Date, or null */
+function dfParseStamp(s){
+  const m=/^(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+)/.exec(s||"");
+  if(!m) return null;
+  const y=+m[3]<100?2000+ +m[3]:+m[3];
+  return new Date(y,+m[1]-1,+m[2],+m[4],+m[5]);
+}
+function dfFmtStamp(dt, withDate){
+  if(!dt) return "—";
+  const hm=String(dt.getHours()).padStart(2,"0")+":"+String(dt.getMinutes()).padStart(2,"0");
+  return withDate ? (dt.getMonth()+1)+"/"+dt.getDate()+" "+hm : hm;
+}
+/* ---- Phases: contiguous runs of the Process column ----
+   Segmented here, in the browser, from the rows the adapter already sends;
+   nothing about it depends on the firmware or on the dryer. Each row is one
+   minute, so a phase lasts from its first row to the next phase's first row
+   (the last one: to its last row plus that minute). */
+const DF_PHASE_COLORS=[
+  [/^(startup|load)/i,       "#8b949e"],
+  [/^prefreeze/i,            "#58a6ff"],
+  [/^freezevac/i,            "#1f6feb"],
+  [/^freeze/i,               "#388bfd"],
+  [/^drying/i,               "#d29922"],
+  [/^finaldry/i,             "#f0883e"],
+  [/^finished/i,             "#3fb950"],
+  [/defrost/i,               "#f85149"]];
+const DF_FALLBACK=["#c98bff","#79c0ff","#ffa657","#7ee787","#ff7b72"];
+function dfPhaseColor(name, idx){
+  for(const [re,c] of DF_PHASE_COLORS) if(re.test(name)) return c;
+  return DF_FALLBACK[idx%DF_FALLBACK.length];
+}
+function dfPhases(rows){
+  const out=[]; let cur=null;
+  rows.forEach((r,i)=>{
+    const p=(r[7]||"").trim()||"—";
+    if(!cur || cur.name!==p){ cur={name:p,i0:i,i1:i}; out.push(cur); }
+    else cur.i1=i;
+  });
+  const n=rows.length;
+  out.forEach((ph,k)=>{
+    ph.t0=rows[ph.i0][0];
+    ph.t1=(k+1<out.length) ? rows[out[k+1].i0][0] : rows[ph.i1][0]+1;
+    ph.dur=Math.max(1,ph.t1-ph.t0);
+    let smin=Infinity, smax=-Infinity, vmin=Infinity, rsum=0, rn=0;
+    for(let i=ph.i0;i<=ph.i1;i++){
+      const s=rows[i][1], v=rows[i][5], rm=rows[i][2];
+      if(s!==null&&isFinite(s)){ if(s<smin)smin=s; if(s>smax)smax=s; }
+      if(v!==null&&isFinite(v)&&v<10000&&v<vmin) vmin=v;
+      if(rm!==null&&isFinite(rm)){ rsum+=rm; rn++; }
+    }
+    ph.smin=isFinite(smin)?smin:null; ph.smax=isFinite(smax)?smax:null;
+    ph.vmin=isFinite(vmin)?vmin:null; ph.ravg=rn?rsum/rn:null;
+    ph.color=dfPhaseColor(ph.name,k);
+  });
+  void n;
+  return out;
+}
+function dfRenderInfo(d, rows){
+  const info=dfParseInfo(d), start=dfParseStamp(info.start);
+  const n=rows.length, total=n?rows[n-1][0]-rows[0][0]+1:0;
+  const end=start?new Date(start.getTime()+total*60000):null;
+  const nameTxt=info.name?info.name:"(unnamed)";
+  $("#df-summary").textContent=
+    (start?dfFmtStamp(start,true)+" → "+dfFmtStamp(end,true)+", ":"")+
+    fmtDur(total*60)+" · "+n+" rows, one a minute"+(info.name?" · batch "+info.name:"");
+  const kv=$("#df-kv"); kv.innerHTML="";
+  const pairs=[["Batch name",nameTxt]];
+  if(start) pairs.push(["Started",start.toLocaleString()]);
+  if(end) pairs.push(["Ended",end.toLocaleString()]);
+  pairs.push(["Duration",fmtDur(total*60)+" ("+n+" rows)"]);
+  pairs.push(["File",d.name||""]);
+  info.kv.forEach(p=>pairs.push(p));
+  pairs.push(["Columns",info.cols.slice(1,info.ncols).join(", ")]);
+  pairs.forEach(([k,v])=>{
+    const b=document.createElement("b"), s=document.createElement("span");
+    b.textContent=k; s.textContent=v; kv.appendChild(b); kv.appendChild(s);
+  });
+  $("#df-rawhdr").textContent = d.hdr ? "Header as written by the dryer: "+d.hdr : "";
+  return {info, start, total};
+}
+function dfRenderPhases(phases, start, total){
+  const tb=$("#df-phases");
+  tb.innerHTML="";
+  const tr=document.createElement("tr");
+  ["Phase","Start","End","Duration","Shelf min","Shelf max","Vacuum min","Room avg"].forEach(h=>{
+    const th=document.createElement("th"); th.textContent=h; tr.appendChild(th); });
+  tb.appendChild(tr);
+  const at=m=>start?dfFmtStamp(new Date(start.getTime()+m*60000), total>720):"+"+fmtDur(m*60);
+  phases.forEach(ph=>{
+    const r=document.createElement("tr");
+    const cells=[
+      null,
+      at(ph.t0), at(ph.t1), fmtDur(ph.dur*60),
+      ph.smin===null?"—":fmtTU(ph.smin), ph.smax===null?"—":fmtTU(ph.smax),
+      ph.vmin===null?"—":ph.vmin.toLocaleString()+" mT",
+      ph.ravg===null?"—":fmtTU(ph.ravg)];
+    cells.forEach((c,i)=>{
+      const td=document.createElement("td");
+      if(i===0){ const sw=document.createElement("i"); sw.style.background=ph.color;
+        td.appendChild(sw); td.appendChild(document.createTextNode(ph.name)); }
+      else td.textContent=c;
+      r.appendChild(td);
+    });
+    tb.appendChild(r);
+  });
+  const tot=document.createElement("tr"); tot.className="total";
+  const td0=document.createElement("td"); td0.textContent="Whole batch"; tot.appendChild(td0);
+  const t1=document.createElement("td"); t1.textContent=at(0); tot.appendChild(t1);
+  const t2=document.createElement("td"); t2.textContent=at(total); tot.appendChild(t2);
+  const t3=document.createElement("td"); t3.textContent=fmtDur(total*60); tot.appendChild(t3);
+  for(let i=0;i<4;i++) tot.appendChild(document.createElement("td"));
+  tb.appendChild(tot);
+}
+function dfDraw(d){
+  dfData=d;
+  const svg=$("#df-chart"), W=600, H=240;
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  const rows=d.rows||[], n=rows.length;
+  if(!d.header){ $("#df-note").textContent="The file has no recognisable header — see the CSV."; return; }
+  if(n<2){ $("#df-note").textContent="Fewer than two rows in this file."; return; }
+  /* columns: t_min, shelf_f, room_f, top_f, bot_f, mtorr, htr_on, process */
+  const T=rows.map(r=>r[0]), shelf=rows.map(r=>r[1]), room=rows.map(r=>r[2]),
+        mt=rows.map(r=>r[5]);
+  const totalMin=T[n-1]-T[0];
+  const L=44, R=dfShowPress?56:12, Tp=12, B=26, pw=W-L-R, ph=H-Tp-B;
+  const meta=dfRenderInfo(d, rows);
+  const phases=dfPhases(rows);
+  dfRenderPhases(phases, meta.start, meta.total);
+  /* phase bands first, under everything else */
+  phases.forEach(p=>{
+    const x0=L+pw*((p.t0-T[0])/(totalMin||1)), x1=L+pw*(Math.min(p.t1,T[n-1])-T[0])/(totalMin||1);
+    svg.appendChild(el("rect",{x:x0.toFixed(1),y:Tp,width:Math.max(0.5,x1-x0).toFixed(1),height:ph,
+      fill:p.color,opacity:.13}));
+    if(x1-x0>34){
+      const t=el("text",{x:((x0+x1)/2).toFixed(1),y:Tp+11,"text-anchor":"middle",
+        fill:p.color,"font-size":10,"font-weight":600});
+      t.textContent=p.name; svg.appendChild(t);
+    }
+  });
+
+  let lo=Infinity, hi=-Infinity;
+  const seen=v=>{ if(v!==null&&isFinite(v)){ const u=toUnit(v); if(u<lo)lo=u; if(u>hi)hi=u; } };
+  shelf.forEach(seen); room.forEach(seen);
+  if(!isFinite(lo)){ $("#df-note").textContent="No temperatures in this file."; return; }
+  const flat=tempC?2:4;
+  if(hi-lo<flat){ const mid=(hi+lo)/2; lo=mid-flat/2; hi=mid+flat/2; }
+  const pad=(hi-lo)*0.12; lo-=pad; hi+=pad;
+  const x=i=>L+pw*((T[i]-T[0])/(totalMin||1));
+  const y=v=>Tp+ph-((v-lo)/(hi-lo))*ph;
+
+  const stepY=niceStep(hi-lo,4);
+  for(let g=Math.ceil(lo/stepY)*stepY; g<=hi; g+=stepY){
+    svg.appendChild(el("line",{x1:L,y1:y(g),x2:W-R,y2:y(g),stroke:"var(--line)","stroke-width":1}));
+    const t=el("text",{x:L-6,y:y(g)+4,"text-anchor":"end",fill:"var(--muted)","font-size":11});
+    t.textContent=Math.round(g)+"\u00b0"; svg.appendChild(t);
+  }
+  const fz=toUnit(32);
+  if(lo<fz&&hi>fz) svg.appendChild(el("line",{x1:L,y1:y(fz),x2:W-R,y2:y(fz),
+    stroke:"var(--muted)","stroke-width":1,"stroke-dasharray":"2 4",opacity:.5}));
+  const totalS=totalMin*60, stepX=niceStep(totalS||60,4);
+  for(let g=0; g<=totalS+1; g+=stepX){
+    const xi=L+pw*(g/(totalS||1));
+    const t=el("text",{x:xi,y:H-8,"text-anchor":"middle",fill:"var(--muted)","font-size":11});
+    t.textContent=g?fmtDur(g):"0"; svg.appendChild(t);
+  }
+  const path=(vals,scale)=>{
+    let out="", pen=false;
+    for(let i=0;i<n;i++){ const v=vals[i];
+      if(v===null||!isFinite(v)){ pen=false; continue; }
+      out+=(pen?"L":"M")+x(i).toFixed(1)+" "+y(scale(v)).toFixed(1)+" "; pen=true; }
+    return out.trim();
+  };
+  const pr=path(room,toUnit);
+  if(pr) svg.appendChild(el("path",{d:pr,fill:"none",stroke:"#3fb950","stroke-width":2,
+    "stroke-linejoin":"round"}));
+  const ps=path(shelf,toUnit);
+  if(ps) svg.appendChild(el("path",{d:ps,fill:"none",stroke:"var(--accent)","stroke-width":2.5,
+    "stroke-linejoin":"round","stroke-linecap":"round"}));
+
+  /* vacuum: only real readings (< 10000 mTorr, the dryer's "pump off" cap
+     and above is atmosphere), log-ish feel avoided - a plain scale reads
+     fine once the atmosphere rows are excluded */
+  const vac=mt.map(v=>(v!==null&&v<10000)?v:null);
+  const anyP=vac.some(v=>v!==null);
+  $("#df-lg-p").style.display=(dfShowPress&&anyP)?"":"none";
+  $("#df-press").style.display=anyP?"":"none";
+  if(dfShowPress&&anyP){
+    let plo=Infinity, phi=-Infinity;
+    vac.forEach(v=>{ if(v!==null){ if(v<plo)plo=v; if(v>phi)phi=v; } });
+    if(phi-plo<10) phi=plo+10;
+    const py=v=>Tp+ph-((v-plo)/(phi-plo))*ph;
+    let out="",pen=false;
+    for(let i=0;i<n;i++){ const v=vac[i];
+      if(v===null){ pen=false; continue; }
+      out+=(pen?"L":"M")+x(i).toFixed(1)+" "+py(v).toFixed(1)+" "; pen=true; }
+    if(out) svg.appendChild(el("path",{d:out.trim(),fill:"none",stroke:"#c98bff",
+      "stroke-width":2,"stroke-dasharray":"4 3"}));
+    for(const g of [plo,phi]){
+      const t=el("text",{x:W-R+6,y:py(g)+4,fill:"#c98bff","font-size":11});
+      t.textContent=Math.round(g); svg.appendChild(t);
+    }
+  }
+  const lastRoom=[...room].reverse().find(v=>v!==null);
+  const roomVals=room.filter(v=>v!==null);
+  const roomTxt=roomVals.length
+    ? " \u00b7 room "+fmtTU(Math.min(...roomVals))+"–"+fmtTU(Math.max(...roomVals))+
+      (lastRoom!==undefined?" (last "+fmtTU(lastRoom)+")":"")
+    : " \u00b7 no room column";
+  const ms=v=>v>=1000?(v/1000).toFixed(1)+" s":Math.round(v)+" ms";
+  const tmTxt = d.timing && d.timing.elapsed_ms
+    ? " \u00b7 read in "+ms(d.timing.elapsed_ms)+" (the dryer took "+ms(d.timing.dryer_ms)+
+      " for "+d.timing.blocks+" blocks, Wi-Fi writes "+ms(d.timing.socket_ms)+")"
+    : "";
+  $("#df-note").textContent=fmtDur(totalS)+" of data, "+n+" rows, "+phases.length+" phase"+
+    (phases.length===1?"":"s")+roomTxt+
+    ". Temperatures as the dryer logged them (whole \u00b0F), shown in "+tempSym()+"."+tmTxt;
+}
+$("#df-press").addEventListener("click",()=>{
+  dfShowPress=!dfShowPress;
+  $("#df-press").textContent=dfShowPress?"Hide vacuum":"Show vacuum";
+  if(dfData) dfDraw(dfData);
 });
 
 /* ---------- 6.0.644170 handshake switch ----------
