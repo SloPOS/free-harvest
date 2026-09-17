@@ -75,6 +75,68 @@ config HR_COMPAT_644170
         This is only the value used until the switch is changed at runtime
         (Settings > Debug, or POST /api/compat), which is stored in NVS.
 
+config HR_BATCH_HISTORY
+    bool "Batch history: read the dryer's own batch CSV logs (FDFILES / FILEREAD)"
+    default y
+    help
+        A client for the dryer's file protocol - FDFILES to list, FILEREAD
+        to read, FDFILELIST / FDFILEBLOCK replies - so the web panel can show
+        the per-batch CSV logs the dryer keeps itself (shelf, vacuum, phases
+        and the Room-J18 ambient thermocouple, which no live frame carries).
+        Adds GET/POST /api/dryer/files* and a "Batch history" page under
+        Settings.
+
+        Reads only: both verbs are in the SAFE allow-list and nothing here
+        can start, stop or change a run. Costs about 4 KB of static RAM
+        (block side buffer, list cache) plus 8 KB of heap while a file is
+        being read; files are streamed to the browser, nothing is stored.
+
+        Confirmed live 2026-09-17 on a 6.0.644170 machine: list, read,
+        checksums, a 276 KB batch log in 55 s at ~5 KB/s with the dryer's
+        15 s STAT cadence untouched.
+
+config HR_BATCH_HISTORY_DEFAULT_ON
+    bool "Batch history: switched on at first boot"
+    depends on HR_BATCH_HISTORY
+    default y
+    help
+        Value of the runtime switch (Settings > Batch history, or POST
+        /api/dryer/files/enable, kept in NVS) until the owner changes it.
+        On or off, nothing is sent to the dryer until someone taps Refresh
+        or Open on the page (PIN-gated, like /api/cmd), and a read is
+        refused while a batch is running unless the request says force=1.
+        Off: the page shows the switch and nothing else works until it is
+        flipped.
+
+config HR_FILES_PIPELINE_DEPTH
+    int "Batch history: FILEREAD requests in flight (1-4)"
+    depends on HR_BATCH_HISTORY
+    range 1 4
+    default 1
+    help
+        How many FILEREAD requests the file client keeps unanswered at once
+        while reading a file. 1 is strict request-reply. 2 puts the request
+        for block n+1 on the wire while the dryer is still sending block n;
+        measured on 6.0.644170 the dryer itself needs ~170 ms per 1 KB block
+        either way, so this hides only the request's turnaround (~35 ms a
+        block, -16..20 % on a small file, 0 errors over 36 transfers).
+        Replies are accepted in order only; a lost or duplicated block
+        rewinds the window. Overridable at runtime (POST /api/dryer/files/tune,
+        NVS hrfiles/depth).
+
+config HR_FILES_REQ_GAP_MS
+    int "Batch history: minimum spacing between FILEREAD requests, ms"
+    depends on HR_BATCH_HISTORY
+    range 0 5000
+    default 0
+    help
+        0 asks for the next block as soon as the previous reply is in (the
+        dryer's own pace, ~6 blocks a second). A positive value holds each
+        request back at least this long after the previous one, for a dryer
+        whose USB link should be spared; requests held back go out from the
+        main loop's 250 ms tick, so the effective floor is that tick.
+        Overridable at runtime (POST /api/dryer/files/tune, NVS hrfiles/gap).
+
 config HR_HTTP_LOG_TO_UART
     bool "Also echo received frames to the UART console"
     default y

@@ -14,6 +14,9 @@
 #include "hr_capture.h"
 #include "hr_batchstore.h"
 #include "hr_compat.h"
+#if CONFIG_HR_BATCH_HISTORY
+#include "hr_dryerfiles.h"
+#endif
 #include "hr_encring.h"
 #include "hr_enc.h"
 #include "hr_http.h"
@@ -254,6 +257,11 @@ static void on_inbound(const hr_frame_t *f, void *user)
         }
     }
 
+#if CONFIG_HR_BATCH_HISTORY
+    /* FDFILELIST answers to our FDFILES; copy-only on this task. */
+    hr_dryerfiles_on_frame(f);
+#endif
+
     /* Decode STAT frames once, then share with both the web UI and MQTT. */
     hr_telemetry_t tel;
     if (hr_telemetry_from_stat(f, &tel)) {
@@ -416,6 +424,11 @@ void app_main(void)
     /* The 6.0.644170 handshake switch, NVS-backed; applied in the loop below
      * so a runtime change also restarts the handshake. */
     hr_compat_init();
+#if CONFIG_HR_BATCH_HISTORY
+    /* Before hr_usb_init(): lends the session its block side buffer, so the
+     * first byte from the dryer already meets the complete framer. */
+    hr_dryerfiles_init(&s_session);
+#endif
 
     hr_usb_init(&s_session);
 
@@ -781,6 +794,19 @@ void app_main(void)
             }
         }
         hr_http_set_tracker(&s_tracker);
+#if CONFIG_HR_BATCH_HISTORY
+        /*
+         * The dryer's file client: timeouts and the link rule from here.
+         * "Running" is the logbook's notion, so a fetch is refused for
+         * exactly the runs the logbook records (unless asked with force).
+         */
+        {
+            xSemaphoreTake(s_hist_lock, portMAX_DELAY);
+            const bool running = s_last_running;
+            xSemaphoreGive(s_hist_lock);
+            hr_dryerfiles_tick(t, s_session.link == HR_LINK_UP, running);
+        }
+#endif
         if (s_session.link != last_link) {
             last_link = s_session.link;
             ESP_LOGI(TAG, "link %s", last_link == HR_LINK_UP ? "UP" : "DOWN");
