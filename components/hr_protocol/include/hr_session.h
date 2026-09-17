@@ -65,6 +65,13 @@ typedef void (*hr_observer_fn)(const hr_frame_t *f, void *user);
  */
 typedef void (*hr_enc_observer_fn)(const char *frame, size_t len, void *user);
 
+/*
+ * A whole plaintext FDFILEBLOCK frame (no CR), on either transport - see
+ * hr_session_set_block_sink(). `frame` is the session's side buffer and is
+ * only valid during the call.
+ */
+typedef void (*hr_block_fn)(const char *frame, size_t len, void *user);
+
 /* Everything we have learned about the attached dryer. */
 typedef struct {
     /*
@@ -128,6 +135,12 @@ typedef struct {
      * one task only. */
     char enc_plain[HR_MAX_FRAME];
     hr_frame_t enc_frame;
+
+    /* File blocks (hr_files.h), delivered whole from the stream's side
+     * buffer; counted separately from frames because one is a kilobyte. */
+    hr_block_fn block_fn;
+    void *block_user;
+    unsigned long blocks_in;
 
     /*
      * Payload placed in the GOTIT ack. UNVERIFIED - the genuine adapter's
@@ -294,6 +307,20 @@ void hr_session_set_compat(hr_session_t *s, bool unique_tag, bool reask);
 
 /* Override the GOTIT ack payload. */
 void hr_session_set_ack_payload(hr_session_t *s, const char *payload);
+
+/*
+ * Lend the session a side buffer for file blocks and say where they go.
+ *
+ * `big` must hold HR_FILES_BIGBUF bytes (hr_files.h) and stay valid for the
+ * life of the session; it is written from the RX task. Without this call
+ * FDFILEBLOCK data is swallowed by the stream (never mistaken for frames)
+ * and nothing is delivered. The request side - FDFILES / FILEREAD - is
+ * ordinary hr_session_send(): plaintext, which a 6.0.644170 machine accepts
+ * as it does STATE / FDNAME / REQCFG (PROTOCOL_NOTES.md); only its replies are
+ * encoded, and those are decoded here before delivery.
+ */
+void hr_session_set_block_sink(hr_session_t *s, char *big, size_t cap,
+                               hr_block_fn fn, void *user);
 
 /* Feed received bytes with a monotonic millisecond timestamp. */
 void hr_session_rx(hr_session_t *s, const void *data, size_t n,

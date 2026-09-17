@@ -112,6 +112,32 @@ int hr_enc_decode_len(const char *hdr);
  * header and payload, `len` bytes, NUL-terminated for convenience. */
 typedef void (*hr_enc_cb)(const char *frame, size_t len, void *user);
 
+/* ------------------------------------------------------------------ */
+/* Big frames (file blocks)                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * FDFILEBLOCK - the dryer's answer to FILEREAD (hr_files.h) - is the one
+ * frame that does not fit the rules above: up to 1024 bytes of file data
+ * follow the header, carrying LF, BEL (the dryer's stand-in for CR) and
+ * commas, and the whole thing runs past HR_MAX_FRAME. Fed to the line rules
+ * it shredded into one bogus frame per CSV line and a stray "A1" - the
+ * checksum - which is exactly what the upstream author saw.
+ *
+ * So a caller that wants blocks lends the stream a SIDE BUFFER. When a
+ * plaintext line turns out to be an FDFILEBLOCK header (the fifth comma has
+ * arrived and the numbers parse), the stream moves the header there and
+ * collects exactly <nbytes> + 2 more bytes regardless of what they are; when
+ * an encoded ")S" header declares more than HR_ENC_MAX_FRAME, the frame is
+ * collected there instead of being abandoned. Either way the whole frame is
+ * handed to `hr_big_cb` (encoded = which kind) and the ordinary path never
+ * sees it.
+ *
+ * With NO side buffer a block's data bytes are swallowed and counted in
+ * big_dropped, so they cannot masquerade as frames - safe by default.
+ */
+typedef void (*hr_big_cb)(const char *frame, size_t len, bool encoded,
+                          void *user);
+
 /*
  * Accumulates bytes arriving in arbitrary chunk sizes (USB CDC reads do not
  * respect frame boundaries) and emits whole frames.
@@ -138,6 +164,23 @@ typedef struct {
     unsigned long enc_bad;    /* encoded frames abandoned (partial, cut, oversize) */
     hr_enc_cb enc;            /* optional; see hr_enc_cb */
     void *enc_user;
+
+    /*
+     * Big-frame side buffer - see hr_big_cb. `big` is the caller's memory;
+     * while big_need is non-zero the frame in progress lives there and
+     * every other rule is suspended. skip_need swallows a block nobody can
+     * hold.
+     */
+    char *big;                /* NULL: blocks are swallowed */
+    size_t big_cap;
+    size_t big_len;
+    size_t big_need;          /* total length being collected; 0 = not */
+    bool big_enc;             /* the frame in `big` is a ")S" frame */
+    size_t skip_need;         /* bytes still to swallow */
+    unsigned long big_frames; /* whole big frames delivered */
+    unsigned long big_dropped;/* blocks swallowed or abandoned */
+    hr_big_cb big_cb;
+    void *big_user;
 } hr_stream_t;
 
 void hr_stream_init(hr_stream_t *s);
@@ -147,6 +190,14 @@ void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user);
 
 /* Register (or clear, with NULL) the encoded-frame observer. */
 void hr_stream_set_enc_cb(hr_stream_t *s, hr_enc_cb cb, void *user);
+
+/*
+ * Lend the stream a side buffer for big frames (hr_big_cb). `cap` must be
+ * at least HR_MAX_FRAME; HR_FILES_BIGBUF (hr_files.h) holds a full block on
+ * either transport. Pass NULL to take it back (blocks are swallowed again).
+ */
+void hr_stream_set_big(hr_stream_t *s, char *buf, size_t cap, hr_big_cb cb,
+                       void *user);
 
 /*
  * Throw away a frame that began but never got its terminator, reporting it

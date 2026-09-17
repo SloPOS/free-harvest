@@ -1,4 +1,5 @@
 #include "hr_protocol.h"
+#include "hr_files.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +79,37 @@ void hr_stream_init(hr_stream_t *s)
     s->enc_bad = 0;
     s->enc = NULL;
     s->enc_user = NULL;
+    s->big = NULL;
+    s->big_cap = 0;
+    s->big_len = 0;
+    s->big_need = 0;
+    s->big_enc = false;
+    s->skip_need = 0;
+    s->big_frames = 0;
+    s->big_dropped = 0;
+    s->big_cb = NULL;
+    s->big_user = NULL;
+}
+
+void hr_stream_set_big(hr_stream_t *s, char *buf, size_t cap, hr_big_cb cb,
+                       void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    if (buf == NULL || cap < HR_MAX_FRAME) {
+        s->big = NULL;
+        s->big_cap = 0;
+        s->big_cb = NULL;
+        s->big_user = NULL;
+    } else {
+        s->big = buf;
+        s->big_cap = cap;
+        s->big_cb = cb;
+        s->big_user = user;
+    }
+    s->big_len = 0;
+    s->big_need = 0;
 }
 
 void hr_stream_set_reject_cb(hr_stream_t *s, hr_reject_cb cb, void *user)
@@ -150,9 +182,46 @@ static void enc_deliver(hr_stream_t *s)
     s->enc_need = 0;
 }
 
+/* Give up on the big frame being collected. Counted in big_dropped; the
+ * head that arrived goes to the reject observer, capped, so it is visible. */
+static void big_abandon(hr_stream_t *s, const char *why)
+{
+    s->big_dropped++;
+    if (s->reject != NULL && s->big_len > 0) {
+        size_t show = s->big_len < 96 ? s->big_len : 96;
+        s->reject(s->big, show, why, s->reject_user);
+    }
+    s->big_len = 0;
+    s->big_need = 0;
+}
+
+static void big_deliver(hr_stream_t *s)
+{
+    s->big[s->big_len] = '\0';
+    s->big_frames++;
+    if (s->big_cb != NULL) {
+        s->big_cb(s->big, s->big_len, s->big_enc, s->big_user);
+    }
+    s->big_len = 0;
+    s->big_need = 0;
+}
+
 bool hr_stream_discard_partial(hr_stream_t *s, const char *why)
 {
-    if (s == NULL || (s->len == 0 && !s->overflowed)) {
+    if (s == NULL) {
+        return false;
+    }
+    if (s->big_need > 0) {
+        big_abandon(s, "big partial");
+        s->len = 0;
+        s->overflowed = false;
+        return true;
+    }
+    if (s->skip_need > 0) {
+        s->skip_need = 0;
+        return true;
+    }
+    if (s->len == 0 && !s->overflowed) {
         return false;
     }
     if (s->enc_need > 0) {
@@ -176,6 +245,36 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
     for (size_t i = 0; i < n; i++) {
         const unsigned char uc = p[i];
         char ch = (char)uc;
+
+        /*
+         * SWALLOWING a block nobody can hold (no side buffer, or too big
+         * for it): its bytes are file data, not frames. The CR that follows
+         * the block then closes an empty line, which is ignored.
+         */
+        if (s->skip_need > 0) {
+            s->skip_need--;
+            continue;
+        }
+
+        /*
+         * BIG FRAME IN PROGRESS - see hr_big_cb. A plaintext block takes
+         * ANY byte (LF, BEL, commas are data). An encoded one keeps the
+         * printable rule of the ")S" transport.
+         */
+        if (s->big_need > 0) {
+            if (s->big_enc && (uc < 0x20 || uc >= 0x7f)) {
+                big_abandon(s, "big interrupted");
+                if (ch != '\r' && ch != '\n') {
+                    s->noise_bytes++;
+                }
+                continue;
+            }
+            s->big[s->big_len++] = ch;
+            if (s->big_len == s->big_need) {
+                big_deliver(s);
+            }
+            continue;
+        }
 
         /*
          * ENCODED FRAME IN PROGRESS. The header declared how many bytes the
@@ -238,7 +337,17 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
              */
             if (s->len == HR_ENC_HDR && s->buf[0] == ')' && s->buf[1] == 'S') {
                 int need = hr_enc_decode_len(s->buf);
-                if (need > HR_ENC_MAX_FRAME) {
+                if (need > HR_ENC_MAX_FRAME && s->big != NULL &&
+                    (size_t)need < s->big_cap) {
+                    /* Too long for the line buffer, fits the side buffer:
+                     * a file block on the encoded transport. */
+                    s->enc_seen = true;
+                    memcpy(s->big, s->buf, HR_ENC_HDR);
+                    s->big_len = HR_ENC_HDR;
+                    s->big_need = (size_t)need;
+                    s->big_enc = true;
+                    s->len = 0;
+                } else if (need > HR_ENC_MAX_FRAME) {
                     s->enc_seen = true;
                     s->enc_need = (size_t)need; /* so the observer sees why */
                     enc_abandon(s, "enc too long");
@@ -269,6 +378,33 @@ void hr_stream_feed(hr_stream_t *s, const void *data, size_t n, hr_frame_cb cb,
                 s->buf[0] = ')';
                 s->buf[1] = 'S';
                 s->len = 2;
+            }
+
+            /*
+             * FILE BLOCK HEADER on the plaintext transport. Checked on each
+             * comma: once "FDFILEBLOCK,<name>,<block>,<nbytes>,<size>," is
+             * complete, exactly <nbytes> data bytes and two checksum digits
+             * follow, then the CR. Move the header to the side buffer and
+             * count them in; with no side buffer, or a block that would not
+             * fit, swallow them (hr_big_cb explains why).
+             */
+            if (ch == ',' && !s->overflowed && s->buf[0] == 'F') {
+                long nbytes = 0;
+                int hdr = hr_fdblock_header_len(s->buf, s->len, &nbytes);
+                if (hdr > 0) {
+                    size_t total = (size_t)hdr + (size_t)nbytes + 2;
+                    if (s->big != NULL && total < s->big_cap) {
+                        memcpy(s->big, s->buf, (size_t)hdr);
+                        s->big_len = (size_t)hdr;
+                        s->big_need = total;
+                        s->big_enc = false;
+                    } else {
+                        s->big_dropped++;
+                        reject(s, "block unheld");
+                        s->skip_need = (size_t)nbytes + 2;
+                    }
+                    s->len = 0;
+                }
             }
             continue;
         }

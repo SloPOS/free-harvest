@@ -273,6 +273,78 @@ static void on_enc(const char *frame, size_t len, void *user)
     }
 }
 
+/*
+ * A whole FDFILEBLOCK frame collected in the caller's side buffer (see
+ * hr_big_cb). Two shapes arrive here:
+ *
+ *   plaintext (6.0.641041): the frame is the block itself;
+ *   encoded (6.0.644170): a ")S" envelope longer than the line buffer. It is
+ *   handed raw to the enc observer like any other (they clamp), then decoded
+ *   IN PLACE - the base64 shrinks 4 chars to 3 bytes and the writer never
+ *   overtakes the reader, so the plaintext lands at the front of the same
+ *   buffer. What comes out is either a block, or an ordinary long frame that
+ *   simply did not fit HR_MAX_FRAME, which goes down the usual path if it
+ *   parses.
+ *
+ * The block goes to whoever registered with hr_session_set_block_sink() -
+ * hr_files, through its ESP glue. Nothing about it is interpreted here.
+ */
+static void on_big(const char *frame, size_t len, bool encoded, void *user)
+{
+    hr_session_t *s = (hr_session_t *)user;
+
+    s->last_rx_ms = s->now_ms;
+    s->link = HR_LINK_UP;
+
+    const char *plain = frame;
+    size_t plen = len;
+    if (encoded) {
+        s->last_enc_ms = s->now_ms;
+        s->last_enc_len = len;
+        s->stream.enc_frames++;
+        s->stream.enc_bytes += len;
+        if (s->enc_observer != NULL) {
+            s->enc_observer(frame, len, s->enc_observer_user);
+        }
+        int pn = hr_enc_decode(frame, len, s->stream.big, s->stream.big_cap);
+        if (pn <= 0) {
+            s->enc_undecoded++;
+            return;
+        }
+        s->enc_decoded++;
+        plain = s->stream.big;
+        plen = (size_t)pn;
+    }
+
+    if (plen > 12 && memcmp(plain, "FDFILEBLOCK,", 12) == 0) {
+        s->frames_in++;
+        s->blocks_in++;
+        if (s->block_fn != NULL) {
+            s->block_fn(plain, plen, s->block_user);
+        }
+        return;
+    }
+    /* Not a block after all: a long ordinary frame. */
+    if (plen < HR_MAX_FRAME && hr_frame_parse(plain, &s->enc_frame)) {
+        on_frame(&s->enc_frame, s);
+    } else if (encoded) {
+        s->enc_undecoded++;
+    } else {
+        s->stream.frames_bad++;
+    }
+}
+
+void hr_session_set_block_sink(hr_session_t *s, char *big, size_t cap,
+                               hr_block_fn fn, void *user)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->block_fn = fn;
+    s->block_user = user;
+    hr_stream_set_big(&s->stream, big, cap, big != NULL ? on_big : NULL, s);
+}
+
 void hr_session_init(hr_session_t *s, hr_tx_fn tx, void *tx_user)
 {
     if (s == NULL) {
@@ -321,7 +393,8 @@ void hr_session_rx(hr_session_t *s, const void *data, size_t n,
         return;
     }
     s->now_ms = now_ms;
-    if (s->stream.len > 0 &&
+    if ((s->stream.len > 0 || s->stream.big_need > 0 ||
+         s->stream.skip_need > 0) &&
         now_ms - s->last_byte_ms > HR_PARTIAL_STALE_MS) {
         hr_stream_discard_partial(&s->stream, "stale");
     }
