@@ -330,6 +330,9 @@ static esp_err_t h_state(httpd_req_t *req)
                      "\"freeze_pct\":%ld,\"freeze_eta_s\":%ld,"
                      "\"phase_pct\":%ld,\"phase_s\":%ld,"
                      "\"vacuum_um\":%ld,\"vacuum_ok\":%s,"
+                     /* STAT type 8 (pump purge before a defrost): seconds
+                      * left in the oil-free pump's purge run, 0 elsewhere. */
+                     "\"purge_s\":%ld,"
                      /* USB-level diagnostics: reachable over WiFi while the
                       * adapter is plugged into the dryer, which the serial
                       * console is not. See hr_usb.h for how to read them. */
@@ -366,6 +369,7 @@ static esp_err_t h_state(httpd_req_t *req)
                      tel_valid ? tel.phase_elapsed_s : 0,
                      tel_valid ? tel.pressure_microns : 0,
                      (tel_valid && tel.pressure_valid) ? "true" : "false",
+                     tel_valid ? tel.purge_remaining_s : 0,
                      hr_usb_mounted() ? "true" : "false",
                      hr_usb_suspended() ? "true" : "false",
                      hr_usb_mount_events(), hr_usb_rx_bytes(),

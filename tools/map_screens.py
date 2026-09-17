@@ -44,11 +44,14 @@ KNOWN = {
     5:  "Drying  (btn 1 end batch)",
     6:  "Final dry  (btn 1 end, 2 more time, 3 less time)",
     7:  "Complete  (btn 1 defrost, 2 +2h dry, 3 no defrost, 5 warm trays)",
+    8:  "Pre-defrost / pump purge  (oil-free pump vents 300 s; buttons unmapped)",
+    9:  "Defrosting  (from the firmware's screen table; never captured)",
+    10: "Defrost complete  (from the firmware's screen table; never captured)",
     15: "Diagnostics",
     17: "Preparing / pre-cool  (btn 3 advance, 4 end batch)",
     31: "CUSTOM recipe config  (values via SENDCUSTOM; buttons unmapped)",
     43: "Candy recipe config  (btn 18 cancel; values go via SENDCANDY)",
-    44: "seen once inside final dry, unmapped",
+    44: "Final dry, one frame at the handover to the timed final dry (= 6)",
 }
 
 # WANTED: button numbers for screens 31 and 43.
@@ -58,7 +61,9 @@ KNOWN = {
 # SENDCANDY / SENDCUSTOM rather than button presses, so the remaining question
 # is which buttons exist at all - Save, Start, Reset, Cancel.
 #
-# Screen 44, seen once inside final dry, is still unidentified.
+# Screen 44 turned out to be the final-dry screen itself: the dryer sends one
+# type-44 frame (and NTFY,44,<seconds>,<mode>,0) when the dry-to-completion
+# stage hands over to the timed final dry, then continues as type 6.
 
 
 def main():

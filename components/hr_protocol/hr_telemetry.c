@@ -93,6 +93,32 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
             out->freeze_pct = out->phase_pct; /* compat alias */
         }
         copy_field(out->mode, sizeof(out->mode), f, 9);
+    } else if (out->type == 44) {
+        /*
+         * Final dry, the moment it switches from "dry to completion" to the
+         * timed final-dry countdown. The dryer emits one type-44 frame with
+         * exactly the type-6 layout (and an NTFY,44,<seconds>,<mode>,0) and
+         * then carries on with type 6. Its own STAT builder treats 44 and 6
+         * as the same case. Captured once, 2026-09-17.
+         */
+        out->phase_pct = hr_frame_field_int(f, 11, 0);
+        copy_field(out->mode, sizeof(out->mode), f, 9);
+    } else if (out->type == 8) {
+        /*
+         * Pre-defrost / pump purge. Short header form (no mode block), so
+         * the screen's own fields follow the [8] status code directly:
+         *   [9]  flags: bit0 pump enabled, bit1 pump-type dependent,
+         *        bit2 oil-free pump venting NOW, bit3/4 defrost-time range
+         *   [10] purge seconds remaining (300 -> 0 while bit2 is set)
+         *   [11] defrost time offered, seconds (7200)
+         * Real frames: STAT,8,0,0,0,40,45735,159639,92830,50,7,300,7200,,
+         * The pressure is the unclamped atmospheric reading here.
+         */
+        long flags = hr_frame_field_int(f, 9, 0);
+        out->purge_active = true;
+        out->purge_pump_on = (flags & 0x4) != 0;
+        out->purge_remaining_s = hr_frame_field_int(f, 10, 0);
+        out->defrost_time_s = hr_frame_field_int(f, 11, 0);
     } else if (out->type == 1) {
         /* Idle frame: mode at [11], version at [12]. */
         copy_field(out->mode, sizeof(out->mode), f, 11);
@@ -106,7 +132,7 @@ bool hr_telemetry_from_stat(const hr_frame_t *f, hr_telemetry_t *out)
      * nonsense: a screen walk showed mode reported as "5" on type 2,
      * "-15" on type 31 and "5" on type 15, because field [11] means
      * something different on each of those screens. STAT is multiplexed on
-     * the type discriminator and only types 1, 4-7 and 17 have been
+     * the type discriminator and only types 1, 4-8, 17 and 44 have been
      * confirmed against real captures.
      *
      * Leaving the field empty is honest; showing a number as if it were a
@@ -223,6 +249,21 @@ void hr_phase_tracker_update(hr_phase_tracker_t *tr, const hr_telemetry_t *t,
      */
     if (t->type == 17) {
         tr->have = true;
+        return;
+    }
+
+    /*
+     * Pump purge before a defrost (type 8): the batch is finished, yet the
+     * dryer's batch-elapsed counter keeps advancing on this screen (real
+     * capture: +311 s over a 5-minute purge). Adopt the value as the new
+     * baseline so the Ready frame that follows is compared against it, but
+     * never call this a run.
+     */
+    if (t->type == 8) {
+        tr->have = true;
+        tr->last_elapsed = t->batch_elapsed_s;
+        tr->last_change_ms = now_ms;
+        tr->running = false;
         return;
     }
 
@@ -368,9 +409,16 @@ hr_phase_t hr_phase_of(const hr_telemetry_t *t)
     case 5:
         return HR_PHASE_DRYING;
     case 6:
+    case 44: /* one-frame variant of 6 at the start of the timed final dry */
         return HR_PHASE_FINAL_DRY;
     case 7:
         return HR_PHASE_COMPLETE;
+    case 8:
+        return HR_PHASE_PUMP_PURGE;
+    case 9:
+        return HR_PHASE_DEFROST;
+    case 10:
+        return HR_PHASE_DEFROST_DONE;
     case 2:
         return HR_PHASE_TRANSITION;
     case 15:
@@ -400,6 +448,9 @@ const char *hr_phase_label(hr_phase_t p)
     case HR_PHASE_DRYING:      return "Drying";
     case HR_PHASE_FINAL_DRY:   return "Final dry";
     case HR_PHASE_COMPLETE:    return "Batch complete";
+    case HR_PHASE_PUMP_PURGE:  return "Pump purge";
+    case HR_PHASE_DEFROST:     return "Defrosting";
+    case HR_PHASE_DEFROST_DONE: return "Defrost complete";
     default:                   return "Unknown";
     }
 }
@@ -417,11 +468,13 @@ size_t hr_telemetry_to_json(const hr_telemetry_t *t, char *buf, size_t cap)
                      "{\"type\":%d,\"temp_f\":%ld,\"pressure\":%ld,"
                      "\"elapsed_s\":%ld,\"mode\":\"%s\",\"prep_s\":%ld,"
                      "\"freeze_pct\":%ld,\"phase_pct\":%ld,"
-                     "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s}",
+                     "\"phase_s\":%ld,\"vacuum_um\":%ld,\"vacuum_ok\":%s,"
+                     "\"purge_s\":%ld}",
                      t->type, t->temperature_f, t->pressure_raw,
                      t->batch_elapsed_s, mode, t->prep_remaining_s,
                      t->freeze_pct, t->phase_pct, t->phase_elapsed_s,
-                     t->pressure_microns, t->pressure_valid ? "true" : "false");
+                     t->pressure_microns, t->pressure_valid ? "true" : "false",
+                     t->purge_remaining_s);
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }
