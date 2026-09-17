@@ -1519,3 +1519,95 @@ been sent a STATUS, which makes it the one untried path to telemetry.
 Added to the handshake and to the retry set in 1.0.5.6. Side benefit on a
 healthy dryer: first telemetry arrives in about 3 seconds instead of waiting
 up to 15 for the machine to volunteer it.
+
+## Screens 8, 9, 10 and 44: the defrost path, and how STAT is built (2026-09-17)
+
+Two sources this time, and they agree. A 6.0.644170 LARGE unit sent 22 frames
+of **STAT type 8** (07:05-07:10Z) after its owner pressed DEFROST on the
+Complete screen. And the 641041 firmware image has a screen factory at
+`0x404c8`: a `tbh` jump on `id-1` for ids 1..43, each branch doing `new` and
+storing a vtable, so the class name falls out of the Itanium RTTI
+(`vtable-4 -> typeinfo`, `typeinfo+4 -> name`). The STAT tail formats live in
+a second `tbh` at `0x2d530`, indexed the same way. Every frame we have ever
+captured fits that table.
+
+### How a STAT frame is put together
+
+Three pieces, and the middle one is optional:
+
+    STAT,[0]type,[1..3]=0,0,0,[4]temp,[5]pressure,[6]batch_s,[7]phase_s,[8]status,
+         (long form only: [9]mode,[10],[11]phase%,[12],[13],[14]flags,)
+         <screen tail>
+
+The header formatter (`0x2cdac`) picks one of two strings on a byte at
+`0x2000458e`: the long `STAT,%d,%s,%d,%d,%ld,%ld,%d,%s,%s,` with the mode block,
+or the short `STAT,%d,%s,%d,%d,%ld,%ld,%d,%s,` without it. Screens 1, 7 and 8
+use the short form, which is why their `[9]` is already the screen's own first
+field and why `[11]` on type 1 is the mode, not a percentage. Screens
+2/4/5/6/17/44 use the long form.
+
+### The defrost screens
+
+| STAT type | class (RTTI) | form | tail | captured |
+|---|---|---|---|---|
+| **8** | `DefrostPreScreen` ("PreDefrost") | short | `%d,%d,%d,` = flags, purge seconds, defrost time | yes, 22 frames |
+| 9 | `DefrostScreen` | long | `%d,%d,%d,` | no |
+| 10 | `DefrostCompleteScreen` | - | none | no |
+| **44** | same branch as 6 (`FinalDryScreen`) | long | as 6 | yes, 1 frame |
+
+**Type 8 is the pump purge.** On a dryer with the oil-free pump the pre-defrost
+screen runs the pump for five minutes ("Venting Oil-Free Pump - Pump will run
+for 5 minutes.") while the owner sets "Defrost Time:". The draw routine
+(`0x35180`) reads the same object fields the tail prints, so the columns are
+not a guess:
+
+    STAT,7,0,0,0,41,46040,139303,92830,48,312,0,0,90,Auto,,   Complete
+    STAT,8,0,0,0,41,46221,159616,92830,50,3,0,7200,,          screen open, pump idle
+    STAT,8,0,0,0,40,45735,159639,92830,50,7,300,7200,,        pump started
+    STAT,8,0,0,0,40,44847,159654,92830,50,7,285,7200,,        -15 s per frame
+    STAT,8,0,0,0,36,39793,159927,92830,50,7,12,7200,,
+    STAT,1,0,0,0,36,38215,159939,92830,38,1,1,Auto,v6.5,,     Ready, with NTFY,1,0, ,0,
+
+- `[9]` flags: bit0 pump enabled, bit1 depends on the pump type, **bit2 = pump
+  venting right now** (3 -> 7 when it started), bit3/bit4 bracket the offered
+  defrost time (> 21599 s, <= 900 s).
+- `[10]` purge seconds remaining, 300 -> 0 while bit2 is set, 0 before.
+- `[11]` defrost time offered, seconds (7200 here).
+- `[6]`, the batch-elapsed counter, **keeps advancing on this screen** (+311 s
+  over the 307 s purge) although the batch is over, then freezes on Ready. The
+  phase tracker adopts it as a baseline and does not call the purge a run.
+- No `NTFY` on entry; `NTFY,1,0, ,0,` on exit.
+- Buttons on this screen: CONTINUE, TURN PUMP OFF, NO DEFROST. Their CLICK
+  numbers are not mapped.
+
+Free Harvest maps 8 to `HR_PHASE_PUMP_PURGE` and exposes `[10]` as `purge_s`
+in `/api/state` and the MQTT state JSON; 9 and 10 get the phases `DEFROST`
+and `DEFROST_DONE` on the strength of the class names alone - nobody has
+captured them yet, so `tools/map_screens.py` still wants those frames.
+
+**Type 44 is final dry.** Both the sender (`0x2db48`, `cmp #0x2c` next to
+`cmp #6`) and the tail table have a single branch for 6 and 44. The dryer emits
+exactly one type-44 frame, in the type-6 layout, at the handover from "dry to
+completion" to the timed final dry, together with `NTFY,44,7200,Auto,0,`, and
+then continues as type 6. That is the "seen once inside final dry" screen from
+the 2026-08-21 notes; it is not a separate screen. Status code `[8]` is 46
+before the handover and 47 after.
+
+### Two side findings
+
+**`[8]` is a panel status code**, not a temperature and not the screen id. It
+is `*0x2000694c`, recomputed by `0x47710` before every send: error flags first
+(55, 53, 54), otherwise a `tbb` on the current screen id with sub-cases on
+state. The values we have seen all sit in that table: 38 Ready, 42 Preparing,
+43 Load trays, 45 Freezing (variant 71), 46 Drying and dry-to-completion,
+47 timed final dry, 48 Complete (variant 61), 50 Pre-defrost. The 60 and 68 in
+the simulator's freeze/final frames (`tools/dryer_sim_full.py`, from the
+641041 captures) are variants of the same table.
+
+**The `10000` pressure is a clamp, not a placeholder.** The mode-block
+formatter (`0x2cbc4`, at `0x2cc1e`) does `if (p > 10000) p = 10000` before
+printing `[5]`. Since only the long form has a mode block, long-form screens
+(Preparing, Freezing at atmosphere) always show exactly 10000, while the
+short-form screens 1, 7 and 8 print the raw sensor value - 39000..155000 at
+atmosphere. The parser's reading (`>= 10000` means no vacuum) is unchanged;
+the explanation was not right before.
