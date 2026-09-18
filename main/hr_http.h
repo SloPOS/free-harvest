@@ -28,7 +28,7 @@
 
 /* Free Harvest release version, shown in Settings so users can report it.
  * Keep this in step with the git tag when cutting a release. */
-#define FREEHARVEST_VERSION "1.2.1"
+#define FREEHARVEST_VERSION "1.2.2"
 
 /*
  * Provide the mutex that guards the shared history object. MUST be called
